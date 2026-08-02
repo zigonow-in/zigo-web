@@ -20306,6 +20306,11 @@ document.addEventListener("click", async (event) => {
     if (isCustomerBackButton) {
       state.customerScheduleSheetOpen = false;
       state.customerPaymentSheetOpen = false;
+      if (previousCustomerView === "track") {
+        replaceCustomerHistoryView("home");
+        render();
+        return;
+      }
       if (previousCustomerView === "track" && nextCustomerView === "bookings") {
         replaceCustomerHistoryView("bookings");
         render();

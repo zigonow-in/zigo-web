@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zigo Admin</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css?v=booking-assignment-ring-v4-20260722" />
+  </head>
+  <body>
+    <main id="loginView" class="auth-page">
+      <section class="auth-card">
+        <img class="auth-card-logo" src="./assets/zigo-logo-new.png" alt="ZIGO" />
+        <h1 class="auth-title">Get Started</h1>
+        <p class="auth-copy">Sign in to manage ZIGO.</p>
+        <div id="loginAlert" class="alert alert-danger d-none"></div>
+        <form id="loginForm" class="vstack gap-3">
+          <input class="form-control form-control-lg" name="identifier" value="admin@zigo.local" required />
+          <input class="form-control form-control-lg" name="password" type="password" value="SuperAdmin@123" required />
+          <button id="loginButton" class="btn btn-primary btn-lg">Proceed</button>
+        </form>
+      </section>
+    </main>
+
+    <main id="adminView" class="admin-shell d-none">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <img class="sidebar-logo" src="./assets/zigo-logo-new.png" alt="ZIGO" />
+          <button class="sidebar-close" id="sidebarCloseButton" type="button" aria-label="Close navigation">×</button>
+        </div>
+        <nav class="nav-menu">
+          <div class="nav-group open">
+            <button class="nav-item active" data-section="dashboard" type="button">
+              <span class="nav-icon">DB</span>Dashboard<span class="nav-chevron">Live</span>
+            </button>
+            <div class="nav-children">
+              <button class="nav-child active" data-section="dashboard" type="button">Overview</button>
+            </div>
+          </div>
+          <div class="nav-group nav-collapsible" data-nav-group="categoryMaster">
+            <button class="nav-item" data-nav-toggle="categoryMaster" type="button" aria-expanded="false">
+              <span class="nav-icon">CM</span>Category Master<span class="nav-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div class="nav-children">
+              <button class="nav-child" data-section="categoryServices" type="button">Service Master</button>
+              <button class="nav-child" data-section="categories" type="button">Categories</button>
+              <button class="nav-child" data-section="categoryPrice" type="button">Category Price</button>
+              <button class="nav-child" data-section="bookingEngine" type="button">Booking Engine</button>
+              <button class="nav-child" data-section="taxMaster" type="button">Tax Master</button>
+              <button class="nav-child" data-section="paymentMode" type="button">Payment Methods</button>
+            </div>
+          </div>
+          <div class="nav-group nav-collapsible" data-nav-group="reports">
+            <button class="nav-item" data-nav-toggle="reports" type="button" aria-expanded="false">
+              <span class="nav-icon">RP</span>Reports<span class="nav-chevron" aria-hidden="true">â–¾</span>
+            </button>
+            <div class="nav-children">
+              <button class="nav-child" data-section="bookingsReport" type="button">Bookings Report</button>
+              <button class="nav-child" data-section="customerReport" type="button">Customer Report</button>
+              <button class="nav-child" data-section="assistantReport" type="button">Assistant Report</button>
+              <button class="nav-child" data-section="assistantTaskReport" type="button">Assistant Task Report</button>
+              <button class="nav-child" data-section="reviewsReport" type="button">Reviews Report</button>
+            </div>
+          </div>
+          <div class="nav-group nav-root-list open">
+            <div class="nav-children">
+              <button class="nav-child" data-section="operations" type="button">Operations</button>
+              <button class="nav-child nav-child-with-badge" data-section="bookings" type="button">
+                <span>Bookings</span><span id="pendingAssignmentCount" class="nav-count-badge d-none" aria-label="Bookings awaiting assignment">0</span>
+              </button>
+              <button class="nav-child" data-section="payments" type="button">Payments</button>
+              <button class="nav-child" data-section="customerDisputes" type="button">Customer Disputes</button>
+              <button class="nav-child" data-section="supportTickets" type="button">Customer Support</button>
+              <button class="nav-child" data-section="bookingMaster" type="button">Booking Master</button>
+              <button class="nav-child" data-section="customers" type="button">Customers</button>
+              <button class="nav-child" data-section="masters" type="button">Masters</button>
+              <button class="nav-child" data-section="locations" type="button">Locations</button>
+              <button class="nav-child" data-section="services" type="button">Services</button>
+              <button class="nav-child" data-section="clusterServices" type="button">Cluster Services</button>
+              <button class="nav-child" data-section="bookingTypes" type="button">Booking Type Master</button>
+              <button class="nav-child" data-section="surgeMaster" type="button">Surge Master</button>
+              <button class="nav-child" data-section="priceMaster" type="button">Price Master</button>
+              <button class="nav-child" data-section="taxMaster" type="button">Tax Master</button>
+              <button class="nav-child" data-section="stores" type="button">Stores</button>
+              <button class="nav-child" data-section="assistant" type="button">Assistant</button>
+              <button class="nav-child" data-section="vehicles" type="button">Vehicle Master</button>
+              <button class="nav-child" data-section="verification" type="button">Verification</button>
+              <button class="nav-child" data-section="users" type="button">Users</button>
+              <button class="nav-child" data-section="userRoles" type="button">User Roles</button>
+              <button class="nav-child" data-section="roles" type="button">Roles</button>
+              <button class="nav-child" data-section="modules" type="button">Modules</button>
+              <button class="nav-child" data-section="systemControl" type="button">System Control</button>
+              <button class="nav-child" data-section="bookingEngine" type="button">Booking Engine</button>
+              <button class="nav-child" data-section="bookingEngineSettings" type="button">Booking Engine Settings</button>
+              <button class="nav-child" data-section="settings" type="button">Settings</button>
+            </div>
+          </div>
+        </nav>
+      </aside>
+
+      <section class="content-shell">
+        <header class="topbar">
+          <div class="topbar-title">
+            <button id="menuToggleButton" class="menu-toggle" type="button" aria-label="Open navigation"><span></span><span></span><span></span></button>
+            <img class="header-logo" src="./assets/zigo-logo-new.png" alt="ZIGO" />
+            <div><div class="eyebrow">Admin Console</div><h1 id="pageTitle" class="page-title">Dashboard</h1></div>
+          </div>
+          <div class="topbar-actions">
+            <button id="bookingBellButton" class="booking-bell-button d-none" type="button" title="Live booking notifications" aria-label="Live booking notifications">
+              <span class="booking-bell-icon" aria-hidden="true"></span>
+              <span id="bookingBellCount" class="booking-bell-count d-none">0</span>
+            </button>
+            <button id="refreshCurrentButton" class="btn btn-outline-primary btn-sm" type="button">Refresh</button>
+            <button id="profileChipButton" class="user-chip" type="button"><div id="signedInAvatar" class="user-avatar">ZA</div><div><div id="signedInUser" class="user-name"></div><div id="signedInRole" class="user-role"></div></div></button>
+            <button id="logoutButton" class="btn btn-light btn-sm" type="button">Logout</button>
+          </div>
+        </header>
+
+        <div class="content-area">
+          <div id="appAlert" class="alert alert-danger d-none"></div>
+          <section id="dashboardSection" class="page-section"></section>
+          <section id="operationsSection" class="page-section d-none"></section>
+          <section id="bookingsSection" class="page-section d-none"></section>
+          <section id="paymentsSection" class="page-section d-none"></section>
+          <section id="bookingsReportSection" class="page-section d-none"></section>
+          <section id="customerReportSection" class="page-section d-none"></section>
+          <section id="assistantReportSection" class="page-section d-none"></section>
+          <section id="assistantTaskReportSection" class="page-section d-none"></section>
+          <section id="reviewsReportSection" class="page-section d-none"></section>
+          <section id="customerDisputesSection" class="page-section d-none"></section>
+          <section id="supportTicketsSection" class="page-section d-none"></section>
+          <section id="bookingMasterSection" class="page-section d-none"></section>
+          <section id="customersSection" class="page-section d-none"></section>
+          <section id="customerAddressesSection" class="page-section d-none"></section>
+          <section id="mastersSection" class="page-section d-none"></section>
+          <section id="locationsSection" class="page-section d-none"></section>
+          <section id="servicesSection" class="page-section d-none"></section>
+          <section id="categoryServicesSection" class="page-section d-none"></section>
+          <section id="categoriesSection" class="page-section d-none"></section>
+          <section id="categoryPriceSection" class="page-section d-none"></section>
+          <section id="bookingEngineSection" class="page-section d-none"></section>
+          <section id="clusterServicesSection" class="page-section d-none"></section>
+          <section id="bookingTypesSection" class="page-section d-none"></section>
+          <section id="surgeMasterSection" class="page-section d-none"></section>
+          <section id="priceMasterSection" class="page-section d-none"></section>
+          <section id="taxMasterSection" class="page-section d-none"></section>
+          <section id="paymentModeSection" class="page-section d-none"></section>
+          <section id="storesSection" class="page-section d-none"></section>
+          <section id="assistantSection" class="page-section d-none"></section>
+          <section id="vehiclesSection" class="page-section d-none"></section>
+          <section id="verificationSection" class="page-section d-none"></section>
+          <section id="modulesSection" class="page-section d-none"></section>
+          <section id="systemControlSection" class="page-section d-none"></section>
+          <section id="bookingEngineSettingsSection" class="page-section d-none"></section>
+          <section id="rolesSection" class="page-section d-none"></section>
+          <section id="usersSection" class="page-section d-none"></section>
+          <section id="userRolesSection" class="page-section d-none"></section>
+          <section id="settingsSection" class="page-section d-none"></section>
+        </div>
+      </section>
+    </main>
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+    <div id="profileModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="profileModalTitle">
+      <div class="map-modal-card booking-modal-card profile-modal-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Profile</p>
+            <h2 id="profileModalTitle">My Profile</h2>
+          </div>
+          <button id="closeProfileModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="profileModalAlert" class="alert alert-danger d-none"></div>
+          <form id="profilePictureForm" class="master-form stack mb-3">
+            <label class="form-label">Profile Picture
+              <div class="upload-box" data-upload-box="signedInProfilePicture" data-upload-kind="image">
+                <input type="hidden" name="imageUrl" value="">
+                <input id="signedInProfilePictureUploadInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-image-upload="signedInProfilePicture">
+                <div class="upload-icon">UP</div>
+                <div class="upload-title">Drag and Drop Files</div>
+                <button class="btn btn-primary btn-sm" type="button" data-action="browse-image" data-target="signedInProfilePictureUploadInput">Browse</button>
+                <div id="signedInProfilePictureUploadPreview" class="upload-preview"></div>
+              </div>
+            </label>
+            <button class="btn btn-primary" type="submit">Update Profile Pic</button>
+          </form>
+          <form id="profilePasswordForm" class="master-form stack">
+            <label class="form-label">Current Password <input class="form-control" name="currentPassword" type="password" autocomplete="current-password" required /></label>
+            <label class="form-label">New Password <input class="form-control" name="newPassword" type="password" autocomplete="new-password" minlength="8" required /></label>
+            <button class="btn btn-primary" type="submit">Reset Password</button>
+          </form>
+        </div>
+      </div>
+    </div>
+    <div id="passwordShareModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="passwordShareModalTitle">
+      <div class="map-modal-card booking-modal-card password-share-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Password Share</p>
+            <h2 id="passwordShareModalTitle">Reset & Share Password</h2>
+          </div>
+          <button id="closePasswordShareModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="passwordShareModalAlert" class="alert alert-danger d-none"></div>
+          <form id="passwordShareForm" class="master-form stack">
+            <input type="hidden" name="userId" />
+            <p id="passwordShareModalText" class="helper-text mb-0"></p>
+            <div id="passwordShareEmailVerifySection" class="password-share-verify d-none">
+              <label class="form-label">Enter Email to verify <input class="form-control" name="verifyEmail" type="email" autocomplete="email" placeholder="Enter email address" /></label>
+              <button class="btn btn-light" id="passwordShareSendEmailCodeButton" type="button">Send Verification Code</button>
+              <div id="passwordShareEmailCodeRow" class="otp-channel-entry d-none">
+                <input class="form-control" name="emailVerificationCode" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" placeholder="Enter code shared to email" />
+                <button class="btn btn-primary" id="passwordShareVerifyEmailButton" type="button">Verify Email</button>
+              </div>
+            </div>
+            <label class="form-label"><span id="passwordShareAdminLabel">Enter your password</span> <input class="form-control" name="superAdminPassword" type="password" autocomplete="current-password" required /></label>
+            <label class="form-label">New User Password <input class="form-control" name="newPassword" type="password" autocomplete="new-password" minlength="8" required /></label>
+            <div class="form-actions">
+              <button class="btn btn-primary" id="passwordShareSubmitButton" type="submit">Reset & Share</button>
+              <button class="btn btn-light" id="cancelPasswordShareButton" type="button">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+    <div id="polygonModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="polygonModalTitle">
+      <div class="map-modal-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Cluster Boundary</p>
+            <h2 id="polygonModalTitle">Polygon Map</h2>
+          </div>
+          <button id="closePolygonModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div id="polygonMapAlert" class="alert alert-danger d-none"></div>
+        <div id="polygonMapWrap" class="polygon-map-wrap">
+          <div id="polygonMap" class="polygon-map"></div>
+          <svg id="polygonOverlay" class="polygon-overlay" aria-hidden="true"></svg>
+        </div>
+        <pre id="polygonWktPreview" class="polygon-wkt"></pre>
+      </div>
+    </div>
+    <div id="bookingModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="bookingModalTitle">
+      <div class="map-modal-card booking-modal-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Admin Booking</p>
+            <h2 id="bookingModalTitle">Create Booking For Customer</h2>
+          </div>
+          <button id="closeBookingModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="bookingModalAlert" class="alert alert-danger d-none"></div>
+          <div class="booking-search">
+            <input id="bookingCustomerSearchInput" class="form-control" placeholder="Search customer by name, mobile number, or email" />
+            <button id="bookingCustomerSearchButton" class="btn btn-primary" type="button">Search</button>
+          </div>
+          <div id="bookingCustomerResults" class="table-responsive"></div>
+          <form id="adminBookingForm" class="master-form stack mt-3">
+            <input type="hidden" name="customerId" />
+            <input class="form-control" name="customerLabel" placeholder="Selected customer" readonly />
+            <select class="form-select" name="clusterId" required></select>
+            <select class="form-select" name="categoryId"><option value="">Select Category</option></select>
+            <div id="adminBookingPriceBreakdown" class="price-breakdown d-none"></div>
+            <textarea class="form-control" name="address" rows="2" placeholder="Customer address / selected map location" required></textarea>
+            <div class="master-form compact mb-0">
+              <input class="form-control" name="longitude" placeholder="Longitude" />
+              <input class="form-control" name="latitude" placeholder="Latitude" />
+              <input class="form-control" name="estimatedAmountPaise" type="number" min="0" value="0" placeholder="Amount paise" readonly />
+            </div>
+            <input class="form-control" name="durationMinutes" type="number" min="1" value="30" placeholder="Duration minutes" />
+            <textarea class="form-control" name="notes" rows="2" placeholder="Booking notes"></textarea>
+            <button class="btn btn-primary">Create Booking</button>
+          </form>
+        </div>
+      </div>
+    </div>
+    <div id="assignBookingModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="assignBookingModalTitle">
+      <div class="map-modal-card booking-modal-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Booking Assignment</p>
+            <h2 id="assignBookingModalTitle">Assign Booking To Assistant</h2>
+          </div>
+          <button id="closeAssignBookingModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="assignBookingModalAlert" class="alert alert-danger d-none"></div>
+          <div id="assignBookingAssistantList" class="booking-assistant-picker-list"></div>
+          <form id="assignBookingForm" class="master-form stack">
+            <input type="hidden" name="serviceRequestId" />
+            <input type="hidden" name="assistantId" />
+            <input type="hidden" name="reason" value="Manual assignment from bookings page" />
+          </form>
+        </div>
+      </div>
+    </div>
+    <div id="bookingInfoModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="bookingInfoModalTitle">
+      <div class="map-modal-card booking-modal-card booking-info-modal-card">
+        <div class="map-modal-header">
+          <div>
+            <p id="bookingInfoModalKind">Booking</p>
+            <h2 id="bookingInfoModalTitle">Details</h2>
+          </div>
+          <button class="btn btn-light btn-sm" data-action="close-booking-info-modal" type="button">Close</button>
+        </div>
+        <div id="bookingInfoModalBody" class="booking-modal-body"></div>
+      </div>
+    </div>
+    <div id="bookingMasterStoreModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="bookingMasterStoreModalTitle">
+      <div class="map-modal-card booking-modal-card booking-store-detail-modal">
+        <div class="map-modal-header">
+          <div>
+            <p>Booking Master Store</p>
+            <h2 id="bookingMasterStoreModalTitle">Store Details</h2>
+          </div>
+          <button id="closeBookingMasterStoreModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div id="bookingMasterStoreModalBody" class="booking-modal-body"></div>
+      </div>
+    </div>
+    <div id="vehicleAllotModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="vehicleAllotModalTitle">
+      <div class="map-modal-card booking-modal-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Allot Vehicle</p>
+            <h2 id="vehicleAllotModalTitle">Allot Vehicle</h2>
+          </div>
+          <button id="closeVehicleAllotModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="vehicleAllotModalAlert" class="alert alert-danger d-none"></div>
+          <div class="booking-search">
+            <input id="vehicleAssistantSearchInput" class="form-control" placeholder="Search assistant by name, mobile number, city, zone, or cluster" />
+            <button id="vehicleAssistantSearchButton" class="btn btn-primary" type="button">Search</button>
+          </div>
+          <div class="master-form compact mt-2 mb-3">
+            <select id="vehicleAssistantCityFilter" class="form-select"><option value="">City filter</option></select>
+            <select id="vehicleAssistantZoneFilter" class="form-select"><option value="">Zone filter</option></select>
+            <select id="vehicleAssistantClusterFilter" class="form-select"><option value="">Cluster filter</option></select>
+          </div>
+          <div id="vehicleAssistantResults" class="table-responsive"></div>
+        </div>
+      </div>
+    </div>
+    <div id="assistantMasterEditModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="assistantMasterEditModalTitle">
+      <div class="map-modal-card booking-modal-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Assistant</p>
+            <h2 id="assistantMasterEditModalTitle">Edit Assistant</h2>
+          </div>
+          <button id="closeAssistantMasterEditModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="assistantMasterEditModalAlert" class="alert alert-danger d-none"></div>
+          <div id="assistantMasterEditModalBody"></div>
+        </div>
+      </div>
+    </div>
+    <div id="assistantLogsModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="assistantLogsModalTitle">
+      <div class="map-modal-card booking-modal-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Assistant</p>
+            <h2 id="assistantLogsModalTitle">Assistant Logs</h2>
+          </div>
+          <button id="closeAssistantLogsModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="assistantLogsModalBody"></div>
+        </div>
+      </div>
+    </div>
+    <div id="otpVerifyModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="otpVerifyModalTitle">
+      <div class="map-modal-card booking-modal-card otp-modal-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Verification Code</p>
+            <h2 id="otpVerifyModalTitle">Verify User Code</h2>
+          </div>
+          <button id="closeOtpVerifyModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="otpVerifyModalAlert" class="alert alert-danger d-none"></div>
+          <form id="otpVerifyForm" class="master-form stack">
+            <input type="hidden" name="userId" />
+            <p id="otpVerifyModalText" class="helper-text mb-0"></p>
+            <div id="otpVerifyInputs" class="otp-channel-grid"></div>
+            <div class="form-actions">
+              <button class="btn btn-light" id="resendOtpButton" type="button">Send/Re-send Verification Code</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+    <div id="imagePreviewModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="imagePreviewModalTitle">
+      <div class="image-preview-card">
+        <div class="map-modal-header">
+          <div>
+            <p id="imagePreviewKind">Image Preview</p>
+            <h2 id="imagePreviewModalTitle">Preview</h2>
+          </div>
+          <div class="preview-modal-actions">
+            <select id="documentPreviewStatusSelect" class="form-select form-select-sm d-none" aria-label="Document status">
+              <option value="verified">● Verified</option>
+              <option value="verifying">● Verifying</option>
+              <option value="rejected">● Rejected</option>
+            </select>
+            <input id="documentPreviewReuploadInput" class="d-none" type="file" accept="application/pdf,image/png,image/jpeg,image/webp,image/gif" />
+            <button id="documentPreviewReuploadButton" class="btn btn-light btn-sm d-none" data-action="reupload-assistant-doc" type="button">Re-upload</button>
+            <button id="documentPreviewStatusSaveButton" class="btn btn-primary btn-sm d-none" data-action="save-assistant-doc-status" type="button">Update</button>
+            <button id="documentPreviewDeleteButton" class="btn btn-outline-danger btn-sm d-none" data-action="delete-assistant-doc" type="button">Delete</button>
+            <button id="previewPrevButton" class="btn btn-light btn-sm d-none" data-action="assistant-doc-preview-prev" type="button">Prev</button>
+            <button id="previewNextButton" class="btn btn-light btn-sm d-none" data-action="assistant-doc-preview-next" type="button">Next</button>
+            <button id="closeImagePreviewModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+          </div>
+        </div>
+        <div id="imagePreviewAlert" class="alert d-none"></div>
+        <div class="image-preview-body">
+          <img id="imagePreviewLarge" class="image-preview-large" src="" alt="Large preview" />
+          <iframe id="documentPreviewFrame" class="document-preview-frame d-none" title="Document preview"></iframe>
+          <a id="documentPreviewLink" class="btn btn-primary btn-sm d-none" target="_blank" rel="noreferrer">Open Document</a>
+        </div>
+      </div>
+    </div>
+    <script src="./app.js?v=booking-assignment-ring-v6-20260722"></script>
+  </body>
+</html>

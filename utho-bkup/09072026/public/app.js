@@ -1,0 +1,17494 @@
+const state = {
+  token: localStorage.getItem("zigoAdminToken"),
+  refreshToken: localStorage.getItem("zigoAdminRefreshToken"),
+  user: JSON.parse(localStorage.getItem("zigoAdminUser") || "null"),
+  roles: JSON.parse(localStorage.getItem("zigoAdminRoles") || "[]"),
+  section: "dashboard"
+};
+
+const $ = (selector) => document.querySelector(selector);
+const appAlert = $("#appAlert");
+const pageTitle = $("#pageTitle");
+const signedInUser = $("#signedInUser");
+const signedInRole = $("#signedInRole");
+const signedInAvatar = $("#signedInAvatar");
+const bookingBellButton = $("#bookingBellButton");
+const bookingBellCount = $("#bookingBellCount");
+const cache = {
+  modules: [],
+  roles: [],
+  documentTypes: [],
+  assistants: [],
+  clusters: [],
+  states: [],
+  cities: [],
+  zones: [],
+  services: [],
+  categories: [],
+  categoryPrices: [],
+  bookingEngineRules: [],
+  bookingEngineQuickReplies: [],
+  bookingTypes: [],
+  clusterServices: [],
+  clusterCategories: [],
+  clusterBookingTypes: [],
+  stores: [],
+  storeCategories: [],
+  storeKeywords: [],
+  vehicleMasters: [],
+  assistantMasters: []
+};
+const BASE_PATH = window.location.pathname.startsWith("/admin") ? "/admin" : "";
+
+// Every path in this file that points back at our own server - API endpoints,
+// SSE streams, and uploaded-file previews returned by the backend - is written
+// as root-relative ("/masters/services", "/uploads/x.jpg"). That is correct
+// on localhost, but once nginx mounts this whole app under /admin in
+// production those same root-relative paths resolve one level too high and
+// silently 404. Rather than hand-gluing BASE_PATH onto every call site
+// scattered through this file (which is exactly how the master-data delete
+// buttons and the customer/assistant share links broke), every one of those
+// paths is funnelled through this single helper. It is idempotent (safe to
+// call on a path that already has the prefix) and leaves fully-qualified
+// URLs - Google Maps links, WhatsApp links, data/blob URIs - untouched, so it
+// never mangles a link that was never meant to be prefixed.
+function withBasePath(path) {
+  const value = String(path == null ? "" : path);
+  if (!BASE_PATH || !value) return value;
+  if (/^([a-z][a-z0-9+.-]*:)?\/\//i.test(value) || value.startsWith("data:") || value.startsWith("blob:")) {
+    return value;
+  }
+  return value.startsWith(BASE_PATH) ? value : `${BASE_PATH}${value}`;
+}
+
+
+let editingModuleId = null;
+let editingStateId = null;
+let editingCityId = null;
+let editingZoneId = null;
+let editingClusterId = null;
+let editingServiceId = null;
+let editingCategoryId = null;
+let editingCategoryMasterId = null;
+let editingCategoryPriceId = null;
+let editingBookingEngineRuleId = null;
+let editingBookingEngineQuickReplyId = null;
+let serviceCategoryFilters = { search: "", serviceId: "" };
+let categoryPriceFilters = { search: "", scopeType: "", stateId: "", cityId: "", zoneId: "", clusterId: "", categoryId: "", status: "" };
+let bookingEngineFilters = { search: "", scopeType: "", stateId: "", cityId: "", zoneId: "", clusterId: "", categoryId: "", status: "" };
+let bookingEngineQuickReplyFilters = { search: "", actor: "", bookingStage: "", actionType: "", status: "" };
+let editingBookingTypeId = null;
+let editingSurgeRuleId = null;
+let editingPriceRuleId = null;
+let editingStoreId = null;
+let editingStoreCategoryId = null;
+let editingStoreKeywordId = null;
+let editingVehicleMasterId = null;
+let editingUserId = null;
+let allotVehicleId = null;
+let clusterReportPage = 1;
+let assistantStatusTab = "all";
+let assistantAvailabilityTab = "all";
+let assistantActiveTabGroup = "lifecycle";
+let assistantPage = 1;
+let assistantPageSize = 10;
+let assistantOnlineTimer = null;
+let assistantDocPreviewState = { assistantId: "", documentId: "", replacementFile: null };
+let olaMapsSdkPromise = null;
+let polygonMapInstance = null;
+let appAlertTimer = null;
+let bookingMasterSelectedCustomer = null;
+let bookingMasterSearchTimer = null;
+let bookingMasterLocationSearchTimer = null;
+let bookingMasterStoreSearchTimer = null;
+let bookingMasterManualMapSyncTimer = null;
+let bookingMasterMapPinSyncTimer = null;
+let bookingMasterMapPinFrame = null;
+let bookingMasterCustomerResults = [];
+let bookingMasterAddresses = [];
+let bookingMasterSelectedLocation = null;
+let bookingMasterServiceability = null;
+let bookingMasterMapInstance = null;
+let bookingMasterStoreMapInstance = null;
+let bookingMasterMapSelectionFitDone = false;
+let bookingMasterManualLatLngText = "";
+let bookingMasterWhatsappLocationText = "";
+let bookingMasterLocationSearchText = "";
+let bookingMasterLocationSearchResults = [];
+let bookingMasterLocationSearchLoading = false;
+let bookingMasterLocationSearchError = "";
+let bookingMasterPhase = "location";
+let bookingMasterClusterServices = [];
+let bookingMasterClusterCategories = [];
+let bookingMasterPriceRules = [];
+let bookingMasterCartMixSetting = { personalAssistantServiceId: null, allowedWithMode: "none", allowedServiceIds: [] };
+let bookingMasterSelectedServiceId = "";
+let bookingMasterSelectedCategoryId = "";
+let bookingMasterCategorySearchText = "";
+let bookingMasterStoreSearchText = "";
+let bookingMasterStores = [];
+let bookingMasterStoreCategories = [];
+let bookingMasterStoreKeywords = [];
+let bookingMasterCartItems = [];
+let bookingMasterQuote = null;
+let bookingMasterQuoteLoading = false;
+let bookingMasterQuoteError = "";
+let bookingMasterQuoteRequestId = 0;
+let customerAddressSelectedCustomer = null;
+let customerAddressRows = [];
+let customerPreviousUsedLocationRows = [];
+let editingCustomerAddressId = null;
+let customerAddressEditorOpen = false;
+let customerAddressSaveAsPreviousLocation = null;
+let customerAddressSelectedLocation = null;
+let customerAddressSearchResults = [];
+let customerAddressSearchText = "";
+let customerAddressSearchTimer = null;
+let customerAddressMapInstance = null;
+let customerAddressMapSyncTimer = null;
+let customerAddressMapPollTimer = null;
+let customerAddressLastMapSyncKey = "";
+let customerAddressLastPointerLatLng = null;
+let customerAddressLivePinLocation = null;
+let customerAddressResolvedMap = null;
+let customerAddressMapEventsBound = false;
+let customerAddressSimpleMap = null;
+let customerAddressPersistentClusters = [];
+let customerAddressServiceability = null;
+let bookingMasterDurationMinutes = 30;
+let bookingMasterSelectedScheduleDate = "";
+let bookingMasterSelectedScheduleTime = "";
+let bookingMasterSelectedSchedulePeriod = "morning";
+let bookingMasterAvailabilityDecision = null;
+let bookingMasterAvailabilityRequestId = 0;
+let bookingMasterAssistantWidgetTab = "all";
+let bookingMasterAssistantWidgetExpanded = false;
+let bookingMasterAssistantWidgetDrag = null;
+let bookingMasterAssistantWidgetClickSuppressed = false;
+let bookingMasterAssistantWidgetClusterIds = ["all"];
+let bookingMasterAssistantWidgetClusterDropdownOpen = false;
+let bookingMasterAssistantWidgetRefreshing = false;
+let bookingMasterStoresLoading = false;
+let bookingMasterStoresError = "";
+let bookingMasterNextPhaseLoading = false;
+let bookingMasterNextPhaseError = "";
+let bookingMasterCustomerPickerActive = false;
+let bookingMasterAddressPickerActive = false;
+let bookingMasterAddressPickerMode = "primary";
+let bookingMasterLocationStops = [];
+let bookingMasterDetailImageUrl = "";
+let bookingMasterAttachments = [];
+let bookingMasterDetailNote = "";
+let customerRows = [];
+let customerSearchText = "";
+let pendingOtpVerification = { userId: "", channels: [] };
+let passwordShareUserId = "";
+let bookingRowsCache = [];
+let bookingActiveTab = "pending_assign";
+let bookingPage = 1;
+let bookingPageSize = 20;
+let bookingDatePreset = "today";
+let bookingStartDate = "";
+let bookingEndDate = "";
+let bookingSearchText = "";
+let bookingSearchTimer = null;
+let bookingRealtimeTimer = null;
+let bookingRealtimeBusy = false;
+let bookingRealtimeSource = null;
+let bookingRealtimeReconnectTimer = null;
+let bookingRealtimeSettings = null;
+let bookingRealtimeStatus = { mode: "stopped", connectedAt: null, lastEventAt: null, lastEventType: "", lastErrorAt: null, message: "" };
+let bookingRealtimeLastSeenAt = null;
+let bookingRealtimeLastEventId = localStorage.getItem("zigoBookingRealtimeLastEventId") || "";
+let bookingRealtimeCatchupBusy = false;
+let bookingRealtimeAuthRefreshAttempted = false;
+let bookingKnownIds = new Set();
+let bookingNotificationKnownIds = new Set();
+let bookingNotificationSeeded = false;
+let bookingNewNotificationCount = 0;
+let bookingWorkingCountdownTimer = null;
+let adminRefreshPromise = null;
+
+function clearAlert() {
+  appAlert.classList.add("d-none");
+  appAlert.innerHTML = "";
+  if (appAlertTimer) clearTimeout(appAlertTimer);
+  appAlertTimer = null;
+}
+
+function showAlert(message, tone = "danger") {
+  if (appAlertTimer) clearTimeout(appAlertTimer);
+  appAlert.innerHTML = `<span>${escapeHtml(message)}</span><button class="alert-close" data-action="close-alert" type="button" aria-label="Close notification">x</button>`;
+  appAlert.classList.remove("alert-success", "alert-danger", "alert-warning", "alert-info");
+  appAlert.classList.add(`alert-${tone}`);
+  appAlert.classList.remove("d-none");
+  appAlertTimer = setTimeout(() => clearAlert(), 6000);
+}
+
+function adminAuthError(message = "Session expired. Please login again.") {
+  const error = new Error(message);
+  error.status = 401;
+  return error;
+}
+
+function clearAdminSession(message = "") {
+  stopBookingRealtime();
+  state.token = "";
+  state.refreshToken = "";
+  state.user = null;
+  state.roles = [];
+  localStorage.removeItem("zigoAdminToken");
+  localStorage.removeItem("zigoAdminRefreshToken");
+  localStorage.removeItem("zigoAdminUser");
+  localStorage.removeItem("zigoAdminRoles");
+  $("#adminView")?.classList.add("d-none");
+  $("#loginView")?.classList.remove("d-none");
+  if (message) {
+    const loginAlert = $("#loginAlert");
+    if (loginAlert) {
+      loginAlert.textContent = message;
+      loginAlert.classList.remove("d-none");
+    }
+  }
+}
+
+let imagePreviewAlertTimer = null;
+
+function clearImagePreviewAlert() {
+  const alert = $("#imagePreviewAlert");
+  if (!alert) return;
+  alert.classList.add("d-none");
+  alert.innerHTML = "";
+  alert.classList.remove("alert-success", "alert-danger", "alert-warning", "alert-info");
+  if (imagePreviewAlertTimer) clearTimeout(imagePreviewAlertTimer);
+  imagePreviewAlertTimer = null;
+}
+
+function showImagePreviewAlert(message, tone = "success") {
+  const alert = $("#imagePreviewAlert");
+  if (!alert) {
+    showAlert(message, tone);
+    return;
+  }
+  if (imagePreviewAlertTimer) clearTimeout(imagePreviewAlertTimer);
+  alert.innerHTML = `<span>${escapeHtml(message)}</span><button class="alert-close" data-action="close-image-preview-alert" type="button" aria-label="Close notification">x</button>`;
+  alert.classList.remove("alert-success", "alert-danger", "alert-warning", "alert-info", "d-none");
+  alert.classList.add(`alert-${tone}`);
+  imagePreviewAlertTimer = setTimeout(() => clearImagePreviewAlert(), 5000);
+}
+
+function formObject(form) {
+  return Object.fromEntries(new FormData(form).entries());
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function cssEscape(value) {
+  return window.CSS?.escape ? CSS.escape(String(value ?? "")) : String(value ?? "").replace(/"/g, '\\"');
+}
+
+function formatDate(value) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+function formatCustomerDateTime(value) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true
+  })
+    .format(new Date(value))
+    .replace(",", "");
+}
+
+function money(value) {
+  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format((Number(value) || 0) / 100);
+}
+
+async function refreshAdminSession() {
+  if (!state.refreshToken) throw adminAuthError();
+  if (!adminRefreshPromise) {
+  adminRefreshPromise = fetch(withBasePath("/auth/refresh"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: state.refreshToken })
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw adminAuthError(payload.error?.message || "Session expired. Please login again.");
+        saveSession(payload.data);
+        return payload.data;
+      })
+      .finally(() => {
+        adminRefreshPromise = null;
+      });
+  }
+  return adminRefreshPromise;
+}
+
+
+
+async function api(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (options.body) headers.set("Content-Type", "application/json");
+  if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
+const response = await fetch(withBasePath(path), { ...options, headers });
+  const payload = await response.json().catch(() => ({}));
+  const shouldRefresh =
+    response.status === 401 &&
+    options.skipAuthRefresh !== true &&
+    path !== BASE_PATH+"/auth/login" &&
+    path !== BASE_PATH+"/auth/refresh";
+  if (shouldRefresh) {
+    try {
+      await refreshAdminSession();
+      return await api(path, { ...options, skipAuthRefresh: true });
+    } catch (refreshError) {
+      const message = refreshError.message || "Session expired. Please login again.";
+      clearAdminSession(message);
+      throw adminAuthError(message);
+    }
+  }
+  if (!response.ok) {
+    const error = new Error(payload.error?.message || "Request failed");
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+
+async function safeApi(path) {
+  try {
+    return await api(path);
+  } catch (error) {
+    return { data: null, error: error.message };
+  }
+}
+
+function pageTitleBlock() {
+  return "";
+}
+
+function panel(title, subtitle, body, actions = "") {
+  const currentPageTitle = (pageTitle?.textContent || "").trim().toLowerCase();
+  const panelTitle = String(title || "").trim().toLowerCase();
+  const isDuplicatePageTitle = currentPageTitle && panelTitle && currentPageTitle === panelTitle;
+  const header = isDuplicatePageTitle
+    ? (actions ? `<div class="panel-actions-only">${actions}</div>` : "")
+    : `<div class="panel-header"><div><h2 class="panel-title">${title}</h2><p class="panel-subtitle">${subtitle}</p></div>${actions}</div>`;
+  return `<div class="panel">${header}${body}</div>`;
+}
+
+function table(headers, rows) {
+  return `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${headers.length}" class="text-secondary">No records</td></tr>`}</tbody></table></div>`;
+}
+
+function status(value) {
+  const normalized = String(value || "unknown").replace(/_/g, " ");
+  const danger = ["failed", "cancelled", "rejected", "inactive", "deactive", "offline", "disabled", "hidden", "blocked"].includes(String(value));
+  return `<span class="status-pill ${danger ? "danger" : ""}">${escapeHtml(normalized)}</span>`;
+}
+
+function otpStatusLabel(value, row = {}) {
+  const channelStatus = row.otpChannelStatus || row.metadata?.otpChannelStatus || {};
+  const parts = [];
+  if (channelStatus.email) parts.push(status(`Email ${channelStatus.email}`));
+  if (channelStatus.mobile) parts.push(status(`Mobile ${channelStatus.mobile}`));
+  if (parts.length) return parts.join(" ");
+  const normalized = String(value || "not_required");
+  if (normalized === "verified") return status("Code verified");
+  if (normalized === "pending") return status("Code pending");
+  if (normalized === "failed") return status("Code failed");
+  return status("Code not required");
+}
+
+function requiredOtpStatusLabel(value, row = {}) {
+  const label = otpStatusLabel(value, row);
+  return label.includes("Code not required") ? "" : label;
+}
+
+function metric(label, value) {
+  return `<div class="metric-card"><div class="metric-label">${label}</div><div class="metric-value">${escapeHtml(value)}</div></div>`;
+}
+
+function optionRows(items, labelKey = "name", valueKey = "id") {
+  return items.map((item) => `<option value="${escapeHtml(item[valueKey])}">${escapeHtml(item[labelKey] || item.code || item.id)}</option>`).join("");
+}
+
+function multiOptionRows(items, selected = [], labelKey = "name", valueKey = "id") {
+  const selectedSet = new Set(selected || []);
+  return items
+    .map((item) => `<option value="${escapeHtml(item[valueKey])}" ${selectedSet.has(item[valueKey]) ? "selected" : ""}>${escapeHtml(item[labelKey] || item.code || item.id)}</option>`)
+    .join("");
+}
+
+function selectedValues(select) {
+  if (!select) return [];
+  if (select instanceof RadioNodeList) {
+    return [...select].filter((item) => item.selected || item.checked).map((item) => item.value).filter(Boolean);
+  }
+  return [...select.selectedOptions].map((option) => option.value).filter(Boolean);
+}
+
+function setSelectedOptions(select, values = []) {
+  if (!select) return;
+  const selected = new Set(values || []);
+  [...select.options].forEach((option) => {
+    option.selected = selected.has(option.value);
+  });
+}
+
+function checkedDatasetValues(container, selector) {
+  return [...(container?.querySelectorAll(selector) || [])].filter((input) => input.checked).map((input) => input.value).filter(Boolean);
+}
+
+function checkedValues(inputs) {
+  const list = inputs instanceof RadioNodeList ? [...inputs] : [inputs].filter(Boolean);
+  return list.filter((input) => input.checked).map((input) => input.value);
+}
+
+function setMultiSelectOptions(select, items, selected = []) {
+  if (!select) return;
+  const selectedSet = new Set(selected || []);
+  const selectedItems = activeClusters(cache.clusters || []).filter((item) => selectedSet.has(item.id));
+  const itemMap = new Map([...selectedItems, ...activeItems(items || [])].map((item) => [item.id, item]));
+  select.innerHTML = multiOptionRows([...itemMap.values()], selected);
+}
+
+function checkboxPicker(name, items, selected = [], placeholder = "Search") {
+  const selectedSet = new Set(selected || []);
+  const chips = items
+    .filter((item) => selectedSet.has(item.id))
+    .map((item) => `<span class="picker-chip" data-picker-chip="${name}" data-id="${escapeHtml(item.id)}">${escapeHtml(item.name || item.code || item.id)} <button type="button" data-action="picker-remove" data-picker="${name}" data-id="${escapeHtml(item.id)}">x</button></span>`)
+    .join("");
+  return `<div class="checkbox-picker" data-picker="${name}">
+    <input type="hidden" name="${name}" value="${escapeHtml(JSON.stringify(selected || []))}">
+    <div class="picker-chips">${chips}</div>
+    <input class="form-control picker-search" data-picker-search="${name}" placeholder="${escapeHtml(placeholder)}">
+    <label class="picker-option picker-all"><input type="checkbox" data-picker-select-all="${name}" ${selected.length === items.length && items.length ? "checked" : ""}> Select All</label>
+    <div class="picker-options">
+      ${items
+        .map(
+          (item) => `<label class="picker-option" data-picker-option="${name}" data-text="${escapeHtml(String(item.name || item.code || item.id).toLowerCase())}">
+            <input type="checkbox" value="${escapeHtml(item.id)}" data-picker-checkbox="${name}" ${selectedSet.has(item.id) ? "checked" : ""}>
+            ${escapeHtml(item.name || item.code || item.id)}
+          </label>`
+        )
+        .join("")}
+    </div>
+  </div>`;
+}
+
+function pickerValues(name) {
+  const wrapper = document.querySelector(`[data-picker="${name}"]`);
+  if (!wrapper) return [];
+  return [...wrapper.querySelectorAll(`[data-picker-checkbox="${name}"]:checked`)].map((input) => input.value);
+}
+
+function scopedPickerValues(scope, name) {
+  const wrapper = scope?.querySelector(`[data-picker="${name}"]`);
+  if (!wrapper) return pickerValues(name);
+  return [...wrapper.querySelectorAll(`[data-picker-checkbox="${name}"]:checked`)].map((input) => input.value);
+}
+
+function refreshPicker(name) {
+  const wrapper = document.querySelector(`[data-picker="${name}"]`);
+  if (!wrapper) return;
+  const checked = [...wrapper.querySelectorAll(`[data-picker-checkbox="${name}"]:checked`)];
+  const values = checked.map((input) => input.value);
+  wrapper.querySelector(`input[name="${name}"]`).value = JSON.stringify(values);
+  wrapper.querySelector(".picker-chips").innerHTML = checked
+    .map((input) => `<span class="picker-chip" data-picker-chip="${name}" data-id="${escapeHtml(input.value)}">${escapeHtml(input.closest(".picker-option")?.textContent?.trim() || input.value)} <button type="button" data-action="picker-remove" data-picker="${name}" data-id="${escapeHtml(input.value)}">x</button></span>`)
+    .join("");
+  const all = wrapper.querySelector(`[data-picker-select-all="${name}"]`);
+  if (all) all.checked = checked.length === wrapper.querySelectorAll(`[data-picker-checkbox="${name}"]`).length;
+}
+
+const weekDays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+function weeklyScheduleFields(schedule = {}) {
+  return `<div class="weekly-schedule">
+    <div class="schedule-all-day">
+      <label class="form-check"><input class="form-check-input" type="checkbox" id="allDayWorkingSchedule"> All Day working schedule</label>
+      <input class="form-control" type="time" id="allDayOpenTime" placeholder="Open time">
+      <input class="form-control" type="time" id="allDayCloseTime" placeholder="Close time">
+      <button class="btn btn-soft btn-sm" type="button" data-action="apply-all-day-schedule">Apply All Days</button>
+    </div>
+    ${weekDays
+      .map((day) => {
+        const value = schedule?.[day] || {};
+        return `<div class="schedule-row">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="${day}Enabled" ${value.enabled ? "checked" : ""}> ${day.charAt(0).toUpperCase() + day.slice(1)}</label>
+          <input class="form-control" type="time" name="${day}Open" value="${escapeHtml(value.openTime || "")}">
+          <input class="form-control" type="time" name="${day}Close" value="${escapeHtml(value.closeTime || "")}">
+        </div>`;
+      })
+      .join("")}
+  </div>`;
+}
+
+function collectWeeklySchedule(form) {
+  return Object.fromEntries(
+    weekDays.map((day) => [
+      day,
+      {
+        enabled: Boolean(form.elements[`${day}Enabled`]?.checked),
+        openTime: form.elements[`${day}Open`]?.value || null,
+        closeTime: form.elements[`${day}Close`]?.value || null
+      }
+    ])
+  );
+}
+
+function summarizeWeeklySchedule(schedule = {}) {
+  const activeDays = weekDays.filter((day) => schedule?.[day]?.enabled);
+  if (!activeDays.length) return "";
+  const first = schedule[activeDays[0]] || {};
+  const sameTime = activeDays.every((day) => (schedule[day]?.openTime || "") === (first.openTime || "") && (schedule[day]?.closeTime || "") === (first.closeTime || ""));
+  const timeText = first.openTime || first.closeTime ? `${first.openTime || "--:--"}-${first.closeTime || "--:--"}` : "";
+  if (activeDays.length === 7 && sameTime) return `All Day${timeText ? ` ${timeText}` : ""}`;
+  return `${activeDays.length} day${activeDays.length === 1 ? "" : "s"}${sameTime && timeText ? ` ${timeText}` : ""}`;
+}
+
+function minutesFromTime(value) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  return (hours * 60) + minutes;
+}
+
+function isScheduleOpenNow(schedule = {}, now = new Date()) {
+  const day = weekDays[(now.getDay() + 6) % 7];
+  const value = schedule?.[day] || {};
+  if (!value.enabled) return false;
+  const open = minutesFromTime(value.openTime);
+  const close = minutesFromTime(value.closeTime);
+  if (open == null && close == null) return true;
+  if (open == null || close == null) return false;
+  const current = (now.getHours() * 60) + now.getMinutes();
+  if (open === close) return true;
+  if (open < close) return current >= open && current <= close;
+  return current >= open || current <= close;
+}
+
+function openNowStatusHtml(isOpen) {
+  return `<span class="booking-open-status ${isOpen ? "open" : "closed"}"><i aria-hidden="true"></i>${isOpen ? "Open Now" : "Closed"}</span>`;
+}
+
+function imageCell(url) {
+  return url
+    ? `<button class="image-thumb-button" data-action="view-image" data-url="${escapeHtml(url)}" type="button"><img class="media-thumb" src="${escapeHtml(withBasePath(url))}" alt="Image preview"></button>`
+    : `<span class="text-secondary">No image</span>`;
+}
+
+function filePreviewCell(file) {
+  if (!file?.previewUrl) return "";
+  if (String(file.mimeType || "").startsWith("image/")) return imageCell(file.previewUrl);
+  return `<a class="btn btn-soft btn-xs" href="${escapeHtml(file.previewUrl)}" target="_blank" rel="noreferrer">${escapeHtml(file.originalName || "View document")}</a>`;
+}
+
+function profileCircle(url, name = "") {
+  const initials = String(name || "U")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0] || "")
+    .join("")
+    .toUpperCase() || "U";
+  return url
+    ? `<button class="profile-circle image-thumb-button" data-action="view-image" data-url="${escapeHtml(withBasePath(url))}" type="button"><img src="${escapeHtml(withBasePath(url))}" alt="Profile picture"></button>`
+    : `<span class="profile-circle">${escapeHtml(initials)}</span>`;
+}
+
+function profileAvatar(url, name = "") {
+  const initials = String(name || "U")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0] || "")
+    .join("")
+    .toUpperCase() || "U";
+  return url
+    ? `<span class="profile-circle"><img src="${escapeHtml(withBasePath(url))}" alt="Profile picture"></span>`
+    : `<span class="profile-circle">${escapeHtml(initials)}</span>`;
+}
+
+function renderSignedInProfile() {
+  const name = state.user?.displayName || state.user?.email || "Admin";
+  const initials =
+    String(name)
+      .trim()
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part[0] || "")
+      .join("")
+      .toUpperCase() || "ZA";
+  signedInUser.textContent = name;
+  signedInRole.textContent = state.roles.find((r) => r.code === "super_admin")?.name || state.roles[0]?.name || "Admin";
+  if (signedInAvatar) {
+    signedInAvatar.innerHTML = state.user?.profilePictureUrl ? `<img src="${escapeHtml(withBasePath(state.user.profilePictureUrl))}" alt="Profile picture">` : escapeHtml(initials);
+  }
+}
+
+function setProfileModalAlert(message = "", tone = "danger") {
+  const alert = $("#profileModalAlert");
+  if (!alert) return;
+  alert.className = `alert alert-${tone}${message ? "" : " d-none"}`;
+  alert.textContent = message;
+}
+
+function syncSignedInUser(user) {
+  state.user = {
+    ...state.user,
+    id: user.id,
+    email: user.email,
+    phone: user.phone,
+    displayName: user.displayName,
+    profilePictureUrl: user.profilePictureUrl
+  };
+  localStorage.setItem("zigoAdminUser", JSON.stringify(state.user));
+  renderSignedInProfile();
+}
+
+function openProfileModal() {
+  const form = $("#profilePictureForm");
+  const passwordForm = $("#profilePasswordForm");
+  form?.reset();
+  passwordForm?.reset();
+  if (form) {
+    form.elements.imageUrl.value = state.user?.profilePictureUrl || "";
+    $("#signedInProfilePictureUploadPreview").innerHTML = state.user?.profilePictureUrl ? imageCell(state.user.profilePictureUrl) : "";
+  }
+  setProfileModalAlert();
+  $("#profileModal").classList.remove("d-none");
+}
+
+function closeProfileModal() {
+  $("#profileModal").classList.add("d-none");
+  setProfileModalAlert();
+}
+
+function documentLinks(documents = []) {
+  if (!documents.length) return `<span class="text-secondary">-</span>`;
+  return `<div class="doc-link-list">${documents
+    .map((document) => {
+      const label = document.documentTypeName || document.name || "Document";
+      if (String(document.mimeType || "").startsWith("image/") && document.previewUrl) {
+        return `<button class="btn btn-soft btn-xs" data-action="view-image" data-url="${escapeHtml(document.previewUrl)}" type="button">${escapeHtml(label)}</button>`;
+      }
+      return document.previewUrl
+        ? `<a class="btn btn-soft btn-xs" href="${escapeHtml(document.previewUrl)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`
+        : `<span class="btn btn-soft btn-xs disabled">${escapeHtml(label)}</span>`;
+    })
+    .join("")}</div>`;
+}
+
+function iconSvg(name) {
+  const icons = {
+    edit: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16.8V20h3.2L17.7 9.5l-3.2-3.2L4 16.8z"></path><path d="M16 4.8l3.2 3.2 1.2-1.2a1.6 1.6 0 0 0 0-2.3l-.9-.9a1.6 1.6 0 0 0-2.3 0L16 4.8z"></path></svg>`,
+    eye: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5 0 8.5 4.4 9.7 6.2a1.4 1.4 0 0 1 0 1.6C20.5 14.6 17 19 12 19s-8.5-4.4-9.7-6.2a1.4 1.4 0 0 1 0-1.6C3.5 9.4 7 5 12 5zm0 3.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"></path></svg>`,
+    share: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 16.1c-1 0-1.9.4-2.5 1.1L8.9 13.4c.1-.4.1-.8 0-1.2l6.6-3.8A3.3 3.3 0 1 0 14.6 7l-6.6 3.8a3.3 3.3 0 1 0 0 4.1l6.6 3.8A3.3 3.3 0 1 0 18 16.1Z"></path></svg>`,
+    trash: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8l1 2h4v2H3V6h4l1-2Zm-2 6h12l-.8 10H6.8L6 10Zm3 2v6h2v-6H9Zm4 0v6h2v-6h-2Z"></path></svg>`,
+    zap: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 10-13h-7l0-7Z"></path></svg>`,
+    calendar: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2h2v3h6V2h2v3h3v17H4V5h3V2Zm11 9H6v9h12v-9ZM6 7v2h12V7H6Z"></path></svg>`,
+    user: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Zm-8 9a8 8 0 0 1 16 0H4Z"></path></svg>`,
+    "chevron-down": `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5H7Z"></path></svg>`
+  };
+  return icons[name] || "";
+}
+
+function uploadControl(name, currentUrl = "") {
+  const inputId = `${name}UploadInput`;
+  const previewId = `${name}UploadPreview`;
+  return `<div class="upload-box" data-upload-box="${name}" data-upload-kind="image">
+    <input type="hidden" name="imageUrl" value="${escapeHtml(currentUrl || "")}">
+    <input id="${inputId}" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-image-upload="${name}">
+    <div class="upload-icon">UP</div>
+    <div class="upload-title">Drag and Drop Files</div>
+    <button class="btn btn-primary btn-sm" type="button" data-action="browse-image" data-target="${inputId}">Browse</button>
+    <div id="${previewId}" class="upload-preview">${currentUrl ? imageCell(currentUrl) : ""}</div>
+  </div>`;
+}
+
+function documentUploadControl(name, label) {
+  const inputId = `${name}DocumentUploadInput`;
+  const previewId = `${name}DocumentUploadPreview`;
+  return `<div class="assistant-document-upload">
+    <div class="helper-text mb-1">${escapeHtml(label)}</div>
+    <div class="upload-box compact-upload" data-upload-box="${name}" data-upload-kind="document">
+      <input type="hidden" name="${name}" value="">
+      <input id="${inputId}" class="visually-hidden" type="file" accept="application/pdf,image/png,image/jpeg,image/webp,image/gif" data-document-upload="${name}">
+      <div class="upload-icon">UP</div>
+      <div class="upload-title">PDF or Image</div>
+      <button class="btn btn-primary btn-sm" type="button" data-action="browse-image" data-target="${inputId}">Browse</button>
+      <div id="${previewId}" class="upload-preview"></div>
+    </div>
+  </div>`;
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Unable to read selected file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function mimeTypeForFile(file) {
+  const browserMime = String(file?.type || "").trim().toLowerCase();
+  if (browserMime && browserMime !== "application/octet-stream") return browserMime;
+  const name = String(file?.name || "").toLowerCase();
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".webp")) return "image/webp";
+  if (name.endsWith(".gif")) return "image/gif";
+  if (name.endsWith(".pdf")) return "application/pdf";
+  if (name.endsWith(".mp4") || name.endsWith(".m4v")) return "video/mp4";
+  if (name.endsWith(".webm")) return "video/webm";
+  if (name.endsWith(".mov")) return "video/quicktime";
+  if (name.endsWith(".doc")) return "application/msword";
+  if (name.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (name.endsWith(".xls")) return "application/vnd.ms-excel";
+  if (name.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (name.endsWith(".ppt")) return "application/vnd.ms-powerpoint";
+  if (name.endsWith(".pptx")) return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  return browserMime;
+}
+
+async function uploadImageFile(file, fieldName) {
+  const dataBase64 = await fileToDataUrl(file);
+  const payload = await api(BASE_PATH+"/settings/media-images", {
+    method: "POST",
+    body: JSON.stringify({
+      originalName: file.name,
+      mimeType: file.type,
+      dataBase64
+    })
+  });
+  const wrapper = document.querySelector(`[data-upload-box="${fieldName}"]`);
+  if (wrapper) {
+    wrapper.querySelector('input[name="imageUrl"]').value = payload.data.imageUrl;
+    const preview = wrapper.querySelector(".upload-preview");
+    if (preview) preview.innerHTML = imageCell(payload.data.imageUrl);
+  }
+  return payload.data;
+}
+
+async function uploadDocumentFile(file, fieldName) {
+  const dataBase64 = await fileToDataUrl(file);
+  const mimeType = mimeTypeForFile(file);
+  const payload = await api(BASE_PATH+"/settings/media-documents", {
+    method: "POST",
+    body: JSON.stringify({
+      originalName: file.name,
+      mimeType,
+      dataBase64
+    })
+  });
+  const wrapper = document.querySelector(`[data-upload-box="${fieldName}"]`);
+  const documentPayload = {
+    originalName: file.name,
+    mimeType,
+    previewUrl: payload.data.previewUrl
+  };
+  if (wrapper) {
+    wrapper.querySelector(`input[name="${fieldName}"]`).value = JSON.stringify(documentPayload);
+    const preview = wrapper.querySelector(".upload-preview");
+    if (preview) preview.innerHTML = filePreviewCell(documentPayload);
+  }
+  return documentPayload;
+}
+
+function bookingAttachmentType(mimeType = "", url = "") {
+  const normalizedMime = String(mimeType || "").toLowerCase();
+  const normalizedUrl = String(url || "").toLowerCase();
+  if (normalizedMime.startsWith("image/") || normalizedUrl.match(/\.(png|jpe?g|webp|gif)(\?|#|$)/)) return "image";
+  if (normalizedMime.startsWith("video/") || normalizedUrl.match(/\.(mp4|webm|mov)(\?|#|$)/)) return "video";
+  if (normalizedMime === "application/pdf" || normalizedUrl.match(/\.pdf(\?|#|$)/)) return "pdf";
+  return "document";
+}
+
+function bookingAttachmentIcon(type) {
+  if (type === "video") return "VID";
+  if (type === "pdf") return "PDF";
+  if (type === "image") return "IMG";
+  return "DOC";
+}
+
+function normalizeBookingAttachment(file = {}) {
+  const url = file.url || file.previewUrl || "";
+  const mimeType = file.mimeType || file.mime_type || "";
+  const type = file.type || bookingAttachmentType(mimeType, url);
+  return {
+    id: file.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    label: file.label || file.originalName || file.name || "Upload",
+    originalName: file.originalName || file.name || file.label || "Upload",
+    mimeType,
+    type,
+    url,
+    previewUrl: file.previewUrl || url
+  };
+}
+
+function bookingMasterAttachmentCard(attachment, index) {
+  const item = normalizeBookingAttachment(attachment);
+  const title = item.originalName || item.label || `Upload ${index + 1}`;
+  const preview = item.type === "image"
+    ? `<img src="${escapeHtml(withBasePath(item.previewUrl))}" alt="${escapeHtml(title)}">`
+    : `<span>${escapeHtml(bookingAttachmentIcon(item.type))}</span>`;
+  return `<article class="booking-master-attachment-card">
+    <button class="booking-master-attachment-thumb ${escapeHtml(item.type)}" data-action="preview-booking-master-attachment" data-index="${index}" type="button" title="${escapeHtml(title)}">
+      ${preview}
+    </button>
+    <div class="booking-master-attachment-meta">
+      <b>${escapeHtml(title)}</b>
+      <small>${escapeHtml(item.type.toUpperCase())}</small>
+    </div>
+    <button class="booking-attachment-remove" data-action="remove-booking-master-attachment" data-index="${index}" type="button" aria-label="Remove upload">x</button>
+  </article>`;
+}
+
+function bookingMasterAttachmentUploadControl() {
+  const inputId = "bookingMasterAttachmentsUploadInput";
+  return `<div class="upload-box booking-master-attachments-upload" data-upload-box="bookingMasterAttachments" data-upload-kind="attachments">
+    <input id="${inputId}" class="visually-hidden" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,video/mp4,video/webm,video/quicktime,.doc,.docx,.xls,.xlsx,.ppt,.pptx" data-booking-master-attachments="true">
+    <div class="upload-icon">UP</div>
+    <div class="upload-title">Images, video, PDF, or document</div>
+    <button class="btn btn-primary btn-sm" type="button" data-action="browse-image" data-target="${inputId}">Browse</button>
+    <div id="bookingMasterAttachmentPreview" class="booking-master-attachment-grid">
+      ${bookingMasterAttachments.length ? bookingMasterAttachments.map(bookingMasterAttachmentCard).join("") : `<span class="helper-text">No files uploaded</span>`}
+    </div>
+  </div>`;
+}
+
+function renderBookingMasterAttachmentPreview() {
+  const target = $("#bookingMasterAttachmentPreview");
+  if (!target) return;
+  target.innerHTML = bookingMasterAttachments.length
+    ? bookingMasterAttachments.map(bookingMasterAttachmentCard).join("")
+    : `<span class="helper-text">No files uploaded</span>`;
+}
+
+async function uploadBookingMasterAttachment(file) {
+  const uploaded = await uploadDocumentFile(file, "__bookingMasterAttachment");
+  return normalizeBookingAttachment({
+    originalName: uploaded.originalName || file.name,
+    mimeType: uploaded.mimeType || file.type,
+    url: uploaded.previewUrl,
+    previewUrl: uploaded.previewUrl
+  });
+}
+
+function openBookingMediaPreview(item = {}) {
+  const attachment = normalizeBookingAttachment(item);
+  if (!attachment.previewUrl) return;
+  assistantDocPreviewState = { assistantId: "", documentId: "", replacementFile: null };
+  clearImagePreviewAlert();
+  const videoId = "documentPreviewVideo";
+  let video = $(`#${videoId}`);
+  if (!video) {
+    video = document.createElement("video");
+    video.id = videoId;
+    video.className = "document-preview-video d-none";
+    video.controls = true;
+    $("#documentPreviewFrame")?.insertAdjacentElement("afterend", video);
+  }
+  $("#imagePreviewKind").textContent = attachment.type === "image" ? "Image Preview" : "Document Preview";
+  $("#imagePreviewModalTitle").textContent = attachment.label || attachment.originalName || "Preview";
+  $("#imagePreviewLarge").classList.toggle("d-none", attachment.type !== "image");
+  $("#documentPreviewFrame").classList.toggle("d-none", !["pdf", "document"].includes(attachment.type));
+  video.classList.toggle("d-none", attachment.type !== "video");
+  $("#documentPreviewLink").classList.remove("d-none");
+  $("#documentPreviewLink").href = withBasePath(attachment.previewUrl);
+  $("#documentPreviewLink").textContent = attachment.type === "video" ? "Open Video" : "Open Document";
+  $("#imagePreviewLarge").src = attachment.type === "image" ? withBasePath(attachment.previewUrl) : "";
+  $("#documentPreviewFrame").src = ["pdf", "document"].includes(attachment.type) ? withBasePath(attachment.previewUrl) : "";
+  video.src = attachment.type === "video" ? withBasePath(attachment.previewUrl) : "";
+  $("#previewPrevButton").classList.add("d-none");
+  $("#previewNextButton").classList.add("d-none");
+  $("#documentPreviewStatusSelect").classList.add("d-none");
+  $("#documentPreviewStatusSaveButton").classList.add("d-none");
+  $("#documentPreviewReuploadButton").classList.add("d-none");
+  $("#documentPreviewDeleteButton").classList.add("d-none");
+  $("#imagePreviewModal").classList.remove("d-none");
+}
+
+function isSuperAdminUser() {
+  return state.roles.some((role) => role.code === "super_admin");
+}
+
+function activeItems(items) {
+  return items.filter((item) => item.isActive !== false && item.isUsable !== false);
+}
+
+function activeClusters(items) {
+  return items.filter((item) => item.isUsable !== false && item.isBookingEnabled !== false);
+}
+
+const assistantUserDocumentFields = [
+  { key: "aadhaarFrontDocument", label: "Aadhaar Card Front Image", codes: ["aadhaar_front", "aadhaar_card_front"] },
+  { key: "aadhaarBackDocument", label: "Aadhaar Card Back Image", codes: ["aadhaar_back", "aadhaar_card_back"] },
+  { key: "panFrontDocument", label: "PAN Card Front Image", codes: ["pan_front", "pan_card_front"] },
+  { key: "panBackDocument", label: "PAN Card Back Image", codes: ["pan_back", "pan_card_back"] },
+  { key: "profilePictureDocument", label: "Profile Picture", codes: ["profile_picture", "profile_photo"] },
+  { key: "drivingLicenceFrontDocument", label: "Driving Licence Front Image", codes: ["driving_license_front", "driving_licence_front"] },
+  { key: "drivingLicenceBackDocument", label: "Driving Licence Back Image", codes: ["driving_license_back", "driving_licence_back"] }
+];
+
+const assistantMasterDocumentFields = assistantUserDocumentFields.filter((field) => field.key !== "profilePictureDocument");
+
+function assistantDocumentUploadFields() {
+  return assistantUserDocumentFields.map((field) => documentUploadControl(field.key, field.label)).join("");
+}
+
+function assistantProfilePictureUploadControl(currentUrl = "") {
+  const field = assistantUserDocumentFields.find((item) => item.key === "profilePictureDocument");
+  const inputId = "assistantProfilePictureDocumentUploadInput";
+  return `<div class="assistant-document-upload">
+    <div class="upload-box compact-upload" data-upload-box="profilePictureDocument" data-upload-kind="document">
+      <input type="hidden" name="profilePictureDocument" value="">
+      <input id="${inputId}" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-document-upload="profilePictureDocument">
+      <div class="upload-icon">UP</div>
+      <div class="upload-title">${escapeHtml(field?.label || "Profile Picture")}</div>
+      <button class="btn btn-primary btn-sm" type="button" data-action="browse-image" data-target="${inputId}">Browse</button>
+      <div class="upload-preview">${currentUrl ? imageCell(currentUrl) : ""}</div>
+    </div>
+  </div>`;
+}
+
+function assistantMasterDocumentUploadFields() {
+  return assistantMasterDocumentFields.map((field) => documentUploadControl(field.key, field.label)).join("");
+}
+
+function assistantUploadedDocumentCodes(documents = []) {
+  return new Set(
+    (documents || [])
+      .map((document) => String(document.documentTypeCode || "").toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+function assistantMissingDocumentFields(documents = []) {
+  const uploadedCodes = assistantUploadedDocumentCodes(documents);
+  return assistantMasterDocumentFields.filter((field) => !field.codes.some((code) => uploadedCodes.has(String(code).toLowerCase())));
+}
+
+function assistantMasterDocumentUploadFieldsFor(documents = []) {
+  return assistantMissingDocumentFields(documents).map((field) => documentUploadControl(field.key, field.label)).join("");
+}
+
+function selectedRoleCode(form) {
+  const roleId = form?.elements?.roleId?.value;
+  return cache.roles.find((role) => role.id === roleId)?.code || "";
+}
+
+function toggleAssistantUserFields() {
+  const form = document.querySelector('form[data-form="user"]');
+  if (!form) return;
+  const isAssistant = selectedRoleCode(form) === "assistant";
+  $("#assistantUserFields")?.classList.toggle("d-none", !isAssistant);
+}
+
+function selectedOtpVerifyChannels(form = $("#userForm")) {
+  if (!form) return [];
+  return ["email", "mobile"].filter((channel) => form.querySelector(`input[name="otpVerifyChannels"][value="${channel}"]`)?.checked);
+}
+
+function updateOtpVerifyChannelState(form = $("#userForm")) {
+  if (!form) return;
+  const emailChecked = form.querySelector('input[name="otpVerifyChannels"][value="email"]')?.checked;
+  const mobileChecked = form.querySelector('input[name="otpVerifyChannels"][value="mobile"]')?.checked;
+  form.elements.email?.toggleAttribute("required", Boolean(emailChecked));
+  form.elements.phone?.toggleAttribute("required", Boolean(mobileChecked));
+}
+
+function setOtpVerifyModalAlert(message = "", tone = "danger") {
+  const alert = $("#otpVerifyModalAlert");
+  if (!alert) return;
+  alert.className = `alert alert-${tone}${message ? "" : " d-none"}`;
+  alert.textContent = message;
+}
+
+function setPasswordShareModalAlert(message = "", tone = "danger") {
+  const alert = $("#passwordShareModalAlert");
+  if (!alert) return;
+  alert.className = `alert alert-${tone}${message ? "" : " d-none"}`;
+  alert.textContent = message;
+}
+
+function userEmailIsVerified(user = {}) {
+  return user?.otpChannelStatus?.email === "verified" || user?.metadata?.otpChannelStatus?.email === "verified";
+}
+
+function setPasswordShareResetEnabled(enabled) {
+  const form = $("#passwordShareForm");
+  if (!form) return;
+  form.elements.superAdminPassword.disabled = !enabled;
+  form.elements.newPassword.disabled = !enabled;
+  $("#passwordShareSubmitButton").disabled = !enabled;
+}
+
+function passwordShareEmailConflict(email, userId) {
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized) return null;
+  const targetUser = cache.users.find((user) => user.id === userId);
+  const targetRoles = new Set(targetUser?.roles || []);
+  return (
+    cache.users.find((user) => {
+      if (user.id === userId) return false;
+      if (String(user.email || "").trim().toLowerCase() !== normalized) return false;
+      return (user.roles || []).some((role) => targetRoles.has(role));
+    }) || null
+  );
+}
+
+function validatePasswordShareEmailInput(showMessage = false) {
+  const form = $("#passwordShareForm");
+  if (!form) return false;
+  const emailInput = form.elements.verifyEmail;
+  const userId = form.elements.userId.value;
+  const email = emailInput.value.trim();
+  const conflict = passwordShareEmailConflict(email, userId);
+  const sendButton = $("#passwordShareSendEmailCodeButton");
+  emailInput.setCustomValidity(conflict ? "Email already exists with another user in the same role." : "");
+  if (sendButton) sendButton.disabled = Boolean(conflict) || !email;
+  if (conflict && showMessage) {
+    const conflictName = conflict.displayName || conflict.phone || conflict.email || "another user";
+    setPasswordShareModalAlert(`Email already exists with ${conflictName} in the same role. Enter a different email.`, "danger");
+  }
+  return !conflict && Boolean(email);
+}
+
+function openPasswordShareModal(userId) {
+  passwordShareUserId = userId;
+  const targetUser = cache.users.find((user) => user.id === userId);
+  const adminName = state.user?.displayName || state.user?.email || "Logged in user";
+  const targetName = targetUser?.displayName || targetUser?.phone || targetUser?.email || "selected user";
+  const emailVerified = userEmailIsVerified(targetUser);
+  const form = $("#passwordShareForm");
+  form.reset();
+  form.elements.userId.value = userId;
+  form.elements.verifyEmail.value = targetUser?.email || "";
+  $("#passwordShareEmailVerifySection").classList.toggle("d-none", emailVerified);
+  $("#passwordShareEmailCodeRow").classList.add("d-none");
+  setPasswordShareResetEnabled(emailVerified);
+  $("#passwordShareSendEmailCodeButton").disabled = emailVerified;
+  $("#passwordShareAdminLabel").textContent = `${adminName}, enter your password`;
+  $("#passwordShareModalText").textContent = `${adminName}, enter your password to reset & share password to ${targetName}.`;
+  setPasswordShareModalAlert(emailVerified ? "" : "Email must be verified before sharing password to Email.", emailVerified ? "danger" : "warning");
+  $("#passwordShareModal").classList.remove("d-none");
+  if (!emailVerified) validatePasswordShareEmailInput(false);
+  (emailVerified ? form.elements.superAdminPassword : form.elements.verifyEmail).focus();
+}
+
+function closePasswordShareModal() {
+  $("#passwordShareModal").classList.add("d-none");
+  passwordShareUserId = "";
+  setPasswordShareModalAlert();
+  $("#passwordShareForm")?.reset();
+}
+
+function passwordDeliverySummary(deliveries = {}) {
+  return ["email"]
+    .map((channel) => {
+      const delivery = deliveries[channel];
+      if (!delivery) return "";
+      const label = channel === "mobile" ? "Mobile" : "Email";
+      if (delivery.status === "failed") return `${label}: ${delivery.error || "failed"}`;
+      if (delivery.skipped) return `${label}: ${delivery.reason || "skipped"}`;
+      return `${label}: sent`;
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+async function sendOtpForUser(userId, channels, extra = {}) {
+  const payload = await api(`/users/${userId}/otp/send`, {
+    method: "POST",
+    body: JSON.stringify({ ...extra, channels })
+  });
+  return payload.data;
+}
+
+function otpDeliverySummary(details = {}) {
+  const deliveries = details.deliveries || {};
+  return ["email", "mobile"]
+    .map((channel) => {
+      const delivery = deliveries[channel];
+      if (!delivery) return "";
+      const label = channel === "mobile" ? "Mobile" : "Email";
+      if (delivery.skipped) return `${label}: ${delivery.reason || "Provider not configured."}`;
+      if (delivery.status === "failed") return `${label}: ${delivery.error || "Failed to send."}`;
+      return `${label}: sent`;
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+function otpChannelName(channel) {
+  return channel === "mobile" ? "SMS" : "Email";
+}
+
+function otpChannelVerifiedName(channel) {
+  return channel === "mobile" ? "Mobile Number" : "Email";
+}
+
+function pendingOtpChannelsForUser(user) {
+  const requested = user?.metadata?.otpVerifyChannels || [];
+  const channelStatus = user?.otpChannelStatus || user?.metadata?.otpChannelStatus || {};
+  return ["email", "mobile"].filter((channel) => requested.includes(channel) && channelStatus[channel] !== "verified");
+}
+
+function contactOtpBadges(user) {
+  const channelStatus = user?.otpChannelStatus || user?.metadata?.otpChannelStatus || {};
+  const requested = user?.metadata?.otpVerifyChannels || [];
+  return ["mobile", "email"]
+    .filter((channel) => requested.includes(channel))
+    .map((channel) => {
+      const isVerified = channelStatus[channel] === "verified";
+      const label = `${isVerified ? "Verified" : "Verify Pending"}`;
+      return `<span class="otp-contact-badge ${isVerified ? "verified" : "pending"}" title="${escapeHtml(`Verify by ${otpChannelVerifiedName(channel)}`)}">${isVerified ? "&#10003;" : "!"} ${escapeHtml(label)}</span>`;
+    })
+    .join("");
+}
+
+function contactVerificationLine(user, channel, value) {
+  const requested = user?.metadata?.otpVerifyChannels || [];
+  const channelStatus = user?.otpChannelStatus || user?.metadata?.otpChannelStatus || {};
+  let badge = "";
+  if (requested.includes(channel)) {
+    const isVerified = channelStatus[channel] === "verified";
+    badge = isVerified
+      ? `<span class="otp-contact-badge verified" title="${escapeHtml(`Verify by ${otpChannelVerifiedName(channel)}`)}">&#10003; Verified</span>`
+      : `<button class="otp-contact-badge pending" data-action="verify-user-code-channel" data-id="${escapeHtml(user.id)}" data-channel="${escapeHtml(channel)}" title="${escapeHtml(`Verify by ${otpChannelVerifiedName(channel)}`)}" type="button">! Verify Pending</button>`;
+  }
+  return `<div class="contact-verify-line"><span>${escapeHtml(value || "-")}</span>${badge}</div>`;
+}
+
+function renderOtpVerificationInputs(channels = [], details = {}) {
+  const channelStatus = details.channelStatus || {};
+  return channels
+    .map((channel) => {
+      const statusValue = channelStatus[channel] || "pending";
+      const isVerified = statusValue === "verified";
+      const label = channel === "mobile" ? "SMS Verification Code" : "Email Verification Code";
+      return `<div class="otp-channel-field ${isVerified ? "verified" : ""}">
+        <div class="otp-channel-head">
+          <span>${escapeHtml(label)}</span>
+          <span class="otp-channel-state ${isVerified ? "done" : "pending"}">${isVerified ? "✓ Verified" : "Under process"}</span>
+        </div>
+        ${
+          isVerified
+            ? `<div class="otp-verified-box">&#10003; ${escapeHtml(otpChannelVerifiedName(channel))} Verified</div>`
+            : `<input class="form-control" name="${channel}Otp" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" placeholder="Enter 6 digit ${escapeHtml(label)}" required />`
+        }
+      </div>`;
+    })
+    .join("");
+}
+
+function renderOtpVerificationInputsV2(channels = [], details = {}) {
+  const channelStatus = details.channelStatus || {};
+  return channels
+    .map((channel) => {
+      const statusValue = channelStatus[channel] || "pending";
+      const isVerified = statusValue === "verified";
+      const label = channel === "mobile" ? "SMS Verification Code" : "Email Verification Code";
+      return `<div class="otp-channel-field ${isVerified ? "verified" : ""}">
+        <div class="otp-channel-head">
+          <span>${escapeHtml(label)}</span>
+          <span class="otp-channel-state ${isVerified ? "done" : "pending"}">${isVerified ? "&#10003; Verified" : "Under process"}</span>
+        </div>
+        ${
+          isVerified
+            ? `<div class="otp-verified-box">&#10003; ${escapeHtml(otpChannelVerifiedName(channel))} Verified</div>`
+            : `<div class="otp-channel-entry"><input class="form-control" name="${channel}Otp" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" placeholder="Enter 6 digit ${escapeHtml(label)}" required /><button class="btn btn-primary" data-action="verify-otp-channel" data-channel="${escapeHtml(channel)}" type="button">Verify ${escapeHtml(otpChannelVerifiedName(channel))}</button></div>`
+        }
+      </div>`;
+    })
+    .join("");
+}
+
+function updateOtpModalProgress(details = {}) {
+  const channels = pendingOtpVerification.channels || details.channels || [];
+  pendingOtpVerification.channelStatus = details.channelStatus || {};
+  $("#otpVerifyInputs").innerHTML = renderOtpVerificationInputsV2(channels, details);
+  if (details.sending) {
+    $("#otpVerifyModalText").textContent = "Verification under process. Your account is created but not verified. Click Send/Re-send Verification Code when you need a new code.";
+    return;
+  }
+  const channelStatus = details.channelStatus || {};
+  const verifiedChannels = channels.filter((channel) => channelStatus[channel] === "verified").map(otpChannelName);
+  const pendingChannels = channels.filter((channel) => channelStatus[channel] !== "verified").map(otpChannelName);
+  const accountText = pendingChannels.length
+    ? `Verification under process. Your account is created but not verified. ${verifiedChannels.length ? `Verified done for ${verifiedChannels.join(" and ")}. ` : ""}Waiting for ${pendingChannels.join(" and ")}. Complete your verification or change your verification code setting applicable on Email / SMS.`
+    : "All verification codes completed. Your account is verified.";
+  $("#otpVerifyModalText").textContent = accountText;
+}
+
+function openOtpVerifyModal(userId, channels, details = {}) {
+  pendingOtpVerification = { userId, channels, channelStatus: details.channelStatus || {}, roleLabel: details.roleLabel || "" };
+  const form = $("#otpVerifyForm");
+  form.elements.userId.value = userId;
+  $("#otpVerifyModalTitle").textContent = "Verify User Code";
+  updateOtpModalProgress({ ...details, channels });
+  const summary = otpDeliverySummary(details);
+  const deliveryText = details.sendWarning ? `Verification code is pending, but one or more channels could not send. ${summary}` : summary;
+  const message = [deliveryText].filter(Boolean).join(" ");
+  setOtpVerifyModalAlert(message, details.sendWarning ? "warning" : "success");
+  $("#otpVerifyModalAlert").classList.toggle("d-none", !message);
+  $("#otpVerifyModal").classList.remove("d-none");
+}
+
+function closeOtpVerifyModal() {
+  $("#otpVerifyModal").classList.add("d-none");
+  setOtpVerifyModalAlert();
+  const channels = pendingOtpVerification.channels || [];
+  const channelStatus = pendingOtpVerification.channelStatus || {};
+  const pendingChannels = channels.filter((channel) => channelStatus[channel] !== "verified").map(otpChannelVerifiedName);
+  if (pendingChannels.length) {
+    const roleLabel = pendingOtpVerification.roleLabel || "User";
+    showAlert(`${roleLabel} created but verification code for ${pendingChannels.join(" / ")} is pending. Complete verification from report.`, "warning");
+  }
+}
+
+async function sendCodeAndUpdateOtpModal(userId, channels) {
+  try {
+    setOtpVerifyModalAlert("Sending verification code...", "warning");
+    const details = await sendOtpForUser(userId, channels);
+    updateOtpModalProgress(details);
+    const summary = otpDeliverySummary(details);
+    const message = details.sendWarning ? `Verification code is pending, but one or more channels could not send. ${summary}` : `Verification code sent. ${summary}`;
+    setOtpVerifyModalAlert(message, details.sendWarning ? "warning" : "success");
+  } catch (error) {
+    setOtpVerifyModalAlert(error.message, "danger");
+  }
+}
+
+async function verifyOtpChannels(channels, form = $("#otpVerifyForm")) {
+  const userId = form.elements.userId.value;
+  const otps = {};
+  for (const channel of channels) {
+    const value = form.elements[`${channel}Otp`]?.value?.trim();
+    if (!value) throw new Error(`Enter 6 digit ${otpChannelName(channel)} verification code.`);
+    otps[channel] = value;
+  }
+  await api(`/users/${userId}/otp/verify`, {
+    method: "POST",
+    body: JSON.stringify({ otps })
+  });
+  const verifiedUser = (await api(`/users/${userId}`)).data;
+  updateOtpModalProgress({ channels: pendingOtpVerification.channels, channelStatus: verifiedUser.otpChannelStatus || {} });
+  if (verifiedUser.otpVerificationStatus === "verified") {
+    $("#otpVerifyModal").classList.add("d-none");
+    showAlert("Verification code verified successfully.", "success");
+  } else {
+    setOtpVerifyModalAlert("Verified done for selected code. Verification under process for remaining Email / SMS.", "success");
+  }
+  await showSection(state.section);
+}
+
+async function sendPasswordShareEmailCode() {
+  const form = $("#passwordShareForm");
+  const userId = form.elements.userId.value;
+  const email = form.elements.verifyEmail.value.trim();
+  if (!userId) throw new Error("User is required.");
+  if (!email) throw new Error("Enter Email to verify.");
+  if (!validatePasswordShareEmailInput(true)) throw new Error("Enter a unique Email to verify.");
+  setPasswordShareModalAlert("Sending verification code to Email...", "warning");
+  const details = await sendOtpForUser(userId, ["email"], { email });
+  $("#passwordShareEmailCodeRow").classList.remove("d-none");
+  const summary = otpDeliverySummary(details);
+  setPasswordShareModalAlert(details.sendWarning ? `Verification code could not be sent. ${summary}` : `Verification code sent to Email. ${summary}`, details.sendWarning ? "warning" : "success");
+  form.elements.emailVerificationCode.focus();
+}
+
+async function verifyPasswordShareEmailCode() {
+  const form = $("#passwordShareForm");
+  const userId = form.elements.userId.value;
+  const code = form.elements.emailVerificationCode.value.trim();
+  if (!userId) throw new Error("User is required.");
+  if (!/^\d{6}$/.test(code)) throw new Error("Enter 6 digit Email verification code.");
+  const payload = await api(`/users/${userId}/otp/verify`, {
+    method: "POST",
+    body: JSON.stringify({ otps: { email: code } })
+  });
+  const verifiedUser = payload.data;
+  cache.users = cache.users.map((user) => (user.id === verifiedUser.id ? verifiedUser : user));
+  $("#passwordShareEmailVerifySection").classList.add("d-none");
+  setPasswordShareResetEnabled(true);
+  setPasswordShareModalAlert("Email verified. Enter password details to reset and share by Email.", "success");
+  form.elements.superAdminPassword.focus();
+  await showSection("users");
+}
+
+function setCurrentAssistantDocumentSummary(user) {
+  const summary = $("#assistantCurrentDocuments");
+  if (!summary) return;
+  const aadhaar = documentLinks(user?.aadhaarDocuments || []);
+  const pan = documentLinks(user?.panDocuments || []);
+  summary.innerHTML = user
+    ? `<div class="current-documents"><b>Current Aadhaar</b>${aadhaar}<b>Current PAN</b>${pan}</div>`
+    : "";
+}
+
+function collectAssistantDocumentUploads(form, fields = assistantUserDocumentFields) {
+  return fields
+    .map((field) => {
+      const raw = form.elements[field.key]?.value;
+      if (!raw) return null;
+      const file = JSON.parse(raw);
+      const documentType = field.codes
+        .map((code) => cache.documentTypes.find((item) => item.code === code))
+        .find(Boolean);
+      if (!documentType) throw new Error(`${field.label} document type is not configured. Run verification seed or refresh the page.`);
+      return {
+        documentTypeId: documentType.id,
+        originalName: file.originalName,
+        mimeType: file.mimeType,
+        previewUrl: file.previewUrl
+      };
+    })
+    .filter(Boolean);
+}
+
+function parseWktPolygon(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^POLYGON\s*\(\s*\((.+)\)\s*\)$/i);
+  if (!match) throw new Error("Polygon Description must use WKT format: POLYGON((lng lat, lng lat, lng lat, lng lat)).");
+  const coordinates = match[1].split(",").map((pair) => {
+    const parts = pair.trim().split(/\s+/).map(Number);
+    if (parts.length < 2 || parts.some((part) => Number.isNaN(part))) {
+      throw new Error("Polygon Description has invalid coordinates. Use longitude latitude pairs.");
+    }
+    return [parts[0], parts[1]];
+  });
+  if (coordinates.length < 4) throw new Error("Polygon must have at least 4 points, including the closing point.");
+  const [firstLng, firstLat] = coordinates[0];
+  const [lastLng, lastLat] = coordinates[coordinates.length - 1];
+  if (firstLng !== lastLng || firstLat !== lastLat) coordinates.push([firstLng, firstLat]);
+  return coordinates;
+}
+
+function boundsFromCoordinates(coordinates) {
+  return coordinates.reduce(
+    (bounds, [lng, lat]) => ({
+      minLng: Math.min(bounds.minLng, lng),
+      maxLng: Math.max(bounds.maxLng, lng),
+      minLat: Math.min(bounds.minLat, lat),
+      maxLat: Math.max(bounds.maxLat, lat)
+    }),
+    { minLng: Infinity, maxLng: -Infinity, minLat: Infinity, maxLat: -Infinity }
+  );
+}
+
+function drawPolygonOverlay(coordinates, bounds) {
+  const svg = $("#polygonOverlay");
+  const wrap = $("#polygonMapWrap");
+  if (!svg || !wrap) return;
+  const width = wrap.clientWidth || 1;
+  const height = wrap.clientHeight || 1;
+  const lngSpan = bounds.maxLng - bounds.minLng || 0.000001;
+  const latSpan = bounds.maxLat - bounds.minLat || 0.000001;
+  const padding = 34;
+  const usableWidth = Math.max(width - padding * 2, 1);
+  const usableHeight = Math.max(height - padding * 2, 1);
+  const points = coordinates
+    .map(([lng, lat]) => {
+      const x = padding + ((lng - bounds.minLng) / lngSpan) * usableWidth;
+      const y = padding + ((bounds.maxLat - lat) / latSpan) * usableHeight;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.innerHTML = `
+    <polygon points="${points}" fill="rgba(255, 45, 85, 0.36)" stroke="#ff0033" stroke-width="5" stroke-linejoin="round"></polygon>
+    <polyline points="${points}" fill="none" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"></polyline>
+  `;
+}
+
+function loadOlaMapsSdk() {
+  if (window.OlaMaps) return Promise.resolve();
+  if (olaMapsSdkPromise) return olaMapsSdkPromise;
+  olaMapsSdkPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://www.unpkg.com/olamaps-web-sdk@latest/dist/olamaps-web-sdk.umd.js";
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Unable to load Ola Maps Web SDK. Check internet access and CSP settings."));
+    document.head.appendChild(script);
+  });
+  return olaMapsSdkPromise;
+}
+
+function cleanOlaStyleUrl(styleUrl) {
+  const url = new URL(styleUrl);
+  url.searchParams.delete("api_key");
+  return url.toString();
+}
+
+function fallbackRasterStyle() {
+  return {
+    version: 8,
+    sources: {
+      osm: {
+        type: "raster",
+        tiles: [
+          "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+          "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+          "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        ],
+        tileSize: 256,
+        attribution: "OpenStreetMap contributors"
+      }
+    },
+    layers: [{ id: "osm", type: "raster", source: "osm" }]
+  };
+}
+
+function isOlaMapAuthOrDomainError(error) {
+  const message = String(error?.message || error?.error?.message || error || "");
+  const status = String(error?.status || error?.error?.status || "");
+  return status === "401" || status === "403" || /401|403|unauthori[sz]ed|forbidden|domain is not allowed|domain.*not allowed|api key/i.test(message);
+}
+
+async function renderPolygonMap(cluster) {
+  const alertEl = $("#polygonMapAlert");
+  alertEl.classList.add("d-none");
+  alertEl.textContent = "";
+  $("#polygonModalTitle").textContent = `${cluster.name || "Cluster"} Polygon`;
+  $("#polygonWktPreview").textContent = cluster.polygonDescription || "";
+  $("#polygonModal").classList.remove("d-none");
+  $("#polygonMap").innerHTML = "";
+  $("#polygonOverlay").innerHTML = "";
+
+  try {
+    const coordinates = parseWktPolygon(cluster.polygonDescription);
+    const config = await api(BASE_PATH+"/config/maps");
+    const { olaMapsApiKey, olaMapsStyleUrl } = config.data || {};
+    if (!olaMapsApiKey) throw new Error("Ola Maps API key is not configured. Add OLA_MAPS_API_KEY in zigo-admin .env and restart the admin server.");
+    await loadOlaMapsSdk();
+    const bounds = boundsFromCoordinates(coordinates);
+    const center = [(bounds.minLng + bounds.maxLng) / 2, (bounds.minLat + bounds.maxLat) / 2];
+    drawPolygonOverlay(coordinates, bounds);
+    const olaMaps = new window.OlaMaps({ apiKey: olaMapsApiKey });
+    const initMap = (style) =>
+      olaMaps.init({
+        style,
+        container: "polygonMap",
+        center,
+        zoom: 12
+      });
+    polygonMapInstance = initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
+    let usedFallback = false;
+    polygonMapInstance.on("error", (event) => {
+      const message = event?.error?.message || "Ola Maps failed to load one or more map resources. Check API key, domain restrictions, and network access.";
+      if (!usedFallback && isOlaMapAuthOrDomainError(event?.error || message)) {
+        usedFallback = true;
+        polygonMapInstance?.remove?.();
+        $("#polygonMap").innerHTML = "";
+        $("#polygonOverlay").innerHTML = "";
+        polygonMapInstance = initMap(fallbackRasterStyle());
+        polygonMapInstance.on("load", drawWhenReady);
+        polygonMapInstance.on("idle", drawPolygon);
+        alertEl.textContent = `${message}. Showing fallback map tiles. Add this admin domain to the Ola Maps credentials whitelist to use Ola vector tiles.`;
+      } else {
+        alertEl.textContent = message;
+      }
+      alertEl.classList.remove("d-none");
+    });
+    function drawPolygon() {
+      const sourceId = "cluster-polygon-source";
+      const fillLayerId = "cluster-polygon-fill";
+      const lineLayerId = "cluster-polygon-line";
+      const pointSourceId = "cluster-polygon-point-source";
+      const pointLayerId = "cluster-polygon-points";
+      const geojson = {
+        type: "Feature",
+        geometry: { type: "Polygon", coordinates: [coordinates] },
+        properties: { name: cluster.name || "Cluster" }
+      };
+      const pointsGeojson = {
+        type: "FeatureCollection",
+        features: coordinates.slice(0, -1).map((coordinate, index) => ({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: coordinate },
+          properties: { index }
+        }))
+      };
+      if (!polygonMapInstance.getSource || !polygonMapInstance.addSource) return;
+      if (!polygonMapInstance.getSource(sourceId)) {
+        polygonMapInstance.addSource(sourceId, { type: "geojson", data: geojson });
+        polygonMapInstance.addLayer({
+          id: fillLayerId,
+          type: "fill",
+          source: sourceId,
+          paint: { "fill-color": "#ff2d55", "fill-opacity": 0.28 }
+        });
+        polygonMapInstance.addLayer({
+          id: lineLayerId,
+          type: "line",
+          source: sourceId,
+          paint: { "line-color": "#ff0033", "line-width": 5, "line-opacity": 0.98 }
+        });
+        polygonMapInstance.addSource(pointSourceId, { type: "geojson", data: pointsGeojson });
+        polygonMapInstance.addLayer({
+          id: pointLayerId,
+          type: "circle",
+          source: pointSourceId,
+          paint: { "circle-color": "#003880", "circle-radius": 4, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 }
+        });
+      }
+      if (polygonMapInstance.resize) polygonMapInstance.resize();
+      if (polygonMapInstance.fitBounds) {
+        polygonMapInstance.fitBounds(
+          [
+            [bounds.minLng, bounds.minLat],
+            [bounds.maxLng, bounds.maxLat]
+          ],
+          { padding: 48, duration: 500 }
+        );
+      }
+    }
+    setTimeout(() => polygonMapInstance?.resize?.(), 150);
+    function drawWhenReady() {
+      polygonMapInstance?.resize?.();
+      drawPolygonOverlay(coordinates, bounds);
+      drawPolygon();
+      setTimeout(() => {
+        drawPolygonOverlay(coordinates, bounds);
+        drawPolygon();
+      }, 250);
+      setTimeout(() => {
+        drawPolygonOverlay(coordinates, bounds);
+        drawPolygon();
+      }, 750);
+    }
+    if (polygonMapInstance.loaded && polygonMapInstance.loaded()) drawWhenReady();
+    else polygonMapInstance.on("load", drawWhenReady);
+    polygonMapInstance.on("idle", drawPolygon);
+  } catch (error) {
+    alertEl.textContent = error.message;
+    alertEl.classList.remove("d-none");
+  }
+}
+
+function basicRows(items, columns, endpoint) {
+  return items
+    .map(
+      (item) => `<tr>
+        ${columns.map((column) => `<td>${column.render ? column.render(item) : escapeHtml(item[column.key] ?? "-")}</td>`).join("")}
+        <td class="text-end">
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${endpoint}" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function serviceRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td>${imageCell(item.imageUrl)}</td>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.description || "-")}</td>
+        <td>${escapeHtml(item.locationMode === "multi" ? `Multi (${item.maxLocationsLimit || 1})` : "Current")}</td>
+        <td>${escapeHtml(item.priority ?? 0)}</td>
+        <td>${status(item.isRecommended ? "recommended" : "normal")}</td>
+        <td>${status(item.isEnabled ? "enabled" : "disabled")}</td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-service" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/services" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function serviceCategoryRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td>${imageCell(item.imageUrl)}</td>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.serviceName || "-")}</td>
+        <td>${escapeHtml(item.priority ?? 0)}</td>
+        <td>${status(item.isRecommended ? "recommended" : "normal")}</td>
+        <td>${status(item.isUsable === false ? "blocked" : item.isEnabled ? "enabled" : "disabled")}</td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-service-category" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/service-categories" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function categoryMasterRows(items) {
+  return (items || [])
+    .map(
+      (item) => `<tr>
+        <td>${imageCell(item.imageUrl)}</td>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.priority ?? 0)}</td>
+        <td>${escapeHtml(item.locationMode === "multi" ? `Multiple (${item.maxLocationsLimit || 1})` : "Current Location")}</td>
+        <td>${status(item.addWithOtherCategory ? "allowed" : "single")}</td>
+        <td><span class="row-note">* ${(item.taskList || []).length} | + ${(item.canDoList || []).length} | x ${(item.cantDoList || []).length}</span></td>
+        <td>${status(item.isRecommended ? "recommended" : "normal")}</td>
+        <td>${status(item.isEnabled ? "enabled" : "disabled")}</td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-category-master" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/categories" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+const categoryGuidanceDefaults = {
+  taskListTitle: "Tasks related to category",
+  canDoTitle: "What Assistant can do",
+  cantDoTitle: "What Assistant can't do"
+};
+
+function normalizeCategoryGuidanceList(values = []) {
+  return (Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function categoryMasterGuidanceRows(type, values = []) {
+  const rows = normalizeCategoryGuidanceList(values);
+  const list = rows.length ? rows : [""];
+  return list.map((value) => `<div class="category-guidance-row" data-category-guidance-row="${type}">
+    <button class="category-guidance-drag" data-category-guidance-drag-handle draggable="true" type="button" title="Drag to reorder" aria-label="Drag to reorder">Move</button>
+    <input class="form-control" data-category-guidance-input="${type}" value="${escapeHtml(value)}" placeholder="${type === "task" ? "Task related to this category" : type === "canDo" ? "Assistant can do..." : "Assistant can't do..."}">
+    <button class="btn btn-light btn-sm" data-action="remove-category-guidance-row" data-type="${type}" type="button">Remove</button>
+  </div>`).join("");
+}
+
+function categoryMasterGuidanceBlock(type, icon, iconClass, titleName, defaultTitle, values = []) {
+  return `<div class="category-guidance-block">
+    <div class="category-guidance-head">
+      <span class="category-guidance-icon ${iconClass}">${icon}</span>
+      <input class="form-control" name="${titleName}" value="${escapeHtml(defaultTitle)}" placeholder="${escapeHtml(defaultTitle)}">
+      <button class="btn btn-soft btn-sm" data-action="add-category-guidance-row" data-type="${type}" type="button">Add</button>
+    </div>
+    <div class="category-guidance-list" data-category-guidance-list="${type}">
+      ${categoryMasterGuidanceRows(type, values)}
+    </div>
+  </div>`;
+}
+
+function renderCategoryMasterGuidance(form = $("#categoryMasterForm"), data = {}) {
+  if (!form) return;
+  const wrap = form.querySelector("[data-category-guidance-editor]");
+  if (!wrap) return;
+  const taskTitle = data.taskListTitle || categoryGuidanceDefaults.taskListTitle;
+  const canDoTitle = data.canDoTitle || categoryGuidanceDefaults.canDoTitle;
+  const cantDoTitle = data.cantDoTitle || categoryGuidanceDefaults.cantDoTitle;
+  wrap.innerHTML = `
+    ${categoryMasterGuidanceBlock("task", "&#9733;", "star", "taskListTitle", taskTitle, data.taskList || [])}
+    ${categoryMasterGuidanceBlock("canDo", "&#10003;", "tick", "canDoTitle", canDoTitle, data.canDoList || [])}
+    ${categoryMasterGuidanceBlock("cantDo", "&#10005;", "cross", "cantDoTitle", cantDoTitle, data.cantDoList || [])}
+  `;
+}
+
+function collectCategoryMasterGuidance(form = $("#categoryMasterForm")) {
+  const list = (type) => [...form.querySelectorAll(`[data-category-guidance-input="${type}"]`)]
+    .map((input) => input.value.trim())
+    .filter(Boolean);
+  return {
+    taskListTitle: form.elements.taskListTitle?.value || categoryGuidanceDefaults.taskListTitle,
+    taskList: list("task"),
+    canDoTitle: form.elements.canDoTitle?.value || categoryGuidanceDefaults.canDoTitle,
+    canDoList: list("canDo"),
+    cantDoTitle: form.elements.cantDoTitle?.value || categoryGuidanceDefaults.cantDoTitle,
+    cantDoList: list("cantDo")
+  };
+}
+
+let categoryGuidanceDragRow = null;
+
+function clearCategoryGuidanceDragState() {
+  document.querySelectorAll(".category-guidance-row.dragging, .category-guidance-row.drag-over").forEach((row) => {
+    row.classList.remove("dragging", "drag-over");
+  });
+  categoryGuidanceDragRow = null;
+}
+
+function categoryGuidanceDropTarget(target) {
+  const row = target?.closest?.("[data-category-guidance-row]");
+  if (!row || !row.closest("#categoryMasterForm")) return null;
+  return row;
+}
+
+function serviceCategoryFilterToolbar() {
+  return `<div class="master-form compact service-category-filter-bar mb-3">
+    ${priceMasterFloatingField("Search categories", `<input class="form-control" id="serviceCategorySearchInput" type="search" value="${escapeHtml(serviceCategoryFilters.search || "")}" placeholder="Search name, code, service">`)}
+    ${priceMasterFloatingField("Service", `<select class="form-select" id="serviceCategoryServiceFilter"><option value="">All Services</option>${optionRows(activeItems(cache.services || []))}</select>`)}
+    <button class="btn btn-light" data-action="clear-service-category-filters" type="button">Clear</button>
+  </div>`;
+}
+
+function filteredServiceCategories(items = cache.categories || []) {
+  const query = String(serviceCategoryFilters.search || "").trim().toLowerCase();
+  const serviceId = String(serviceCategoryFilters.serviceId || "");
+  return (items || []).filter((item) => {
+    if (serviceId && String(item.serviceId || "") !== serviceId) return false;
+    if (!query) return true;
+    return [
+      item.name,
+      item.code,
+      item.id,
+      item.serviceName,
+      item.description
+    ].filter(Boolean).join(" ").toLowerCase().includes(query);
+  });
+}
+
+function serviceCategoryFilterCountHtml(rows = []) {
+  const total = (cache.categories || []).length;
+  const filtered = rows.length;
+  return `<div class="helper-text mb-2">${filtered === total ? `${total} categories` : `${filtered} of ${total} categories`}</div>`;
+}
+
+function serviceCategoryTableHtml(items = cache.categories || []) {
+  const rows = filteredServiceCategories(items);
+  return `${serviceCategoryFilterToolbar()}<div id="serviceCategoryTableWrap">${serviceCategoryFilterCountHtml(rows)}${table(["Image", "Name", "Code", "Service", "Priority", "Recommended", "Enabled", "Status", ""], serviceCategoryRows(rows))}</div>`;
+}
+
+function renderServiceCategoryTable() {
+  const select = $("#serviceCategoryServiceFilter");
+  const wrap = $("#serviceCategoryTableWrap");
+  if (select) select.value = serviceCategoryFilters.serviceId || "";
+  if (!wrap) return;
+  const rows = filteredServiceCategories(cache.categories || []);
+  wrap.innerHTML = `${serviceCategoryFilterCountHtml(rows)}${table(["Image", "Name", "Code", "Service", "Priority", "Recommended", "Enabled", "Status", ""], serviceCategoryRows(rows))}`;
+}
+
+function moneyNumber(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function updateCategoryPricingPreview() {
+  const form = $("#serviceCategoryForm");
+  updatePricingPreview(form);
+}
+
+function updatePricingPreview(form) {
+  if (!form) return;
+  const basePrice = moneyNumber(form.elements.basePrice.value);
+  const additionalCharges = moneyNumber(form.elements.additionalCharges?.value || 0);
+  const discountType = form.elements.discountType.value;
+  const discountValue = moneyNumber(form.elements.discountValue.value);
+  const discountAmount = discountType === "percent" ? moneyNumber((basePrice * Math.min(discountValue, 100)) / 100) : discountType === "flat" ? moneyNumber(discountValue) : 0;
+  const sellingPrice = Math.max(0, moneyNumber(basePrice - discountAmount));
+  const finalTotal = moneyNumber(sellingPrice + additionalCharges);
+  form.elements.discountAmount.value = discountAmount.toFixed(2);
+  form.elements.sellingPrice.value = sellingPrice.toFixed(2);
+  if (form.elements.finalTotalAmount) form.elements.finalTotalAmount.value = finalTotal.toFixed(2);
+}
+
+function surgeRuleRow(rule = {}) {
+  const id = crypto.randomUUID?.() || `surge-${Date.now()}-${Math.random()}`;
+  const days = rule.days || [];
+  return `<div class="surge-rule" data-surge-rule>
+    <input class="form-control" data-surge-field="name" value="${escapeHtml(rule.name || "")}" placeholder="Rule name">
+    <select class="form-select" data-surge-field="type">
+      ${["time", "day", "holiday", "weather"].map((type) => `<option value="${type}" ${rule.type === type ? "selected" : ""}>${type[0].toUpperCase() + type.slice(1)}</option>`).join("")}
+    </select>
+    <div class="master-form compact mb-0">
+      <input class="form-control" data-surge-field="start" type="time" value="${escapeHtml(rule.start || "")}">
+      <input class="form-control" data-surge-field="end" type="time" value="${escapeHtml(rule.end || "")}">
+    </div>
+    <div class="surge-days">
+      ${["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map((day) => `<label class="form-check"><input class="form-check-input" data-surge-day="${day}" type="checkbox" ${days.includes(day) ? "checked" : ""}> ${day.toUpperCase()}</label>`).join("")}
+    </div>
+    <div class="master-form compact mb-0">
+      <select class="form-select" data-surge-field="adjustmentType">
+        <option value="percent" ${rule.adjustmentType === "percent" ? "selected" : ""}>Increase %</option>
+        <option value="flat" ${rule.adjustmentType === "flat" ? "selected" : ""}>Flat Amount</option>
+      </select>
+      <input class="form-control" data-surge-field="value" type="number" min="0" step="0.01" value="${escapeHtml(rule.value ?? 0)}" placeholder="Value">
+    </div>
+    <label class="form-check"><input class="form-check-input" data-surge-field="active" type="checkbox" ${rule.active !== false ? "checked" : ""}> Active surge</label>
+    <button class="btn btn-outline-danger btn-sm" data-action="remove-surge-rule" data-id="${id}" type="button">Remove Rule</button>
+  </div>`;
+}
+
+function setSurgeRules(rules = []) {
+  const target = $("#surgeRulesList");
+  if (!target) return;
+  target.innerHTML = (rules.length ? rules : []).map((rule) => surgeRuleRow(rule)).join("");
+}
+
+function collectSurgeRules() {
+  return [...document.querySelectorAll("[data-surge-rule]")]
+    .map((row) => {
+      const field = (name) => row.querySelector(`[data-surge-field="${name}"]`);
+      return {
+        name: field("name")?.value?.trim() || "Surge rule",
+        type: field("type")?.value || "time",
+        days: [...row.querySelectorAll("[data-surge-day]:checked")].map((input) => input.dataset.surgeDay),
+        start: field("start")?.value || null,
+        end: field("end")?.value || null,
+        adjustmentType: field("adjustmentType")?.value || "percent",
+        value: moneyNumber(field("value")?.value),
+        active: field("active")?.checked !== false
+      };
+    })
+    .filter((rule) => rule.name || rule.value > 0);
+}
+
+function renderSelectedSurgeDates(form = $("#surgeRuleForm")) {
+  if (!form) return;
+  const dates = (form.elements.selectedDates.value || "").split(",").filter(Boolean).sort();
+  $("#selectedSurgeDates")?.replaceChildren();
+  const target = $("#selectedSurgeDates");
+  if (!target) return;
+  target.innerHTML = dates
+    .map((date) => {
+      const startTime = form.querySelector(`[data-date-start="${cssEscape(date)}"]`)?.value || form.elements.startTime?.value || "";
+      const endTime = form.querySelector(`[data-date-end="${cssEscape(date)}"]`)?.value || form.elements.endTime?.value || "";
+      return `<div class="surge-date-time" data-surge-date-row="${escapeHtml(date)}">
+        <span><b>${escapeHtml(formatSurgeSelectedDate(date))}</b><small>${escapeHtml(formatSurgeSelectedDay(date))}</small></span>
+        <input class="form-control" data-date-start="${escapeHtml(date)}" type="time" value="${escapeHtml(startTime)}" aria-label="${escapeHtml(date)} start time">
+        <input class="form-control" data-date-end="${escapeHtml(date)}" type="time" value="${escapeHtml(endTime)}" aria-label="${escapeHtml(date)} end time">
+        <button class="btn btn-outline-danger btn-xs" type="button" data-action="remove-surge-date" data-id="${escapeHtml(date)}">Remove</button>
+      </div>`;
+    })
+    .join("");
+}
+
+function addSurgeDate(date) {
+  const form = $("#surgeRuleForm");
+  if (!form) return;
+  if (!date) {
+    showAlert("Pick a date from calendar before adding.");
+    return;
+  }
+  const dates = new Set((form.elements.selectedDates.value || "").split(",").filter(Boolean));
+  dates.add(date);
+  form.elements.selectedDates.value = [...dates].sort().join(",");
+  renderSelectedSurgeDates(form);
+}
+
+function formatSurgeSelectedDate(value) {
+  const [year, month, day] = String(value || "").split("-");
+  return year && month && day ? `${day}-${month}-${year}` : value || "-";
+}
+
+function formatSurgeSelectedDay(value) {
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { weekday: "short" }).toUpperCase();
+}
+
+function collectSurgeDateTimes(form = $("#surgeRuleForm")) {
+  if (!form) return [];
+  return (form.elements.selectedDates.value || "")
+    .split(",")
+    .filter(Boolean)
+    .sort()
+    .map((date) => ({
+      date,
+      startTime: form.querySelector(`[data-date-start="${cssEscape(date)}"]`)?.value || null,
+      endTime: form.querySelector(`[data-date-end="${cssEscape(date)}"]`)?.value || null
+    }));
+}
+
+function setSurgeDateTimes(dateTimes = [], form = $("#surgeRuleForm")) {
+  if (!form) return;
+  const normalized = new Map(
+    dateTimes
+      .filter((slot) => slot?.date)
+      .map((slot) => [slot.date, { startTime: slot.startTime || "", endTime: slot.endTime || "" }])
+  );
+  const dates = normalized.size ? [...normalized.keys()] : (form.elements.selectedDates.value || "").split(",").filter(Boolean);
+  form.elements.selectedDates.value = [...new Set(dates)].sort().join(",");
+  renderSelectedSurgeDates(form);
+  for (const [date, slot] of normalized) {
+    const start = form.querySelector(`[data-date-start="${cssEscape(date)}"]`);
+    const end = form.querySelector(`[data-date-end="${cssEscape(date)}"]`);
+    if (start) start.value = slot.startTime;
+    if (end) end.value = slot.endTime;
+  }
+}
+
+function collectSurgeDayTimes(form = $("#surgeRuleForm")) {
+  if (!form) return {};
+  return Object.fromEntries(
+    ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+      .map((day) => {
+        const startTime = form.querySelector(`[data-day-start="${day}"]`)?.value || null;
+        const endTime = form.querySelector(`[data-day-end="${day}"]`)?.value || null;
+        return [day, { startTime, endTime }];
+      })
+      .filter(([, value]) => value.startTime || value.endTime)
+  );
+}
+
+function setSurgeDayTimes(dayTimes = {}, form = $("#surgeRuleForm")) {
+  if (!form) return;
+  for (const day of ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]) {
+    const start = form.querySelector(`[data-day-start="${day}"]`);
+    const end = form.querySelector(`[data-day-end="${day}"]`);
+    if (start) start.value = dayTimes[day]?.startTime || "";
+    if (end) end.value = dayTimes[day]?.endTime || "";
+  }
+}
+
+function csvValues(value = "") {
+  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function bookingTypeTimePeriod(time) {
+  const hour = Number(String(time || "00:00").slice(0, 2));
+  if (hour < 5) return "mid_night";
+  if (hour < 8) return "early_morning";
+  if (hour < 12) return "morning";
+  if (hour < 17) return "afternoon";
+  if (hour < 21) return "evening";
+  return "night";
+}
+
+function bookingTypeDefaultCategoryName(period) {
+  return {
+    early_morning: "Early Morning",
+    morning: "Morning",
+    afternoon: "Afternoon",
+    evening: "Evening",
+    night: "Night",
+    mid_night: "Mid Night"
+  }[period] || "Time Category";
+}
+
+function bookingTypeHourOptions() {
+  return Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, "0"));
+}
+
+function bookingTypeMinuteOptions() {
+  return ["00", "30"];
+}
+
+function bookingTypeTimeValue(hour = 0, minute = 0) {
+  const normalizedHour = Math.max(0, Math.min(23, Math.round(Number(hour) || 0)));
+  const normalizedMinute = Math.max(0, Math.min(59, Math.round(Number(minute) || 0)));
+  return `${String(normalizedHour).padStart(2, "0")}:${String(normalizedMinute).padStart(2, "0")}`;
+}
+
+function bookingTypeCategoryId(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || `time_category_${Date.now()}`;
+}
+
+function normalizeBookingTypeTimeCategories(categories = [], fallbackTimes = []) {
+  const rows = Array.isArray(categories) ? categories : [];
+  const normalized = rows
+    .map((category, index) => {
+      const name = String(category?.name || "").trim();
+      const id = String(category?.id || bookingTypeCategoryId(name));
+      const sortOrder = Math.max(1, Math.round(Number(category?.sortOrder || index + 1)));
+      const isActive = category?.isActive !== false;
+      const timeSlots = [...new Set(category?.timeSlots || [])]
+        .filter((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time))
+        .sort();
+      return { id, name, sortOrder, isActive, timeSlots };
+    })
+    .filter((category) => category.name)
+    .sort((left, right) => left.sortOrder - right.sortOrder || left.name.localeCompare(right.name));
+  if (normalized.length) return normalized;
+  const grouped = new Map();
+  for (const time of csvValues(Array.isArray(fallbackTimes) ? fallbackTimes.join(",") : fallbackTimes)) {
+    const period = bookingTypeTimePeriod(time);
+    if (!grouped.has(period)) grouped.set(period, { id: period, name: bookingTypeDefaultCategoryName(period), sortOrder: grouped.size + 1, isActive: true, timeSlots: [] });
+    grouped.get(period).timeSlots.push(time);
+  }
+  return [...grouped.values()].map((category) => ({ ...category, timeSlots: [...new Set(category.timeSlots)].sort() }));
+}
+
+function activeBookingTypeTimeCategories(categories = [], fallbackTimes = []) {
+  return normalizeBookingTypeTimeCategories(categories, fallbackTimes).filter((category) => category.isActive);
+}
+
+function bookingTypeTimeCategories(form = $("#bookingTypeForm")) {
+  if (!form?.elements.timeCategories) return [];
+  try {
+    return normalizeBookingTypeTimeCategories(JSON.parse(form.elements.timeCategories.value || "[]"), form.elements.timeSlots?.value || "");
+  } catch {
+    return normalizeBookingTypeTimeCategories([], form.elements.timeSlots?.value || "");
+  }
+}
+
+function setBookingTypeTimeCategories(form = $("#bookingTypeForm"), categories = [], activeId = "") {
+  if (!form?.elements.timeCategories) return;
+  const normalized = normalizeBookingTypeTimeCategories(categories);
+  form.elements.timeCategories.value = JSON.stringify(normalized);
+  if (form.elements.timeSlots) form.elements.timeSlots.value = [...new Set(normalized.filter((category) => category.isActive).flatMap((category) => category.timeSlots))].sort().join(",");
+  if (form.elements.activeTimeCategoryId) {
+    const nextActive = normalized.some((category) => category.id === activeId) ? activeId : normalized[0]?.id || "";
+    form.elements.activeTimeCategoryId.value = nextActive;
+  }
+  renderBookingTypeTimeCategories(form);
+}
+
+function renderBookingTypeTimeCategories(form = $("#bookingTypeForm")) {
+  if (!form) return;
+  const categories = bookingTypeTimeCategories(form);
+  const activeId = form.elements.activeTimeCategoryId?.value || categories[0]?.id || "";
+  const active = categories.find((category) => category.id === activeId) || categories[0] || null;
+  const tabs = form.querySelector("[data-booking-type-time-tabs]");
+  const panel = form.querySelector("[data-booking-type-time-panel]");
+  if (tabs) {
+    tabs.innerHTML = categories.length
+      ? categories.map((category) => `<button class="booking-type-time-tab ${category.id === active?.id ? "selected" : ""} ${category.isActive ? "" : "inactive"}" data-action="select-booking-type-time-category" data-id="${escapeHtml(category.id)}" type="button"><span>${escapeHtml(category.sortOrder)}. ${escapeHtml(category.name)}</span>${category.isActive ? "" : "<small>Inactive</small>"}</button>`).join("")
+      : `<span class="helper-text">Create a time category first.</span>`;
+  }
+  if (!panel) return;
+  if (!active) {
+    panel.innerHTML = `<div class="empty-state">Add categories like Morning, Afternoon, Evening, Night, or Mid Night.</div>`;
+    return;
+  }
+  panel.innerHTML = `<div class="booking-type-time-panel-card">
+    <div class="booking-type-time-panel-head">
+      <div><span>Start Time</span><h3>${escapeHtml(active.name)}${active.isActive ? "" : " (Inactive)"}</h3></div>
+      <button class="btn btn-outline-danger btn-xs" data-action="remove-booking-type-time-category" data-id="${escapeHtml(active.id)}" type="button">Remove Category</button>
+    </div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Time Category", `<input class="form-control" data-booking-type-category-field="name" value="${escapeHtml(active.name)}" placeholder=" ">`)}
+      ${priceMasterFloatingField("Priority", `<input class="form-control" data-booking-type-category-field="sortOrder" type="number" min="1" step="1" value="${escapeHtml(active.sortOrder)}" placeholder=" ">`)}
+      <label class="inline-check booking-type-category-active"><input type="checkbox" data-booking-type-category-field="isActive" ${active.isActive ? "checked" : ""}> Active</label>
+      <button class="btn btn-soft" data-action="update-booking-type-time-category" data-id="${escapeHtml(active.id)}" type="button">Update Category</button>
+    </div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Time Slot", `<div class="d-flex gap-2"><select class="form-select" name="timeSlotHour">${bookingTypeHourOptions().map((hour) => `<option value="${escapeHtml(hour)}">${escapeHtml(hour)}</option>`).join("")}</select><select class="form-select" name="timeSlotMinute">${bookingTypeMinuteOptions().map((minute) => `<option value="${escapeHtml(minute)}">${escapeHtml(minute)}</option>`).join("")}</select></div>`)}
+      <button class="btn btn-soft" data-action="add-booking-type-time" type="button">Add Time Slot</button>
+    </div>
+    <div class="booking-type-time-slot-grid">
+      ${active.timeSlots.length ? active.timeSlots.map((time) => `<button class="booking-type-time-slot" data-action="remove-booking-type-time" data-id="${escapeHtml(active.id)}" data-time="${escapeHtml(time)}" type="button">${escapeHtml(time)}<span>x</span></button>`).join("") : `<div class="empty-state">No time slots added in ${escapeHtml(active.name)}.</div>`}
+    </div>
+  </div>`;
+}
+
+function addBookingTypeTimeCategory(form = $("#bookingTypeForm")) {
+  if (!form) return;
+  const input = form.elements.timeCategoryName;
+  const name = String(input?.value || "").trim();
+  if (!name) {
+    showAlert("Enter a time category name before adding.");
+    return;
+  }
+  const categories = bookingTypeTimeCategories(form);
+  const nextOrder = categories.reduce((max, category) => Math.max(max, Number(category.sortOrder || 0)), 0) + 1;
+  const baseId = bookingTypeCategoryId(name);
+  let id = baseId;
+  let index = 2;
+  while (categories.some((category) => category.id === id)) {
+    id = `${baseId}_${index}`;
+    index += 1;
+  }
+  categories.push({ id, name, sortOrder: nextOrder, isActive: true, timeSlots: [] });
+  if (input) input.value = "";
+  setBookingTypeTimeCategories(form, categories, id);
+}
+
+function updateBookingTypeTimeCategory(form = $("#bookingTypeForm"), categoryId = "") {
+  if (!form || !categoryId) return;
+  const panel = form.querySelector("[data-booking-type-time-panel]");
+  const name = String(panel?.querySelector('[data-booking-type-category-field="name"]')?.value || "").trim();
+  if (!name) {
+    showAlert("Enter a time category name before updating.");
+    return;
+  }
+  const sortOrder = Math.max(1, Math.round(Number(panel?.querySelector('[data-booking-type-category-field="sortOrder"]')?.value || 1)));
+  const isActive = Boolean(panel?.querySelector('[data-booking-type-category-field="isActive"]')?.checked);
+  const currentCategories = bookingTypeTimeCategories(form);
+  const currentCategory = currentCategories.find((category) => category.id === categoryId);
+  const previousSortOrder = Number(currentCategory?.sortOrder || sortOrder);
+  let swappedPriority = false;
+  const categories = currentCategories.map((category) => {
+    if (category.id === categoryId) return { ...category, name, sortOrder, isActive };
+    if (!swappedPriority && category.sortOrder === sortOrder) {
+      swappedPriority = true;
+      return { ...category, sortOrder: previousSortOrder };
+    }
+    return category;
+  });
+  setBookingTypeTimeCategories(form, categories, categoryId);
+}
+
+function addBookingTypeTimeSlot(form = $("#bookingTypeForm")) {
+  if (!form) return;
+  const hour = form.elements.timeSlotHour?.value;
+  const minute = form.elements.timeSlotMinute?.value;
+  const time = bookingTypeTimeValue(hour, minute);
+  const activeId = form.elements.activeTimeCategoryId?.value;
+  if (!time || !activeId) return;
+  const categories = bookingTypeTimeCategories(form).map((category) => category.id === activeId
+    ? { ...category, timeSlots: [...new Set([...category.timeSlots, time])].sort() }
+    : category);
+  setBookingTypeTimeCategories(form, categories, activeId);
+}
+
+function toggleBookingTypeScheduleFields(form = $("#bookingTypeForm")) {
+  if (!form) return;
+  const isSchedule = form.elements.bookingType.value === "schedule";
+  form.querySelector("[data-booking-type-schedule-fields]")?.classList.toggle("d-none", !isSchedule);
+  form.elements.maxAdvanceDays.disabled = !isSchedule;
+  if (isSchedule) {
+    renderBookingTypeTimeCategories(form);
+  }
+}
+
+function applyCommonSurgeTimeToSelectedDays() {
+  const form = $("#surgeRuleForm");
+  if (!form) return;
+  const startTime = form.elements.startTime.value || "";
+  const endTime = form.elements.endTime.value || "";
+  for (const day of checkedValues(form.elements.days)) {
+    const start = form.querySelector(`[data-day-start="${day}"]`);
+    const end = form.querySelector(`[data-day-end="${day}"]`);
+    if (start) start.value = startTime;
+    if (end) end.value = endTime;
+  }
+}
+
+function clusterServiceSettingRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td><b>${escapeHtml(item.clusterName || "-")}</b></td>
+        <td><b>${escapeHtml(item.serviceName || "-")}</b><div class="row-note">${escapeHtml(item.serviceCode || item.serviceId)}</div></td>
+        <td>${status(item.isVisible ? "visible" : "hidden")}</td>
+        <td>${status(item.isEnabled ? "enabled" : "disabled")}</td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-cluster-service-setting" data-id="${item.id}" type="button">Edit</button>
+          ${isSuperAdminUser() ? `<button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/cluster-services" data-id="${item.id}" type="button">Delete</button>` : ""}
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function bookingTypeRows(items) {
+  return items.map((item) => `<tr>
+    <td><b>${escapeHtml(item.name || "-")}</b><div class="row-note">${escapeHtml(item.code || item.id)}</div></td>
+    <td>${status(item.bookingType || "instant")}</td>
+    <td>${escapeHtml(item.bookingType === "schedule" ? `${item.maxAdvanceDays || 1} day(s)` : "-")}</td>
+    <td>${escapeHtml(item.bookingType === "schedule" ? activeBookingTypeTimeCategories(item.timeCategories || [], item.timeSlots || []).map((category) => `${category.sortOrder}. ${category.name}: ${category.timeSlots.length}`).join(", ") || "-" : "-")}</td>
+    <td>${item.isDefault ? status("default") : ""}</td>
+    <td>${status(item.isActive ? "active" : "inactive")}</td>
+    <td class="text-end">
+      <button class="btn btn-soft btn-xs" data-action="edit-booking-type" data-id="${item.id}" type="button">Edit</button>
+      ${isSuperAdminUser() ? `<button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/booking-types" data-id="${item.id}" type="button">Delete</button>` : ""}
+    </td>
+  </tr>`).join("");
+}
+
+function clusterCategorySettingRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td><b>${escapeHtml(item.clusterName || "-")}</b></td>
+        <td><b>${escapeHtml(item.categoryName || "-")}</b><div class="row-note">${escapeHtml([item.serviceName, item.categoryCode].filter(Boolean).join(" / ") || item.categoryId)}</div></td>
+        <td>${status(item.isVisible ? "visible" : "hidden")}</td>
+        <td>${status(item.isEnabled ? "enabled" : "disabled")}</td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-cluster-category-setting" data-id="${item.id}" type="button">Edit</button>
+          ${isSuperAdminUser() ? `<button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/cluster-categories" data-id="${item.id}" type="button">Delete</button>` : ""}
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function clusterBookingTypeConfigKey(item) {
+  return [item?.bookingType || "both", item?.instantMode || "both", Number(item?.waitWindowMinutes || 0), item?.isActive !== false ? "active" : "inactive"].join("|");
+}
+
+function clusterBookingTypeRows(items) {
+  const groups = new Map();
+  for (const item of items || []) {
+    const clusterKey = item.clusterId || "cluster";
+    const key = clusterBookingTypeConfigKey(item);
+    if (!groups.has(clusterKey)) groups.set(clusterKey, { name: item.clusterName || "-", configGroups: new Map() });
+    const cluster = groups.get(clusterKey);
+    if (!cluster.configGroups.has(key)) cluster.configGroups.set(key, { key, sample: item, rows: [] });
+    cluster.configGroups.get(key).rows.push(item);
+  }
+  return [...groups.entries()].map(([clusterId, cluster]) => {
+    const clusterServiceIds = new Set(clusterBookingTypeServices(clusterId).map((service) => service.id));
+    const allServiceIds = [...clusterServiceIds];
+    return [...cluster.configGroups.values()].map((configGroup) => {
+      const serviceRowIds = new Set(configGroup.rows.map((row) => row.serviceId).filter(Boolean));
+      const coversAllServices = allServiceIds.length && serviceRowIds.size === allServiceIds.length;
+      const serviceGroups = new Map();
+      for (const row of configGroup.rows) {
+        const serviceKey = row.serviceId || "service";
+        if (!serviceGroups.has(serviceKey)) serviceGroups.set(serviceKey, { name: row.serviceName || "-", rows: [] });
+        serviceGroups.get(serviceKey).rows.push(row);
+      }
+      const detailHtml = coversAllServices
+          ? `<tr><td><b>All Services</b><div class="row-note">Service-level config</div></td><td>${status("service")}</td><td>${status(configGroup.sample.bookingType || "both")}</td><td>${escapeHtml(`${Number(configGroup.sample.waitWindowMinutes || 0)} mins`)}</td><td>${status(formatClusterBookingAssistantMode(configGroup.sample.instantMode))}</td><td>${status(configGroup.sample.isActive ? "active" : "inactive")}</td><td></td></tr>`
+          : [...serviceGroups.entries()].map(([serviceId, service]) => {
+      return `
+      <tr class="table-subgroup-row"><td colspan="7">Service: ${escapeHtml(service.name)}</td></tr>
+      ${service.rows.map((item) => `<tr>
+        <td>${escapeHtml(item.serviceName || item.serviceId)}</td>
+        <td>${status(item.targetType || "service")}</td>
+        <td>${status(item.bookingType || "both")}</td>
+        <td>${escapeHtml(`${Number(item.waitWindowMinutes || 0)} mins`)}</td>
+        <td>${status(formatClusterBookingAssistantMode(item.instantMode))}</td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td></td>
+      </tr>`).join("")}
+    `;
+    }).join("");
+      return `
+        <tr class="table-group-row">
+          <td colspan="6">Cluster: ${escapeHtml(cluster.name)}</td>
+          <td class="text-end">
+            <button class="btn btn-soft btn-xs" data-action="edit-cluster-booking-type-group" data-id="${escapeHtml(clusterId)}" data-config-key="${escapeHtml(configGroup.key)}" type="button">Edit</button>
+            <button class="btn btn-outline-danger btn-xs" data-action="delete-cluster-booking-type-group" data-id="${escapeHtml(clusterId)}" data-config-key="${escapeHtml(configGroup.key)}" type="button">Delete</button>
+          </td>
+        </tr>
+        ${detailHtml}
+      `;
+    }).join("");
+  }).join("");
+}
+
+function formatSurgeDateTimes(item = {}) {
+  const dateTimes = item.dateTimes?.length
+    ? item.dateTimes
+    : (item.selectedDates || []).map((date) => ({ date, startTime: item.startTime, endTime: item.endTime }));
+  return dateTimes
+    .map((slot) => `${slot.date} ${[slot.startTime, slot.endTime].filter(Boolean).join("-")}`.trim())
+    .join(", ");
+}
+
+function formatSurgeScope(item = {}) {
+  const scope = item.scope || {};
+  const type = scope.scopeType || "all";
+  if (type === "all") return "All";
+  const labels = [];
+  if (scope.stateId) labels.push(cache.states?.find((row) => row.id === scope.stateId)?.name || scope.stateId);
+  if (scope.cityId) labels.push(cache.cities?.find((row) => row.id === scope.cityId)?.name || scope.cityId);
+  if (scope.zoneId) labels.push(cache.zones?.find((row) => row.id === scope.zoneId)?.name || scope.zoneId);
+  if (scope.clusterId) labels.push(cache.clusters?.find((row) => row.id === scope.clusterId)?.name || scope.clusterId);
+  if (scope.serviceId) labels.push(cache.services?.find((row) => row.id === scope.serviceId)?.name || scope.serviceId);
+  if (scope.categoryId) labels.push(cache.categories?.find((row) => row.id === scope.categoryId)?.name || scope.categoryId);
+  const legacyIds = type === "cluster" ? scope.clusterIds || [] : type === "service" ? scope.serviceIds || [] : scope.categoryIds || [];
+  return `${type}: ${labels.join(" / ") || legacyIds.length || "-"}`;
+}
+
+function surgeStrategyFromAdjustment(type = "percent", value = 0) {
+  const prefix = Number(value || 0) < 0 ? "negative" : "positive";
+  return `${prefix}_${type === "flat" ? "flat" : "multiplier"}`;
+}
+
+function surgeAdjustmentFromStrategy(data = {}) {
+  const strategy = data.surgeStrategy || "positive_flat";
+  const isNegative = strategy.startsWith("negative");
+  const isFlat = strategy.endsWith("flat");
+  const sign = isNegative ? -1 : 1;
+  return {
+    adjustmentType: isFlat ? "flat" : "percent",
+    adjustmentValue: Number((sign * Math.abs(Number(data.adjustmentValue || 0))).toFixed(2))
+  };
+}
+
+function formatSurgeX(value) {
+  const multiplier = Math.abs(Number(value || 0)) / 100;
+  return `${Number(multiplier.toFixed(2))}x`;
+}
+
+function updateSurgeX(form = $("#surgeRuleForm")) {
+  if (!form?.elements.surgeStrategy) return;
+  const isMultiplier = String(form.elements.surgeStrategy.value || "").endsWith("multiplier");
+  const field = form.querySelector("[data-surge-x-field]");
+  if (field) field.classList.toggle("d-none", !isMultiplier);
+  if (form.elements.surgeX) {
+    form.elements.surgeX.value = isMultiplier ? formatSurgeX(form.elements.adjustmentValue?.value || 0) : "";
+  }
+}
+
+function toggleSurgeScheduleSections(form = $("#surgeRuleForm")) {
+  if (!form) return;
+  const scheduleMode = form.elements.scheduleMode?.value || "weekly";
+  const isDayWise = scheduleMode === "date_time";
+  form.querySelectorAll("[data-surge-week-section]").forEach((el) => el.classList.toggle("d-none", isDayWise));
+  form.querySelectorAll("[data-surge-date-section]").forEach((el) => el.classList.toggle("d-none", !isDayWise));
+}
+
+function surgeRuleRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.code)}</div></td>
+        <td>${escapeHtml(item.ruleType)}<div class="row-note">${escapeHtml(item.scheduleMode === "date_time" ? "Selected Dates" : "Weekly Surge")} | ${escapeHtml(formatSurgeScope(item))}</div></td>
+        <td>${escapeHtml((item.days || []).join(", ") || "-")}<div class="row-note">${escapeHtml(formatSurgeDateTimes(item))}</div></td>
+        <td>${escapeHtml([item.startTime, item.endTime].filter(Boolean).join(" - ") || "-")}<div class="row-note">${escapeHtml(Object.entries(item.dayTimes || {}).map(([day, time]) => `${day.toUpperCase()} ${[time.startTime, time.endTime].filter(Boolean).join("-")}`).join(", "))}</div></td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-surge-rule" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/surge-rules" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function priceMasterAmount(rule) {
+  const base = moneyNumber(rule.basePrice || 0);
+  const selling = moneyNumber(rule.sellingPrice || 0);
+  const firstSlab = (rule.complexitySlabs || [])[0];
+  if (firstSlab?.multiplier) return moneyNumber((rule.complexityBase === "base" ? base : selling) * moneyNumber(firstSlab.multiplier));
+  return selling;
+}
+
+function priceMasterComplexityText(rule) {
+  const slabs = normalizeComplexitySlabsForUi(rule.complexitySlabs || []);
+  const basePrice = moneyNumber(rule.basePrice || 0);
+  const sellingPrice = moneyNumber(rule.sellingPrice || 0);
+  const taskDurationMinutes = priceMasterTaskDurationMinutes(rule);
+  const discountType = rule.discountType === "flat" ? "Flat" : rule.discountType === "percent" ? "Percent" : "No Discount";
+  const discountValue = moneyNumber(rule.discountValue || 0);
+  const firstStoreHtml = `<div class="price-detail-card primary">
+    <span class="price-detail-badge">1st Store</span>
+    <div class="price-detail-grid">
+      <span><small>Base Price</small><b>${escapeHtml(priceMasterMoneyText(basePrice))}</b></span>
+      <span><small>Discount</small><b>${escapeHtml(`${priceMasterNumberText(discountValue)} (${discountType})`)}</b></span>
+      <span><small>Selling Price</small><b>${escapeHtml(priceMasterMoneyText(sellingPrice))}</b></span>
+      <span><small>Time Duration</small><b>${escapeHtml(taskDurationMinutes ? `${taskDurationMinutes} mins` : "-")}</b></span>
+    </div>
+  </div>`;
+  if (slabs.length) {
+    let start = 2;
+    const slabLines = slabs.map((slab) => {
+      const end = start + slab.storeNumber - 1;
+      const complexityBaseName = rule.complexityBase === "base" ? "Base Price" : "Selling Price";
+      const complexityBaseValue = rule.complexityBase === "base" ? basePrice : sellingPrice;
+      const label = start === end ? `Store ${start}` : `Stores ${start}-${end}`;
+      const slabDurationMinutes = Math.max(0, Number(slab.durationMinutes || 0));
+      start = end + 1;
+      return `<div class="price-detail-card">
+        <span class="price-detail-badge muted">${escapeHtml(label)}</span>
+        <div class="price-detail-grid">
+          <span><small>Complexity</small><b>${escapeHtml(`${slab.multiplier}x`)}</b></span>
+          <span><small>Applied On</small><b>${escapeHtml(complexityBaseName)}</b></span>
+          <span><small>Value</small><b>${escapeHtml(priceMasterMoneyText(complexityBaseValue))}</b></span>
+          <span><small>Time Duration</small><b>${escapeHtml(slabDurationMinutes ? `${slabDurationMinutes} mins` : "-")}</b></span>
+        </div>
+      </div>`;
+    });
+    return `<div class="price-detail-stack">${firstStoreHtml}${slabLines.join("")}</div>`;
+  }
+  return `<div class="price-detail-stack">${firstStoreHtml}<div class="price-detail-empty">No additional store slabs</div></div>`;
+}
+
+function priceMasterTimeDetailsHtml(slabs = []) {
+  const rows = normalizeTimeSlabsForUi(slabs);
+  if (!rows.length) return "-";
+  return rows.map((slab) => {
+    const discountType = slab.discountType === "flat" ? "Flat" : slab.discountType === "percent" ? "Percent" : "No Discount";
+    return `<div class="price-detail-card">
+      <span class="price-detail-badge ${slab.isActive === false ? "muted" : ""}">${escapeHtml(slab.label || `${slab.durationMinutes} min`)} · ${slab.isActive === false ? "Inactive" : "Active"}</span>
+      <div class="price-detail-grid">
+        <span><small>Minutes</small><b>${escapeHtml(slab.durationMinutes)}</b></span>
+        <span><small>Base Price</small><b>${escapeHtml(priceMasterMoneyText(slab.basePrice))}</b></span>
+        <span><small>Discount</small><b>${escapeHtml(`${discountType} ${priceMasterNumberText(slab.discountValue)}`)}</b></span>
+        <span><small>Selling Price</small><b>${escapeHtml(priceMasterMoneyText(slab.sellingPrice))}</b></span>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function normalizePriceMasterAllottedTime(ruleOrMetadata = {}) {
+  const source = ruleOrMetadata.metadata?.allottedTime || ruleOrMetadata.allottedTime || {};
+  return {
+    enabled: Boolean(source.enabled),
+    durationMinutes: Math.max(0, Number(source.durationMinutes || 0)),
+    waitingCharge: Math.max(0, moneyNumber(source.waitingCharge || 0)),
+    chargePerMinutes: Math.max(0, Number(source.chargePerMinutes || 0))
+  };
+}
+
+function priceMasterTaskDurationMinutes(ruleOrMetadata = {}) {
+  const source = ruleOrMetadata.metadata || ruleOrMetadata || {};
+  return Math.max(0, Number(source.taskDurationMinutes || 0));
+}
+
+function priceMasterAllottedTimeDetailsHtml(rule = {}) {
+  const allottedTime = normalizePriceMasterAllottedTime(rule);
+  if (!allottedTime.enabled) return "";
+  return `<div class="price-detail-card allotted-time-card">
+    <span class="price-detail-badge">Waiting Charge</span>
+    <div class="price-detail-grid">
+      <span><small>Waiting Charge Amount</small><b>${escapeHtml(priceMasterMoneyText(allottedTime.waitingCharge))}</b></span>
+      <span><small>Waiting Charge Minutes</small><b>${escapeHtml(allottedTime.chargePerMinutes)} min</b></span>
+    </div>
+  </div>`;
+}
+
+function normalizePriceMasterCategoryGroupPricing(ruleOrMetadata = {}) {
+  const source = ruleOrMetadata.metadata?.categoryGroupPricing || ruleOrMetadata.categoryGroupPricing || {};
+  const slabs = Array.isArray(source.slabs) ? source.slabs : [];
+  return {
+    enabled: Boolean(source.enabled),
+    maxCategoriesAllowed: source.maxCategoriesAllowed === "all" || source.maxCategoriesAllowed === undefined ? "all" : Math.max(1, Number(source.maxCategoriesAllowed || 1)),
+    slabs: slabs
+      .map((slab) => ({
+        categoryId: String(slab.categoryId || ""),
+        categoryName: String(slab.categoryName || ""),
+        basePrice: moneyNumber(slab.basePrice || 0),
+        discountType: ["percent", "flat", "none"].includes(slab.discountType) ? slab.discountType : "none",
+        discountValue: moneyNumber(slab.discountValue || 0),
+        sellingPrice: moneyNumber(slab.sellingPrice || slab.basePrice || 0),
+        durationMinutes: Math.max(0, Number(slab.allottedTime?.durationMinutes || slab.durationMinutes || priceMasterTaskDurationMinutes(ruleOrMetadata) || 0)),
+        allottedTime: {
+          enabled: Boolean(slab.allottedTime?.enabled),
+          durationMinutes: Math.max(0, Number(slab.allottedTime?.durationMinutes || 0))
+        },
+        waitingCharge: {
+          enabled: Boolean(slab.waitingCharge?.enabled),
+          amount: Math.max(0, moneyNumber(slab.waitingCharge?.amount || 0)),
+          chargePerMinutes: Math.max(0, Number(slab.waitingCharge?.chargePerMinutes || 0))
+        }
+      }))
+      .filter((slab) => slab.categoryId)
+  };
+}
+
+function priceMasterCategoryGroupDetailsHtml(rule = {}) {
+  const group = normalizePriceMasterCategoryGroupPricing(rule);
+  if (!group.enabled) return "";
+  const maxText = group.maxCategoriesAllowed === "all" ? "All" : String(group.maxCategoriesAllowed);
+  const rows = group.slabs.length ? group.slabs.map((slab) => {
+    const discountType = slab.discountType === "flat" ? "Flat" : slab.discountType === "percent" ? "Percent" : "No Discount";
+    const timeText = slab.allottedTime.enabled ? `${slab.allottedTime.durationMinutes} mins` : "No";
+    const waitingText = slab.waitingCharge.enabled ? `${priceMasterMoneyText(slab.waitingCharge.amount)} / ${slab.waitingCharge.chargePerMinutes} min` : "No";
+    return `<div class="price-detail-card">
+      <span class="price-detail-badge">${escapeHtml(slab.categoryName || "Category")}</span>
+      <div class="price-detail-grid">
+        <span><small>Base Price</small><b>${escapeHtml(priceMasterMoneyText(slab.basePrice))}</b></span>
+        <span><small>Discount</small><b>${escapeHtml(`${discountType} ${priceMasterNumberText(slab.discountValue)}`)}</b></span>
+        <span><small>Selling Price</small><b>${escapeHtml(priceMasterMoneyText(slab.sellingPrice))}</b></span>
+        <span><small>Allotted Time</small><b>${escapeHtml(timeText)}</b></span>
+        <span><small>Waiting Charge</small><b>${escapeHtml(waitingText)}</b></span>
+      </div>
+    </div>`;
+  }).join("") : `<div class="price-detail-empty">No category group slabs</div>`;
+  return `<div class="price-detail-stack">
+    <div class="price-detail-card primary">
+      <span class="price-detail-badge">No Sub-Category / Stores</span>
+      <div class="price-detail-grid">
+        <span><small>Max Categories In Cart</small><b>${escapeHtml(maxText)}</b></span>
+        <span><small>Category Slabs</small><b>${escapeHtml(group.slabs.length)}</b></span>
+      </div>
+    </div>
+    ${rows}
+  </div>`;
+}
+
+function priceMasterMoneyText(value) {
+  return `Rs.${priceMasterNumberText(value)}`;
+}
+
+function priceMasterNumberText(value) {
+  const amount = moneyNumber(value || 0);
+  return Number.isInteger(amount) ? String(amount) : amount.toFixed(2);
+}
+
+function priceMasterScopeText(rule) {
+  const type = rule.scopeType || "all";
+  if (type === "cluster") return `Cluster: ${rule.clusterName || "-"}`;
+  if (type === "zone") return `Zone: ${rule.zoneName || "-"}`;
+  if (type === "city") return `City: ${rule.cityName || "-"}`;
+  if (type === "state") return `State: ${rule.stateName || "-"}`;
+  return "All";
+}
+
+function parseTimeSlabsText(value = "") {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split("|").map((part) => part.trim());
+      const [label, minutes, baseOrPrice, discountTypeRaw, discountValueRaw, sellingPriceRaw, activeRaw] = parts;
+      const durationMinutes = Number(minutes || 0);
+      const basePrice = Number(baseOrPrice || 0);
+      const discountType = ["percent", "flat", "none"].includes(discountTypeRaw) ? discountTypeRaw : "none";
+      const discountValue = Number(discountValueRaw || 0);
+      const discountAmount = discountType === "percent" ? (basePrice * Math.min(discountValue, 100)) / 100 : discountType === "flat" ? discountValue : 0;
+      const sellingPrice = sellingPriceRaw === undefined || sellingPriceRaw === "" ? Math.max(0, basePrice - discountAmount) : Number(sellingPriceRaw || 0);
+      return { label: label || `${durationMinutes} min`, durationMinutes, basePrice, discountType, discountValue, sellingPrice, price: sellingPrice, isActive: String(activeRaw || "true").toLowerCase() !== "false" };
+    })
+    .filter((slab) => slab.durationMinutes > 0);
+}
+
+function timeSlabsText(slabs = []) {
+  return normalizeTimeSlabsForUi(slabs).map((slab) => {
+    const basePrice = moneyNumber(slab.basePrice ?? slab.price ?? slab.sellingPrice ?? 0);
+    const discountType = slab.discountType || "none";
+    const discountValue = moneyNumber(slab.discountValue || 0);
+    const sellingPrice = moneyNumber(slab.sellingPrice ?? slab.price ?? basePrice);
+    return `${slab.label || `${slab.durationMinutes} min`}|${slab.durationMinutes}|${basePrice}|${discountType}|${discountValue}|${sellingPrice}|${slab.isActive !== false}`;
+  }).join("\n");
+}
+
+function priceMasterTimeSlabIsActive(slab = {}) {
+  return slab.isActive !== false && slab.is_active !== false && slab.active !== false;
+}
+
+function normalizeTimeSlabsForUi(slabs = []) {
+  return (slabs || [])
+    .map((slab) => ({
+      label: String(slab.label || "").trim() || `${Number(slab.durationMinutes || 0)} min`,
+      durationMinutes: Number(slab.durationMinutes || 0),
+      basePrice: moneyNumber(slab.basePrice ?? slab.price ?? slab.sellingPrice ?? 0),
+      discountType: ["percent", "flat", "none"].includes(slab.discountType) ? slab.discountType : "none",
+      discountValue: moneyNumber(slab.discountValue || 0),
+      sellingPrice: moneyNumber(slab.sellingPrice ?? slab.price ?? slab.basePrice ?? 0),
+      isActive: priceMasterTimeSlabIsActive(slab)
+    }))
+    .filter((slab) => slab.durationMinutes > 0)
+    .sort((a, b) => a.durationMinutes - b.durationMinutes);
+}
+
+function timeSlabRowHtml(slab = {}) {
+  const normalized = normalizeTimeSlabsForUi([{ durationMinutes: 30, isActive: true, ...slab }])[0] || { label: "30 min", durationMinutes: 30, basePrice: 0, discountType: "none", discountValue: 0, sellingPrice: 0, isActive: true };
+  return `<div class="time-slab-row" data-time-slab-row>
+    <label class="form-check time-slab-active"><input class="form-check-input" data-time-slab-field="isActive" type="checkbox" ${normalized.isActive !== false ? "checked" : ""}> <span>Active</span></label>
+    ${priceMasterFloatingField("Time Label", `<input class="form-control" data-time-slab-field="label" value="${escapeHtml(normalized.label)}" placeholder="30 min">`)}
+    ${priceMasterFloatingField("Minutes", `<input class="form-control" data-time-slab-field="durationMinutes" type="number" min="1" step="1" value="${escapeHtml(normalized.durationMinutes)}" placeholder="30">`)}
+    ${priceMasterFloatingField("Base Price", `<input class="form-control" data-time-slab-field="basePrice" type="number" min="0" step="0.01" value="${escapeHtml(normalized.basePrice)}" placeholder="99">`)}
+    ${priceMasterFloatingField("Discount Type", `<select class="form-select" data-time-slab-field="discountType"><option value="none" ${normalized.discountType === "none" ? "selected" : ""}>No Discount</option><option value="percent" ${normalized.discountType === "percent" ? "selected" : ""}>Discount %</option><option value="flat" ${normalized.discountType === "flat" ? "selected" : ""}>Flat Discount</option></select>`)}
+    ${priceMasterFloatingField("Discount Value", `<input class="form-control" data-time-slab-field="discountValue" type="number" min="0" step="0.01" value="${escapeHtml(normalized.discountValue)}" placeholder="0">`)}
+    ${priceMasterFloatingField("Selling Price", `<input class="form-control" data-time-slab-field="sellingPrice" type="number" min="0" step="0.01" value="${escapeHtml(normalized.sellingPrice)}" placeholder="99" readonly>`)}
+    <button class="btn btn-outline-danger btn-xs" data-action="remove-price-time-slab" type="button">Remove</button>
+  </div>`;
+}
+
+function renderPriceMasterTimeSlabs(slabs = []) {
+  const target = $("#priceMasterTimeSlabs");
+  if (!target) return;
+  const rows = normalizeTimeSlabsForUi(slabs);
+  target.innerHTML = (rows.length ? rows : [{ label: "30 min", durationMinutes: 30, basePrice: 0, discountType: "none", discountValue: 0, sellingPrice: 0 }])
+    .map(timeSlabRowHtml)
+    .join("");
+  target.querySelectorAll("[data-time-slab-row]").forEach(updateTimeSlabSellingPrice);
+}
+
+function collectPriceMasterTimeSlabs(form = $("#priceMasterForm")) {
+  return [...(form?.querySelectorAll("[data-time-slab-row]") || [])]
+    .map((row) => {
+      const field = (name) => row.querySelector(`[data-time-slab-field="${name}"]`)?.value || "";
+      const basePrice = moneyNumber(field("basePrice"));
+      const discountType = field("discountType") || "none";
+      const discountValue = moneyNumber(field("discountValue"));
+      const discountAmount = discountType === "percent" ? (basePrice * Math.min(discountValue, 100)) / 100 : discountType === "flat" ? discountValue : 0;
+      const sellingPrice = moneyNumber(field("sellingPrice") || Math.max(0, basePrice - discountAmount));
+      const durationMinutes = Number(field("durationMinutes") || 0);
+      return {
+        label: field("label") || `${durationMinutes} min`,
+        durationMinutes,
+        basePrice,
+        discountType,
+        discountValue,
+        sellingPrice,
+        price: sellingPrice,
+        isActive: row.querySelector('[data-time-slab-field="isActive"]')?.checked !== false
+      };
+    })
+    .filter((slab) => slab.durationMinutes > 0);
+}
+
+function updateTimeSlabSellingPrice(row) {
+  if (!row) return;
+  const value = (name) => row.querySelector(`[data-time-slab-field="${name}"]`)?.value || "";
+  const basePrice = moneyNumber(value("basePrice"));
+  const discountType = value("discountType") || "none";
+  const discountValue = moneyNumber(value("discountValue"));
+  const discountAmount = discountType === "percent" ? (basePrice * Math.min(discountValue, 100)) / 100 : discountType === "flat" ? discountValue : 0;
+  const selling = row.querySelector('[data-time-slab-field="sellingPrice"]');
+  if (selling) selling.value = Math.max(0, moneyNumber(basePrice - discountAmount)).toFixed(2);
+}
+
+function normalizeComplexitySlabsForUi(slabs = []) {
+  return (slabs || [])
+    .map((slab) => ({
+      storeNumber: Number(slab.storeNumber || 0),
+      multiplier: Number(slab.multiplier || 0),
+      durationMinutes: Math.max(0, Number(slab.durationMinutes || 0))
+    }))
+    .filter((slab) => slab.storeNumber >= 1 && slab.multiplier > 0);
+}
+
+function complexitySlabRowHtml(slab = {}) {
+  const normalized = normalizeComplexitySlabsForUi([{ storeNumber: 2, multiplier: 0, durationMinutes: 0, ...slab }])[0] || { storeNumber: 2, multiplier: 0, durationMinutes: 0 };
+  return `<div class="complexity-slab-row" data-complexity-slab-row>
+    ${priceMasterFloatingField("Slab Store Count", `<input class="form-control" data-complexity-slab-field="storeNumber" type="number" min="1" step="1" value="${escapeHtml(normalized.storeNumber)}" placeholder="2">`)}
+    ${priceMasterFloatingField("Complexity Multiplier", `<input class="form-control" data-complexity-slab-field="multiplier" type="number" min="0" step="0.01" value="${escapeHtml(normalized.multiplier)}" placeholder="0.5">`)}
+    ${priceMasterFloatingField("Time Duration (mins)", `<input class="form-control" data-complexity-slab-field="durationMinutes" type="number" min="0" step="1" value="${escapeHtml(normalized.durationMinutes)}" placeholder="10">`)}
+    <button class="btn btn-outline-danger btn-xs" data-action="remove-price-complexity-slab" type="button">Remove</button>
+  </div>`;
+}
+
+function renderPriceMasterComplexitySlabs(slabs = []) {
+  const target = $("#priceMasterComplexitySlabs");
+  if (!target) return;
+  const rows = normalizeComplexitySlabsForUi(slabs);
+  target.innerHTML = (rows.length ? rows : [{ storeNumber: 2, multiplier: 0 }])
+    .map(complexitySlabRowHtml)
+    .join("");
+}
+
+function collectPriceMasterComplexitySlabs(form = $("#priceMasterForm")) {
+  return [...(form?.querySelectorAll("[data-complexity-slab-row]") || [])]
+    .map((row) => ({
+      storeNumber: Number(row.querySelector('[data-complexity-slab-field="storeNumber"]')?.value || 0),
+      multiplier: Number(row.querySelector('[data-complexity-slab-field="multiplier"]')?.value || 0),
+      durationMinutes: Math.max(0, Number(row.querySelector('[data-complexity-slab-field="durationMinutes"]')?.value || 0))
+    }))
+    .filter((slab) => slab.storeNumber >= 1 && slab.multiplier > 0);
+}
+
+function priceMasterComplexityLimitUsage(form = $("#priceMasterForm")) {
+  const maxStores = Math.max(1, Number(form?.elements.maxStoresPerCategory?.value || 1));
+  const slabStoreCount = collectPriceMasterComplexitySlabs(form).reduce((sum, slab) => sum + slab.storeNumber, 0);
+  return { maxStores, slabStoreCount, usedStores: 1 + slabStoreCount, remainingStores: maxStores - 1 - slabStoreCount };
+}
+
+function priceMasterComplexityLimitMessage(usage) {
+  return `Maximum store in a category limit exceeded. Max store in a category is: ${usage.maxStores}. 1st store is reserved, task slabs use ${usage.slabStoreCount}, limit utilised is ${usage.usedStores} of ${usage.maxStores}.`;
+}
+
+function validatePriceMasterComplexityLimit(form = $("#priceMasterForm"), notify = true) {
+  if (!form || (form.elements.priceType?.value || "task") !== "task") return true;
+  const usage = priceMasterComplexityLimitUsage(form);
+  if (usage.usedStores <= usage.maxStores) return true;
+  if (notify) showAlert(priceMasterComplexityLimitMessage(usage));
+  return false;
+}
+
+function priceMasterSelectedServiceCategories(form = $("#priceMasterForm")) {
+  const serviceId = form?.elements.serviceId?.value || "";
+  return activeItems(cache.categories || []).filter((category) => !serviceId || category.serviceId === serviceId);
+}
+
+function priceMasterCategoryGroupMaxOptions(count = 0, selected = "all") {
+  const normalizedSelected = selected === "all" ? "all" : String(Math.max(1, Number(selected || 1)));
+  const numberOptions = Array.from({ length: Math.max(0, count) }, (_, index) => {
+    const value = String(index + 1);
+    return `<option value="${value}" ${normalizedSelected === value ? "selected" : ""}>${value}</option>`;
+  }).join("");
+  return `<option value="all" ${normalizedSelected === "all" ? "selected" : ""}>All</option>${numberOptions}`;
+}
+
+function priceMasterCategoryGroupRowHtml(category, slab = {}) {
+  const categoryBasePrice = moneyNumber(category.basePrice || 0);
+  const categoryDiscountType = ["percent", "flat", "none"].includes(category.discountType) ? category.discountType : "none";
+  const categoryDiscountValue = moneyNumber(category.discountValue || 0);
+  const categoryDiscountAmount = categoryDiscountType === "percent" ? (categoryBasePrice * Math.min(categoryDiscountValue, 100)) / 100 : categoryDiscountType === "flat" ? categoryDiscountValue : 0;
+  const categorySellingPrice = moneyNumber(category.sellingPrice || Math.max(0, categoryBasePrice - categoryDiscountAmount));
+  const slabHasPrice = moneyNumber(slab.basePrice || 0) > 0 || moneyNumber(slab.sellingPrice || 0) > 0 || moneyNumber(slab.discountValue || 0) > 0;
+  const servicePrice = {
+    basePrice: categoryBasePrice,
+    discountType: categoryDiscountType,
+    discountValue: categoryDiscountValue,
+    sellingPrice: categorySellingPrice
+  };
+  const defaultedSlab = { allottedTime: { enabled: true, durationMinutes: 0 }, ...servicePrice, ...(slabHasPrice ? slab : {}), categoryId: category.id, categoryName: category.name };
+  const normalized = normalizePriceMasterCategoryGroupPricing({ categoryGroupPricing: { enabled: true, slabs: [defaultedSlab] } }).slabs[0] || {
+    categoryId: category.id,
+    categoryName: category.name,
+    basePrice: 0,
+    discountType: "none",
+    discountValue: 0,
+    sellingPrice: 0,
+    allottedTime: { enabled: true, durationMinutes: 0 },
+    waitingCharge: { enabled: false, amount: 0, chargePerMinutes: 0 }
+  };
+  return `<div class="category-group-row" data-category-group-row data-category-id="${escapeHtml(category.id)}" data-category-name="${escapeHtml(category.name || "")}">
+    <div class="category-group-row-title">${escapeHtml(category.name || "Category")}</div>
+    ${priceMasterFloatingField("Base Price", `<input class="form-control" data-category-group-field="basePrice" type="number" min="0" step="0.01" value="${escapeHtml(normalized.basePrice)}" placeholder="0">`)}
+    ${priceMasterFloatingField("Discount Type", `<select class="form-select" data-category-group-field="discountType"><option value="none" ${normalized.discountType === "none" ? "selected" : ""}>No Discount</option><option value="percent" ${normalized.discountType === "percent" ? "selected" : ""}>Discount %</option><option value="flat" ${normalized.discountType === "flat" ? "selected" : ""}>Flat Discount</option></select>`)}
+    ${priceMasterFloatingField("Discount Value", `<input class="form-control" data-category-group-field="discountValue" type="number" min="0" step="0.01" value="${escapeHtml(normalized.discountValue)}" placeholder="0">`)}
+    ${priceMasterFloatingField("Selling Price", `<input class="form-control" data-category-group-field="sellingPrice" type="number" min="0" step="0.01" value="${escapeHtml(normalized.sellingPrice)}" readonly>`)}
+    ${priceMasterFloatingField("Allotted Time", `<select class="form-select" data-category-group-field="allottedTimeEnabled"><option value="false" ${normalized.allottedTime.enabled ? "" : "selected"}>No</option><option value="true" ${normalized.allottedTime.enabled ? "selected" : ""}>Yes</option></select>`)}
+    <div data-category-group-time-fields>${priceMasterFloatingField("Time Duration (mins)", `<input class="form-control" data-category-group-field="durationMinutes" type="number" min="1" step="1" value="${escapeHtml(normalized.allottedTime.durationMinutes || "")}" placeholder="30">`)}</div>
+    <input type="hidden" data-category-group-field="waitingChargeEnabled" value="${normalized.waitingCharge.enabled ? "true" : "false"}">
+    <div data-category-group-waiting-fields>${priceMasterFloatingField("Waiting Charge Amount", `<input class="form-control" data-category-group-field="waitingChargeAmount" type="number" min="0" step="0.01" value="${escapeHtml(normalized.waitingCharge.amount || "")}" placeholder="20">`)}</div>
+    <div data-category-group-waiting-fields>${priceMasterFloatingField("Waiting Charge Minutes", `<input class="form-control" data-category-group-field="chargePerMinutes" type="number" min="1" step="1" value="${escapeHtml(normalized.waitingCharge.chargePerMinutes || "")}" placeholder="10">`)}</div>
+  </div>`;
+}
+
+function renderPriceMasterCategoryGroupRows(value = {}) {
+  const form = $("#priceMasterForm");
+  const target = $("#priceMasterCategoryGroupRows");
+  if (!form || !target) return;
+  const group = normalizePriceMasterCategoryGroupPricing(value);
+  const existingSlabs = new Map(group.slabs.map((slab) => [slab.categoryId, slab]));
+  const existingSlabsByName = new Map(group.slabs.map((slab) => [String(slab.categoryName || "").trim().toLowerCase(), slab]).filter(([name]) => name));
+  const categories = priceMasterSelectedServiceCategories(form);
+  target.innerHTML = categories.length
+    ? categories.map((category) => priceMasterCategoryGroupRowHtml(category, existingSlabs.get(category.id) || existingSlabsByName.get(String(category.name || "").trim().toLowerCase()) || {})).join("")
+    : `<div class="price-detail-empty">Select a service to load category pricing rows.</div>`;
+  target.querySelectorAll("[data-category-group-row]").forEach((row) => {
+    toggleCategoryGroupRowFields(row);
+    updateCategoryGroupRowSellingPrice(row);
+  });
+  if (form.elements.categoryGroupMaxCategoriesAllowed) {
+    form.elements.categoryGroupMaxCategoriesAllowed.innerHTML = priceMasterCategoryGroupMaxOptions(categories.length, group.maxCategoriesAllowed);
+  }
+}
+
+function updateCategoryGroupRowSellingPrice(row) {
+  if (!row) return;
+  const value = (name) => row.querySelector(`[data-category-group-field="${name}"]`)?.value || "";
+  const basePrice = moneyNumber(value("basePrice"));
+  const discountType = value("discountType") || "none";
+  const discountValue = moneyNumber(value("discountValue"));
+  const discountAmount = discountType === "percent" ? (basePrice * Math.min(discountValue, 100)) / 100 : discountType === "flat" ? discountValue : 0;
+  const selling = row.querySelector('[data-category-group-field="sellingPrice"]');
+  if (selling) selling.value = Math.max(0, moneyNumber(basePrice - discountAmount)).toFixed(2);
+}
+
+function toggleCategoryGroupRowFields(row) {
+  if (!row) return;
+  const hasTime = row.querySelector('[data-category-group-field="allottedTimeEnabled"]')?.value === "true";
+  row.querySelectorAll("[data-category-group-time-fields]").forEach((el) => el.classList.toggle("d-none", !hasTime));
+  row.querySelectorAll('[data-category-group-field="durationMinutes"]').forEach((el) => { el.disabled = !hasTime; });
+}
+
+function collectPriceMasterCategoryGroupPricing(form = $("#priceMasterForm")) {
+  const enabled = Boolean(form?.elements.categoryGroupEnabled?.checked);
+  return {
+    enabled,
+    maxCategoriesAllowed: form?.elements.categoryGroupMaxCategoriesAllowed?.value || "all",
+    slabs: enabled ? [...(form?.querySelectorAll("[data-category-group-row]") || [])].map((row) => {
+      const field = (name) => row.querySelector(`[data-category-group-field="${name}"]`)?.value || "";
+      const allottedTimeEnabled = field("allottedTimeEnabled") === "true";
+      const waitingChargeAmount = Math.max(0, moneyNumber(field("waitingChargeAmount")));
+      const waitingChargeMinutes = Math.max(0, Number(field("chargePerMinutes") || 0));
+      const waitingChargeEnabled = waitingChargeAmount > 0 && waitingChargeMinutes > 0;
+      const waitingFlag = row.querySelector('[data-category-group-field="waitingChargeEnabled"]');
+      if (waitingFlag) waitingFlag.value = waitingChargeEnabled ? "true" : "false";
+      return {
+        categoryId: row.dataset.categoryId || "",
+        categoryName: row.dataset.categoryName || "",
+        basePrice: moneyNumber(field("basePrice")),
+        discountType: field("discountType") || "none",
+        discountValue: moneyNumber(field("discountValue")),
+        sellingPrice: moneyNumber(field("sellingPrice")),
+        allottedTime: {
+          enabled: allottedTimeEnabled,
+          durationMinutes: allottedTimeEnabled ? Math.max(1, Number(field("durationMinutes") || 0)) : 0
+        },
+        waitingCharge: {
+          enabled: waitingChargeEnabled,
+          amount: waitingChargeEnabled ? waitingChargeAmount : 0,
+          chargePerMinutes: waitingChargeEnabled ? Math.max(1, waitingChargeMinutes) : 0
+        }
+      };
+    }).filter((slab) => slab.categoryId) : []
+  };
+}
+
+function validatePriceMasterCategoryGroupPricing(form = $("#priceMasterForm"), group = collectPriceMasterCategoryGroupPricing(form), notify = true) {
+  if (!group.enabled) return true;
+  if (!group.slabs.length) {
+    if (notify) showAlert("Add price rows for this service's categories before saving Price Master.");
+    return false;
+  }
+  for (const slab of group.slabs) {
+    const label = slab.categoryName || "category";
+    if (moneyNumber(slab.basePrice) <= 0 || moneyNumber(slab.sellingPrice) <= 0) {
+      if (notify) showAlert(`Price is required for ${label}. Enter Base Price and Selling Price greater than 0.`);
+      return false;
+    }
+    if (slab.allottedTime?.enabled && Number(slab.allottedTime.durationMinutes || 0) <= 0) {
+      if (notify) showAlert(`Allotted time duration is required for ${label}.`);
+      return false;
+    }
+    const waitingAmount = moneyNumber(slab.waitingCharge?.amount || 0);
+    const waitingMinutes = Number(slab.waitingCharge?.chargePerMinutes || 0);
+    if ((waitingAmount > 0 || waitingMinutes > 0) && (!waitingAmount || !waitingMinutes)) {
+      if (notify) showAlert(`Waiting charge amount and minutes are required for ${label}.`);
+      return false;
+    }
+  }
+  return true;
+}
+
+function setPriceMasterCategoryGroupPricing(form = $("#priceMasterForm"), value = {}) {
+  if (!form) return;
+  const group = normalizePriceMasterCategoryGroupPricing(value);
+  if (form.elements.categoryGroupEnabled) form.elements.categoryGroupEnabled.checked = group.enabled;
+  renderPriceMasterCategoryGroupRows(group);
+  if (group.enabled && group.slabs.length) {
+    for (const row of form.querySelectorAll("[data-category-group-row]")) {
+      const slab = group.slabs.find((candidate) =>
+        candidate.categoryId === row.dataset.categoryId ||
+        String(candidate.categoryName || "").trim().toLowerCase() === String(row.dataset.categoryName || "").trim().toLowerCase()
+      );
+      if (!slab) continue;
+      const setField = (name, value) => {
+        const field = row.querySelector(`[data-category-group-field="${name}"]`);
+        if (field) field.value = value ?? "";
+      };
+      setField("basePrice", slab.basePrice);
+      setField("discountType", slab.discountType || "none");
+      setField("discountValue", slab.discountValue);
+      setField("sellingPrice", slab.sellingPrice);
+      setField("allottedTimeEnabled", slab.allottedTime?.enabled ? "true" : "false");
+      setField("durationMinutes", slab.allottedTime?.durationMinutes || "");
+      setField("waitingChargeEnabled", slab.waitingCharge?.enabled ? "true" : "false");
+      setField("waitingChargeAmount", slab.waitingCharge?.amount || "");
+      setField("chargePerMinutes", slab.waitingCharge?.chargePerMinutes || "");
+      toggleCategoryGroupRowFields(row);
+      updateCategoryGroupRowSellingPrice(row);
+    }
+  }
+  if (form.elements.categoryGroupMaxCategoriesAllowed) form.elements.categoryGroupMaxCategoriesAllowed.value = group.maxCategoriesAllowed === "all" ? "all" : String(group.maxCategoriesAllowed);
+  togglePriceMasterCategoryGroupFields(form);
+}
+
+function togglePriceMasterCategoryGroupFields(form = $("#priceMasterForm")) {
+  if (!form) return;
+  const isTask = (form.elements.priceType?.value || "task") === "task";
+  const enabled = isTask && Boolean(form.elements.categoryGroupEnabled?.checked);
+  form.querySelectorAll("[data-category-group-editor]").forEach((el) => el.classList.toggle("d-none", !enabled));
+  form.querySelectorAll("[data-price-category-field]").forEach((el) => el.classList.toggle("d-none", enabled));
+  form.querySelectorAll("[data-price-store-mode-only]").forEach((el) => el.classList.toggle("d-none", enabled || !isTask));
+  form.querySelectorAll("[data-price-global-allotted-time]").forEach((el) => el.classList.toggle("d-none", enabled));
+  if (enabled && !$("#priceMasterCategoryGroupRows")?.children.length) renderPriceMasterCategoryGroupRows(collectPriceMasterCategoryGroupPricing(form));
+}
+
+function priceMasterSummaryHtml(items = []) {
+  const rows = items.map((rule) => {
+    const categoryGroup = normalizePriceMasterCategoryGroupPricing(rule);
+    const hasCategoryGroup = categoryGroup.enabled;
+    const taskDetails = hasCategoryGroup ? priceMasterCategoryGroupDetailsHtml(rule) : priceMasterComplexityText(rule);
+    const valueHtml = hasCategoryGroup
+      ? `<span><small>Mode</small><b>No Sub-Category / Stores</b></span>
+        <span><small>Max Categories In Cart</small><b>${escapeHtml(categoryGroup.maxCategoriesAllowed)}</b></span>
+        <span><small>Category Slabs</small><b>${escapeHtml(categoryGroup.slabs.length)}</b></span>`
+      : `<span><small>Base</small><b>${escapeHtml(priceMasterMoneyText(rule.basePrice || 0))}</b></span>
+        <span><small>Discount</small><b>${escapeHtml(`${rule.discountType === "percent" ? "Percent" : rule.discountType === "flat" ? "Flat" : "No"} ${priceMasterNumberText(rule.discountValue || 0)}`)}</b></span>
+        <span><small>Selling</small><b>${escapeHtml(priceMasterMoneyText(rule.sellingPrice || 0))}</b></span>`;
+    return `<article class="price-master-row">
+      <div class="price-master-row-main">
+        <span class="price-detail-badge">${escapeHtml(rule.priceType === "time" ? "Time" : "Task")}</span>
+        <b>${escapeHtml(rule.serviceName || "-")}</b>
+        <small>${escapeHtml(priceMasterScopeText(rule))}</small>
+        <small>${escapeHtml([rule.categoryName, rule.storeName].filter(Boolean).join(" / ") || "-")}</small>
+      </div>
+      <div class="price-master-row-values">
+        ${valueHtml}
+      </div>
+      <div class="price-master-row-detail">${rule.priceType === "time" ? priceMasterTimeDetailsHtml(rule.timeSlabs || []) : taskDetails}${priceMasterAllottedTimeDetailsHtml(rule)}</div>
+      <div class="price-master-row-actions">
+        <button class="btn btn-soft btn-xs" data-action="edit-price-rule" data-id="${escapeHtml(rule.id)}" type="button">Edit</button>
+        <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/price-master" data-id="${escapeHtml(rule.id)}" type="button">Delete</button>
+      </div>
+    </article>`;
+  }).join("");
+  return `<div class="price-master-list">${rows || `<div class="empty-state">No price rules found.</div>`}</div>`;
+}
+
+function priceMasterFloatingField(label, controlHtml) {
+  return `<label class="floating-field"><span>${escapeHtml(label)}</span>${controlHtml}</label>`;
+}
+
+function setSelectValueWithFallback(select, value = "", label = "") {
+  if (!select) return;
+  const normalizedValue = String(value || "");
+  if (!normalizedValue) {
+    select.value = "";
+    return;
+  }
+  if (![...select.options].some((option) => option.value === normalizedValue)) {
+    select.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(normalizedValue)}">${escapeHtml(label || normalizedValue)}</option>`);
+  }
+  select.value = normalizedValue;
+}
+
+function collectPriceMasterAllottedTime(form = $("#priceMasterForm")) {
+  const enabled = Boolean(form?.elements.allottedTimeEnabled?.checked);
+  const isTimePrice = form?.elements.priceType?.value === "time";
+  const taskDurationMinutes = isTimePrice ? 0 : Math.max(1, Number(form?.elements.taskDurationMinutes?.value || form?.elements.allottedTimeDurationMinutes?.value || 0));
+  return {
+    enabled,
+    durationMinutes: enabled ? taskDurationMinutes : 0,
+    waitingCharge: enabled ? Math.max(0, moneyNumber(form?.elements.allottedTimeWaitingCharge?.value || 0)) : 0,
+    chargePerMinutes: enabled ? Math.max(1, Number(form?.elements.allottedTimeChargePerMinutes?.value || 0)) : 0
+  };
+}
+
+function setPriceMasterAllottedTime(form = $("#priceMasterForm"), value = {}) {
+  if (!form) return;
+  const allottedTime = normalizePriceMasterAllottedTime(value);
+  if (form.elements.allottedTimeEnabled) form.elements.allottedTimeEnabled.checked = allottedTime.enabled;
+  if (form.elements.allottedTimeWaitingCharge) form.elements.allottedTimeWaitingCharge.value = allottedTime.waitingCharge || "";
+  if (form.elements.allottedTimeChargePerMinutes) form.elements.allottedTimeChargePerMinutes.value = allottedTime.chargePerMinutes || "";
+  togglePriceMasterAllottedTimeFields(form);
+}
+
+function togglePriceMasterAllottedTimeFields(form = $("#priceMasterForm")) {
+  if (!form) return;
+  const enabled = Boolean(form.elements.allottedTimeEnabled?.checked);
+  form.querySelectorAll("[data-allotted-time-fields]").forEach((el) => el.classList.toggle("d-none", !enabled));
+  for (const name of ["allottedTimeWaitingCharge", "allottedTimeChargePerMinutes"]) {
+    if (form.elements[name]) form.elements[name].disabled = !enabled;
+  }
+}
+
+function updatePriceMasterSellingPrice(form = $("#priceMasterForm")) {
+  if (!form) return;
+  const basePrice = moneyNumber(form.elements.basePrice?.value || 0);
+  const discountType = form.elements.discountType?.value || "none";
+  const discountValue = moneyNumber(form.elements.discountValue?.value || 0);
+  const discountAmount = discountType === "percent" ? moneyNumber((basePrice * Math.min(discountValue, 100)) / 100) : discountType === "flat" ? discountValue : 0;
+  if (form.elements.sellingPrice) form.elements.sellingPrice.value = Math.max(0, moneyNumber(basePrice - discountAmount)).toFixed(2);
+}
+
+function togglePriceMasterTypeFields(form = $("#priceMasterForm")) {
+  if (!form) return;
+  const isTask = (form.elements.priceType?.value || "task") === "task";
+  form.querySelectorAll("[data-price-task-only]").forEach((el) => el.classList.toggle("d-none", !isTask));
+  form.querySelectorAll("[data-price-time-only]").forEach((el) => el.classList.toggle("d-none", isTask));
+  togglePriceMasterCategoryGroupFields(form);
+}
+
+function resetPriceMasterForm() {
+  editingPriceRuleId = null;
+  const form = $("#priceMasterForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.basePrice.value = "0";
+  form.elements.discountValue.value = "0";
+  form.elements.sellingPrice.value = "0";
+  if (form.elements.complexityBase) form.elements.complexityBase.value = "selling";
+  if (form.elements.maxStoresPerCategory) form.elements.maxStoresPerCategory.value = "1";
+  if (form.elements.taskDurationMinutes) form.elements.taskDurationMinutes.value = "30";
+  form.elements.isActive.checked = true;
+  setPriceMasterAllottedTime(form, {});
+  setPriceMasterCategoryGroupPricing(form, {});
+  renderPriceMasterComplexitySlabs();
+  renderPriceMasterTimeSlabs();
+  refreshPriceMasterLocationCascade("scope");
+  refreshPriceMasterServiceCascade("service");
+  updatePriceMasterSellingPrice(form);
+  togglePriceMasterTypeFields(form);
+  $("#priceRuleSubmitButton").textContent = "Create Price Rule";
+  $("#cancelPriceRuleEditButton").classList.add("d-none");
+}
+
+function categoryPriceCategories() {
+  const standalone = activeItems(cache.categories || []).filter((category) => !category.serviceId && !category.parentCategoryId);
+  return standalone.length ? standalone : activeItems(cache.categories || []);
+}
+
+function categoryPriceScopeText(rule = {}) {
+  return priceMasterScopeText(rule);
+}
+
+function updateCategoryPriceDurationSellingPrice(row) {
+  if (!row) return;
+  const basePrice = moneyNumber(row.querySelector('[data-category-price-duration-field="basePrice"]')?.value || 0);
+  const discountType = row.querySelector('[data-category-price-duration-field="discountType"]')?.value || "none";
+  const discountValue = moneyNumber(row.querySelector('[data-category-price-duration-field="discountValue"]')?.value || 0);
+  const discountAmount = discountType === "percent" ? moneyNumber((basePrice * Math.min(discountValue, 100)) / 100) : discountType === "flat" ? discountValue : 0;
+  const sellingInput = row.querySelector('[data-category-price-duration-field="sellingPrice"]');
+  if (sellingInput) sellingInput.value = Math.max(0, moneyNumber(basePrice - discountAmount)).toFixed(2);
+}
+
+function updateCategoryPriceSellingPrice(form = $("#categoryPriceForm")) {
+  if (!form) return;
+  form.querySelectorAll("[data-category-price-duration-row]").forEach(updateCategoryPriceDurationSellingPrice);
+}
+
+function categoryPriceDurationRowHtml(duration = {}) {
+  const rowId = duration.rowId || crypto.randomUUID?.() || `category-price-duration-${Date.now()}-${Math.random()}`;
+  return `<div class="category-price-duration-row" data-category-price-duration-row data-row-id="${escapeHtml(rowId)}">
+    ${priceMasterFloatingField("Label", `<input class="form-control" data-category-price-duration-field="label" maxlength="80" value="${escapeHtml(duration.label || "")}" placeholder="30 min">`) }
+    ${priceMasterFloatingField("Duration(mins)", `<input class="form-control" data-category-price-duration-field="timeDurationMinutes" type="number" min="0" max="1440" step="1" value="${escapeHtml(duration.timeDurationMinutes ?? 30)}" required>`) }
+    ${priceMasterFloatingField("Base Price", `<input class="form-control" data-category-price-duration-field="basePrice" type="number" min="0" step="0.01" value="${escapeHtml(duration.basePrice ?? 0)}">`)}
+    ${priceMasterFloatingField("Discount Type", `<select class="form-select" data-category-price-duration-field="discountType"><option value="none" ${duration.discountType === "none" || !duration.discountType ? "selected" : ""}>None</option><option value="percent" ${duration.discountType === "percent" ? "selected" : ""}>%</option><option value="flat" ${duration.discountType === "flat" ? "selected" : ""}>Flat</option></select>`)}
+    ${priceMasterFloatingField("Discount Value", `<input class="form-control" data-category-price-duration-field="discountValue" type="number" min="0" step="0.01" value="${escapeHtml(duration.discountValue ?? 0)}">`)}
+    ${priceMasterFloatingField("Selling Price", `<input class="form-control" data-category-price-duration-field="sellingPrice" type="number" min="0" step="0.01" value="${escapeHtml(duration.sellingPrice ?? 0)}" readonly>`)}
+    <button class="btn btn-outline-danger btn-sm category-price-duration-remove" data-action="remove-category-price-duration" type="button" title="Remove duration">Remove</button>
+  </div>`;
+}
+
+function renderCategoryPriceDurationRows(durations = [{ label: "", timeDurationMinutes: 30, basePrice: 0, discountType: "none", discountValue: 0, sellingPrice: 0 }]) {
+  const host = $("#categoryPriceDurationRows");
+  if (!host) return;
+  host.innerHTML = (durations.length ? durations : [{ label: "", timeDurationMinutes: 30 }]).map(categoryPriceDurationRowHtml).join("");
+  host.querySelectorAll("[data-category-price-duration-row]").forEach((row, index) => {
+    updateCategoryPriceDurationSellingPrice(row);
+  });
+}
+
+function collectCategoryPriceDurations(form = $("#categoryPriceForm")) {
+  const rows = [...(form?.querySelectorAll("[data-category-price-duration-row]") || [])];
+  const categoryId = form?.elements.categoryId?.value || "";
+  if (!categoryId) throw new Error("Select Category.");
+  const durations = rows.map((row) => ({
+    categoryId,
+    label: String(row.querySelector('[data-category-price-duration-field="label"]')?.value || "").trim(),
+    timeDurationMinutes: Number(row.querySelector('[data-category-price-duration-field="timeDurationMinutes"]')?.value || 0),
+    basePrice: Number(row.querySelector('[data-category-price-duration-field="basePrice"]')?.value || 0),
+    discountType: row.querySelector('[data-category-price-duration-field="discountType"]')?.value || "none",
+    discountValue: Number(row.querySelector('[data-category-price-duration-field="discountValue"]')?.value || 0),
+    sellingPrice: Number(row.querySelector('[data-category-price-duration-field="sellingPrice"]')?.value || 0)
+  }));
+  if (!durations.length) throw new Error("Add at least one Duration row.");
+  durations.forEach((duration, index) => {
+    if (!Number.isFinite(duration.timeDurationMinutes) || duration.timeDurationMinutes < 0) throw new Error(`Enter valid Time Duration in row ${index + 1}.`);
+  });
+  const duplicate = new Set();
+  for (const duration of durations) {
+    const key = `${duration.categoryId}:${duration.timeDurationMinutes}`;
+    if (duplicate.has(key)) throw new Error("Duplicate duration found for the same category. Keep each Category + Time Duration unique.");
+    duplicate.add(key);
+  }
+  return durations;
+}
+
+function categoryPriceSelectedLocationHierarchy(selected = {}) {
+  const form = $("#categoryPriceForm");
+  const cluster = selected.clusterId ? cache.clusters.find((item) => item.id === selected.clusterId) : null;
+  const zone = selected.zoneId ? cache.zones.find((item) => item.id === selected.zoneId) : null;
+  const city = selected.cityId ? cache.cities.find((item) => item.id === selected.cityId) : null;
+  const derivedCityId = selected.cityId || cluster?.cityId || zone?.cityId || form?.elements.cityId?.value || "";
+  const derivedZoneId = selected.zoneId || cluster?.zoneId || form?.elements.zoneId?.value || "";
+  return {
+    stateId: selected.stateId || city?.stateId || cityStateId(derivedCityId) || form?.elements.stateId?.value || "",
+    cityId: derivedCityId,
+    zoneId: derivedZoneId,
+    clusterId: selected.clusterId || form?.elements.clusterId?.value || ""
+  };
+}
+
+function refreshCategoryPriceLocationCascade(level = "scope", selected = {}) {
+  const form = $("#categoryPriceForm");
+  if (!form) return;
+  const scopeType = form.elements.scopeType?.value || "all";
+  const hierarchy = categoryPriceSelectedLocationHierarchy(selected);
+  const stateId = hierarchy.stateId;
+  const cityId = hierarchy.cityId;
+  const zoneId = hierarchy.zoneId;
+  const clusterId = hierarchy.clusterId;
+  if (scopeType === "all") {
+    setSelectOptions(form.elements.cityId, "City", [], "");
+    setSelectOptions(form.elements.zoneId, "Zone", [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "scope") {
+    if (form.elements.stateId) form.elements.stateId.value = stateId;
+    setSelectOptions(form.elements.cityId, "City", stateId ? filterCitiesByState(stateId) : [], ["city", "zone", "cluster"].includes(scopeType) ? cityId : "");
+    setSelectOptions(form.elements.zoneId, "Zone", cityId && ["zone", "cluster"].includes(scopeType) ? filterZonesByCity(cityId) : [], ["zone", "cluster"].includes(scopeType) ? zoneId : "");
+    setSelectOptions(form.elements.clusterId, "Cluster", zoneId && scopeType === "cluster" ? filterClustersByLocation({ stateId, cityId, zoneId }) : [], scopeType === "cluster" ? clusterId : "");
+  } else if (level === "state") {
+    setSelectOptions(form.elements.cityId, "City", stateId ? filterCitiesByState(stateId) : [], "");
+    setSelectOptions(form.elements.zoneId, "Zone", [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "city") {
+    setSelectOptions(form.elements.zoneId, "Zone", cityId ? filterZonesByCity(cityId) : [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "zone") {
+    setSelectOptions(form.elements.clusterId, "Cluster", zoneId ? filterClustersByLocation({ stateId, cityId, zoneId }) : [], "");
+  }
+  const disable = {
+    stateId: scopeType === "all",
+    cityId: !["city", "zone", "cluster"].includes(scopeType),
+    zoneId: !["zone", "cluster"].includes(scopeType),
+    clusterId: scopeType !== "cluster"
+  };
+  for (const [name, disabled] of Object.entries(disable)) {
+    if (form.elements[name]) form.elements[name].disabled = disabled;
+  }
+}
+
+function resetCategoryPriceForm() {
+  editingCategoryPriceId = null;
+  const form = $("#categoryPriceForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.waitingChargeAmount.value = "0";
+  form.elements.waitingChargeTimeMinutes.value = "0";
+  form.elements.isActive.checked = true;
+  renderCategoryPriceDurationRows();
+  refreshCategoryPriceLocationCascade("scope");
+  updateCategoryPriceSellingPrice(form);
+  $("#categoryPriceSubmitButton").textContent = "Create Category Price";
+  $("#cancelCategoryPriceEditButton").classList.add("d-none");
+}
+
+function categoryPriceFilterBar() {
+  return `<div class="master-form compact mb-3">
+    ${priceMasterFloatingField("Search", `<input class="form-control" data-category-price-filter="search" type="search" value="${escapeHtml(categoryPriceFilters.search || "")}" placeholder="Category, location, service">`)}
+    ${priceMasterFloatingField("Scope", `<select class="form-select" data-category-price-filter="scopeType"><option value="">All Scope</option><option value="all">All</option><option value="state">State</option><option value="city">City</option><option value="zone">Zone</option><option value="cluster">Cluster</option></select>`)}
+    ${priceMasterFloatingField("State", `<select class="form-select" data-category-price-filter="stateId"><option value="">All States</option>${optionRows(activeItems(cache.states))}</select>`)}
+    ${priceMasterFloatingField("City", `<select class="form-select" data-category-price-filter="cityId"><option value="">All Cities</option>${optionRows(activeItems(cache.cities))}</select>`)}
+    ${priceMasterFloatingField("Zone", `<select class="form-select" data-category-price-filter="zoneId"><option value="">All Zones</option>${optionRows(activeItems(cache.zones))}</select>`)}
+    ${priceMasterFloatingField("Cluster", `<select class="form-select" data-category-price-filter="clusterId"><option value="">All Clusters</option>${optionRows(activeClusters(cache.clusters))}</select>`)}
+    ${priceMasterFloatingField("Category", `<select class="form-select" data-category-price-filter="categoryId"><option value="">All Categories</option>${optionRows(categoryPriceCategories())}</select>`)}
+    ${priceMasterFloatingField("Status", `<select class="form-select" data-category-price-filter="status"><option value="">All Status</option><option value="active">Active</option><option value="inactive">Inactive</option></select>`)}
+  </div>`;
+}
+
+function categoryPriceFilteredRows() {
+  const search = String(categoryPriceFilters.search || "").trim().toLowerCase();
+  return (cache.categoryPrices || []).filter((item) => {
+    const text = [
+      item.categoryName,
+      item.categoryCode,
+      item.serviceName,
+      item.scopeType,
+      item.stateName,
+      item.cityName,
+      item.zoneName,
+      item.clusterName
+    ].filter(Boolean).join(" ").toLowerCase();
+    return (!search || text.includes(search)) &&
+      (!categoryPriceFilters.scopeType || item.scopeType === categoryPriceFilters.scopeType) &&
+      (!categoryPriceFilters.stateId || item.stateId === categoryPriceFilters.stateId) &&
+      (!categoryPriceFilters.cityId || item.cityId === categoryPriceFilters.cityId) &&
+      (!categoryPriceFilters.zoneId || item.zoneId === categoryPriceFilters.zoneId) &&
+      (!categoryPriceFilters.clusterId || item.clusterId === categoryPriceFilters.clusterId) &&
+      (!categoryPriceFilters.categoryId || item.categoryId === categoryPriceFilters.categoryId) &&
+      (!categoryPriceFilters.status || (categoryPriceFilters.status === "active" ? item.isActive !== false : item.isActive === false));
+  });
+}
+
+function categoryPriceRows(items = []) {
+  const grouped = new Map();
+  for (const item of items) {
+    const key = item.categoryId || item.categoryName || "uncategorized";
+    if (!grouped.has(key)) grouped.set(key, { item, rows: [] });
+    grouped.get(key).rows.push(item);
+  }
+  return [...grouped.values()].map((group) => {
+    const category = group.item;
+    const categoryTitle = category.categoryName || "-";
+    const categoryMeta = [category.serviceName, category.categoryCode].filter(Boolean).join(" | ");
+    const rows = group.rows.map((item) => {
+      const waitingText = Number(item.waitingChargeAmount || 0) > 0 && Number(item.waitingChargeTimeMinutes || 0) > 0
+        ? `${priceMasterMoneyText(item.waitingChargeAmount)} / ${item.waitingChargeTimeMinutes} min`
+        : "No";
+      return `<tr>
+        <td><b>${escapeHtml(categoryPriceScopeText(item))}</b></td>
+        <td><b>${escapeHtml(item.label || `${item.timeDurationMinutes || 0} min`)}</b>${item.label ? `<br><span class="text-secondary">${escapeHtml(`${item.timeDurationMinutes || 0} min`)}</span>` : ""}</td>
+        <td>
+          <div class="price-master-row-detail compact">
+            <span><small>Base</small><b>${escapeHtml(priceMasterMoneyText(item.basePrice || 0))}</b></span>
+            <span><small>Discount</small><b>${escapeHtml(`${item.discountType || "none"} ${priceMasterNumberText(item.discountValue || 0)}`)}</b></span>
+            <span><small>Selling</small><b>${escapeHtml(priceMasterMoneyText(item.sellingPrice || 0))}</b></span>
+          </div>
+        </td>
+        <td>${escapeHtml(waitingText)}</td>
+        <td>${status(item.isActive === false ? "inactive" : "active")}</td>
+        <td class="text-end">
+          <button class="btn btn-sm btn-outline-primary" data-action="edit-category-price" data-id="${escapeHtml(item.id)}" type="button">Edit</button>
+          <button class="btn btn-sm btn-outline-danger" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/category-prices" data-id="${escapeHtml(item.id)}" type="button">Delete</button>
+        </td>
+      </tr>`;
+    }).join("");
+    return `<tr class="category-price-group-row">
+      <td colspan="6"><b>${escapeHtml(categoryTitle)}</b>${categoryMeta ? `<span>${escapeHtml(categoryMeta)}</span>` : ""}</td>
+    </tr>${rows}`;
+  }).join("");
+}
+
+function renderCategoryPriceReport() {
+  const report = $("#categoryPriceReport");
+  if (!report) return;
+  report.innerHTML = table(["Scope", "Duration", "Price", "Waiting Charges", "Status", ""], categoryPriceRows(categoryPriceFilteredRows()));
+  document.querySelectorAll("[data-category-price-filter]").forEach((input) => {
+    input.value = categoryPriceFilters[input.dataset.categoryPriceFilter] || "";
+  });
+}
+
+function bookingEngineScopeText(rule = {}) {
+  if (rule.scopeType === "state") return `State: ${rule.stateName || "-"}`;
+  if (rule.scopeType === "city") return `City: ${rule.cityName || "-"}`;
+  if (rule.scopeType === "zone") return `Zone: ${rule.zoneName || "-"}`;
+  if (rule.scopeType === "cluster") return `Cluster: ${rule.clusterName || "-"}`;
+  if (rule.scopeType === "category") return `Category: ${rule.categoryName || "-"}`;
+  return "All";
+}
+
+function bookingEngineDateTimeValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset();
+  return new Date(date.getTime() - offset * 60000).toISOString().slice(0, 16);
+}
+
+function bookingEngineLocationHierarchy(selected = {}) {
+  const form = $("#bookingEngineForm");
+  const cluster = selected.clusterId ? cache.clusters.find((item) => item.id === selected.clusterId) : null;
+  const zone = selected.zoneId ? cache.zones.find((item) => item.id === selected.zoneId) : null;
+  const city = selected.cityId ? cache.cities.find((item) => item.id === selected.cityId) : null;
+  const derivedCityId = selected.cityId || cluster?.cityId || zone?.cityId || form?.elements.cityId?.value || "";
+  const derivedZoneId = selected.zoneId || cluster?.zoneId || form?.elements.zoneId?.value || "";
+  return {
+    stateId: selected.stateId || city?.stateId || cityStateId(derivedCityId) || form?.elements.stateId?.value || "",
+    cityId: derivedCityId,
+    zoneId: derivedZoneId,
+    clusterId: selected.clusterId || form?.elements.clusterId?.value || ""
+  };
+}
+
+function refreshBookingEngineLocationCascade(level = "scope", selected = {}) {
+  const form = $("#bookingEngineForm");
+  if (!form) return;
+  const scopeType = form.elements.scopeType?.value || "all";
+  const hierarchy = bookingEngineLocationHierarchy(selected);
+  const stateId = hierarchy.stateId;
+  const cityId = hierarchy.cityId;
+  const zoneId = hierarchy.zoneId;
+  const clusterId = hierarchy.clusterId;
+  if (scopeType === "all" || scopeType === "category") {
+    setSelectOptions(form.elements.cityId, "City", [], "");
+    setSelectOptions(form.elements.zoneId, "Zone", [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "scope") {
+    if (form.elements.stateId) form.elements.stateId.value = stateId;
+    setSelectOptions(form.elements.cityId, "City", stateId ? filterCitiesByState(stateId) : [], ["city", "zone", "cluster"].includes(scopeType) ? cityId : "");
+    setSelectOptions(form.elements.zoneId, "Zone", cityId && ["zone", "cluster"].includes(scopeType) ? filterZonesByCity(cityId) : [], ["zone", "cluster"].includes(scopeType) ? zoneId : "");
+    setSelectOptions(form.elements.clusterId, "Cluster", zoneId && scopeType === "cluster" ? filterClustersByLocation({ stateId, cityId, zoneId }) : [], scopeType === "cluster" ? clusterId : "");
+  } else if (level === "state") {
+    setSelectOptions(form.elements.cityId, "City", stateId ? filterCitiesByState(stateId) : [], "");
+    setSelectOptions(form.elements.zoneId, "Zone", [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "city") {
+    setSelectOptions(form.elements.zoneId, "Zone", cityId ? filterZonesByCity(cityId) : [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "zone") {
+    setSelectOptions(form.elements.clusterId, "Cluster", zoneId ? filterClustersByLocation({ stateId, cityId, zoneId }) : [], "");
+  }
+  const disable = {
+    stateId: ["all", "category"].includes(scopeType),
+    cityId: !["city", "zone", "cluster"].includes(scopeType),
+    zoneId: !["zone", "cluster"].includes(scopeType),
+    clusterId: scopeType !== "cluster",
+    categoryId: scopeType !== "category"
+  };
+  for (const [name, disabled] of Object.entries(disable)) {
+    if (form.elements[name]) form.elements[name].disabled = disabled;
+  }
+}
+
+function toggleBookingEngineCalendarFields(form = $("#bookingEngineForm")) {
+  if (!form) return;
+  const isAuto = form.elements.serviceControlMode?.value === "auto";
+  form.querySelector("[data-booking-engine-manual-calendar]")?.classList.toggle("d-none", isAuto);
+  form.querySelector("[data-booking-engine-auto-calendar]")?.classList.toggle("d-none", !isAuto);
+}
+
+function resetBookingEngineForm() {
+  editingBookingEngineRuleId = null;
+  const form = $("#bookingEngineForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.serviceControlMode.value = "manual";
+  form.elements.manualServiceStatus.value = "stop";
+  form.elements.assistantAssignmentMode.value = "manual";
+  form.elements.isActive.checked = true;
+  const preview = form.querySelector(".upload-preview");
+  if (preview) preview.innerHTML = "";
+  refreshBookingEngineLocationCascade("scope");
+  toggleBookingEngineCalendarFields(form);
+  $("#bookingEngineSubmitButton").textContent = "Create Booking Engine Rule";
+  $("#cancelBookingEngineEditButton").classList.add("d-none");
+}
+
+function bookingEngineFilterBar() {
+  return `<div class="master-form compact mb-3">
+    ${priceMasterFloatingField("Search", `<input class="form-control" data-booking-engine-filter="search" type="search" value="${escapeHtml(bookingEngineFilters.search || "")}" placeholder="Location, category, note">`)}
+    ${priceMasterFloatingField("Scope", `<select class="form-select" data-booking-engine-filter="scopeType"><option value="">All Scope</option><option value="all">All</option><option value="state">State</option><option value="city">City</option><option value="zone">Zone</option><option value="cluster">Cluster</option><option value="category">Category</option></select>`)}
+    ${priceMasterFloatingField("State", `<select class="form-select" data-booking-engine-filter="stateId"><option value="">All States</option>${optionRows(activeItems(cache.states))}</select>`)}
+    ${priceMasterFloatingField("City", `<select class="form-select" data-booking-engine-filter="cityId"><option value="">All Cities</option>${optionRows(activeItems(cache.cities))}</select>`)}
+    ${priceMasterFloatingField("Zone", `<select class="form-select" data-booking-engine-filter="zoneId"><option value="">All Zones</option>${optionRows(activeItems(cache.zones))}</select>`)}
+    ${priceMasterFloatingField("Cluster", `<select class="form-select" data-booking-engine-filter="clusterId"><option value="">All Clusters</option>${optionRows(activeClusters(cache.clusters))}</select>`)}
+    ${priceMasterFloatingField("Category", `<select class="form-select" data-booking-engine-filter="categoryId"><option value="">All Categories</option>${optionRows(categoryPriceCategories())}</select>`)}
+    ${priceMasterFloatingField("Status", `<select class="form-select" data-booking-engine-filter="status"><option value="">All Status</option><option value="active">Active</option><option value="inactive">Inactive</option></select>`)}
+  </div>`;
+}
+
+function bookingEngineFilteredRows() {
+  const search = String(bookingEngineFilters.search || "").trim().toLowerCase();
+  return (cache.bookingEngineRules || []).filter((item) => {
+    const text = [
+      item.scopeType,
+      item.stateName,
+      item.cityName,
+      item.zoneName,
+      item.clusterName,
+      item.categoryName,
+      item.note
+    ].filter(Boolean).join(" ").toLowerCase();
+    return (!search || text.includes(search)) &&
+      (!bookingEngineFilters.scopeType || item.scopeType === bookingEngineFilters.scopeType) &&
+      (!bookingEngineFilters.stateId || item.stateId === bookingEngineFilters.stateId) &&
+      (!bookingEngineFilters.cityId || item.cityId === bookingEngineFilters.cityId) &&
+      (!bookingEngineFilters.zoneId || item.zoneId === bookingEngineFilters.zoneId) &&
+      (!bookingEngineFilters.clusterId || item.clusterId === bookingEngineFilters.clusterId) &&
+      (!bookingEngineFilters.categoryId || item.categoryId === bookingEngineFilters.categoryId) &&
+      (!bookingEngineFilters.status || (bookingEngineFilters.status === "active" ? item.isActive !== false : item.isActive === false));
+  });
+}
+
+function bookingEngineRows(items = []) {
+  return (items || []).map((item) => {
+    const calendar = item.serviceControlMode === "auto"
+      ? `<b>Auto</b><div class="row-note">${escapeHtml(formatDate(item.autoStartAt))} to ${escapeHtml(formatDate(item.autoEndAt))}</div>`
+      : `<b>Manual</b><div class="row-note">${escapeHtml(item.manualServiceStatus === "start" ? "Start" : "Stop")}</div>`;
+    const instant = `ETA ${item.instantEtaMinutes || 0}m | Wrap ${item.instantWrapUpMinutes || 0}m | Travel ${item.instantTravelMinutes || 0}m`;
+    const schedule = `ETA ${item.scheduleEtaMinutes || 0}m | Wrap ${item.scheduleWrapUpMinutes || 0}m | Travel ${item.scheduleTravelMinutes || 0}m`;
+    return `<tr>
+      <td><b>${escapeHtml(bookingEngineScopeText(item))}</b>${item.imageUrl ? `<div class="row-note">${imageCell(item.imageUrl)}</div>` : ""}</td>
+      <td>${calendar}</td>
+      <td><b>Instant</b><div class="row-note">${escapeHtml(instant)}</div><b>Schedule</b><div class="row-note">${escapeHtml(schedule)}</div></td>
+      <td>${status(item.assistantAssignmentMode === "auto" ? "auto" : "manual")}<div class="row-note">${escapeHtml(item.assistantAssignmentMode === "auto" ? "Assign as per availability" : "Admin assigns manually")}</div></td>
+      <td>${escapeHtml(item.note || "-")}</td>
+      <td>${status(item.isActive === false ? "inactive" : "active")}</td>
+      <td class="text-end">
+        <button class="btn btn-sm btn-outline-primary" data-action="edit-booking-engine" data-id="${escapeHtml(item.id)}" type="button">Edit</button>
+        <button class="btn btn-sm btn-outline-danger" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/booking-engine" data-id="${escapeHtml(item.id)}" type="button">Delete</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+function renderBookingEngineReport() {
+  const report = $("#bookingEngineReport");
+  if (!report) return;
+  report.innerHTML = table(["Scope", "Service Calendar", "Timing Rules", "Assistant Assignment", "Note", "Status", ""], bookingEngineRows(bookingEngineFilteredRows()));
+  document.querySelectorAll("[data-booking-engine-filter]").forEach((input) => {
+    input.value = bookingEngineFilters[input.dataset.bookingEngineFilter] || "";
+  });
+}
+
+function bookingEngineQuickReplyFilterBar() {
+  return `<div class="master-form compact mb-3">
+    ${priceMasterFloatingField("Search", `<input class="form-control" data-booking-engine-quick-reply-filter="search" type="search" value="${escapeHtml(bookingEngineQuickReplyFilters.search || "")}" placeholder="Title, message, stage">`)}
+    ${priceMasterFloatingField("Actor", `<select class="form-select" data-booking-engine-quick-reply-filter="actor"><option value="">All Actors</option><option value="admin">Admin</option><option value="customer">Customer</option><option value="assistant">Assistant</option></select>`)}
+    ${priceMasterFloatingField("Stage", `<select class="form-select" data-booking-engine-quick-reply-filter="bookingStage"><option value="">All Stages</option>${bookingEngineStageOptions()}</select>`)}
+    ${priceMasterFloatingField("Action", `<select class="form-select" data-booking-engine-quick-reply-filter="actionType"><option value="">All Actions</option>${bookingEngineActionOptions()}</select>`)}
+    ${priceMasterFloatingField("Status", `<select class="form-select" data-booking-engine-quick-reply-filter="status"><option value="">All Status</option><option value="active">Active</option><option value="inactive">Inactive</option></select>`)}
+  </div>`;
+}
+
+function bookingEngineStageOptions(selected = "") {
+  return ["pending_assign", "assigned", "accepted", "working", "completed", "cancelled", "rejected", "hold"]
+    .map((value) => `<option value="${value}" ${selected === value ? "selected" : ""}>${escapeHtml(value.replace(/_/g, " "))}</option>`)
+    .join("");
+}
+
+function bookingEngineActionOptions(selected = "") {
+  return ["message", "status_update", "cancel", "reject", "payment_request", "approval_request", "time_extension_request", "delay_update", "location_share"]
+    .map((value) => `<option value="${value}" ${selected === value ? "selected" : ""}>${escapeHtml(value.replace(/_/g, " "))}</option>`)
+    .join("");
+}
+
+function bookingEngineQuickReplyFilteredRows() {
+  const search = String(bookingEngineQuickReplyFilters.search || "").trim().toLowerCase();
+  return (cache.bookingEngineQuickReplies || []).filter((item) => {
+    const text = [
+      item.title,
+      item.message,
+      item.actor,
+      item.audience,
+      item.bookingStage,
+      item.actionType,
+      bookingEngineScopeText(item)
+    ].filter(Boolean).join(" ").toLowerCase();
+    return (!search || text.includes(search)) &&
+      (!bookingEngineQuickReplyFilters.actor || item.actor === bookingEngineQuickReplyFilters.actor) &&
+      (!bookingEngineQuickReplyFilters.bookingStage || item.bookingStage === bookingEngineQuickReplyFilters.bookingStage) &&
+      (!bookingEngineQuickReplyFilters.actionType || item.actionType === bookingEngineQuickReplyFilters.actionType) &&
+      (!bookingEngineQuickReplyFilters.status || (bookingEngineQuickReplyFilters.status === "active" ? item.isActive !== false : item.isActive === false));
+  });
+}
+
+function bookingEngineQuickReplyRows(items = []) {
+  return (items || []).map((item) => `<tr>
+    <td><b>${escapeHtml(item.title || "-")}</b><div class="row-note">${escapeHtml(item.message || "-")}</div></td>
+    <td>${escapeHtml(bookingEngineScopeText(item))}</td>
+    <td><b>${escapeHtml(item.actor || "-")}</b><div class="row-note">to ${escapeHtml(item.audience || "-")}</div></td>
+    <td>${status(String(item.bookingStage || "").replace(/_/g, " "))}<div class="row-note">${escapeHtml(String(item.actionType || "").replace(/_/g, " "))}</div></td>
+    <td>${escapeHtml(item.sortOrder ?? 0)}</td>
+    <td>${status(item.isActive === false ? "inactive" : "active")}</td>
+    <td class="text-end">
+      <button class="btn btn-sm btn-outline-primary" data-action="edit-booking-engine-quick-reply" data-id="${escapeHtml(item.id)}" type="button">Edit</button>
+      <button class="btn btn-sm btn-outline-danger" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/booking-engine/quick-replies" data-id="${escapeHtml(item.id)}" type="button">Delete</button>
+    </td>
+  </tr>`).join("");
+}
+
+function renderBookingEngineQuickReplyReport() {
+  const report = $("#bookingEngineQuickReplyReport");
+  if (!report) return;
+  report.innerHTML = table(["Quick Reply", "Scope", "Actor", "Stage / Action", "Sort", "Status", ""], bookingEngineQuickReplyRows(bookingEngineQuickReplyFilteredRows()));
+  document.querySelectorAll("[data-booking-engine-quick-reply-filter]").forEach((input) => {
+    input.value = bookingEngineQuickReplyFilters[input.dataset.bookingEngineQuickReplyFilter] || "";
+  });
+}
+
+function resetBookingEngineQuickReplyForm() {
+  editingBookingEngineQuickReplyId = null;
+  const form = $("#bookingEngineQuickReplyForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.scopeType.value = "all";
+  form.elements.actor.value = "assistant";
+  form.elements.audience.value = "customer";
+  form.elements.bookingStage.value = "working";
+  form.elements.actionType.value = "message";
+  form.elements.isActive.checked = true;
+  $("#bookingEngineQuickReplySubmitButton").textContent = "Create Quick Reply";
+  $("#cancelBookingEngineQuickReplyEditButton").classList.add("d-none");
+}
+
+function clusterCategoryServiceOptions(clusterId) {
+  const serviceIds = new Set(
+    (cache.clusterServices || [])
+      .filter((item) => item.clusterId === clusterId && item.isActive !== false)
+      .map((item) => item.serviceId)
+  );
+  return activeItems(cache.services || []).filter((service) => serviceIds.has(service.id));
+}
+
+function refreshClusterCategoryCascade(level = "cluster") {
+  const form = document.querySelector('[data-form="cluster-category-setting"]');
+  if (!form) return;
+  const clusterId = form.elements.clusterId?.value || "";
+  const serviceId = form.elements.serviceId?.value || "";
+  if (level === "cluster") {
+    setSelectOptions(form.elements.serviceId, "Select Cluster Service", clusterCategoryServiceOptions(clusterId));
+    setSelectOptions(form.elements.categoryId, "Select Category", []);
+    return;
+  }
+  const categories = activeItems(cache.categories || []).filter((category) => category.serviceId === serviceId);
+  setSelectOptions(form.elements.categoryId, "Select Category", categories);
+}
+
+function clusterBookingTypeServices(clusterId) {
+  const mappedServiceIds = new Set(
+    (cache.clusterServices || [])
+      .filter((item) => item.clusterId === clusterId && item.isActive !== false && item.isEnabled !== false)
+      .map((item) => item.serviceId)
+  );
+  const services = activeItems(cache.services || []);
+  return mappedServiceIds.size ? services.filter((service) => mappedServiceIds.has(service.id)) : services;
+}
+
+function clusterBookingTypeSelectedServices(form = $("#clusterBookingTypeForm")) {
+  if (!form) return [];
+  const clusterId = form.elements.clusterId?.value || "";
+  const services = clusterBookingTypeServices(clusterId);
+  if (form.elements.serviceAll?.checked) return services.map((service) => service.id);
+  return checkedDatasetValues(form, '[data-cluster-booking-service]:checked');
+}
+
+function clusterBookingTypeChecklistHtml(items, attr, emptyText, checked = false, disabled = false) {
+  if (!items.length) return `<div class="empty-state">${escapeHtml(emptyText)}</div>`;
+  return items
+    .map((item) => `<label class="cluster-booking-check ${disabled ? "disabled" : ""}">
+      <input type="checkbox" ${attr} value="${escapeHtml(item.id)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}>
+      <span><b>${escapeHtml(item.name || item.serviceName || item.categoryName || "-")}</b>${item.code ? `<small>${escapeHtml(item.code)}</small>` : ""}</span>
+    </label>`)
+    .join("");
+}
+
+function refreshClusterBookingTypeControls() {
+  const form = $("#clusterBookingTypeForm");
+  if (!form) return;
+  const clusterId = form.elements.clusterId?.value || "";
+  const serviceAll = Boolean(form.elements.serviceAll?.checked);
+  const selectedServices = new Set(checkedDatasetValues(form, "[data-cluster-booking-service]"));
+  const services = clusterBookingTypeServices(clusterId);
+  const serviceList = form.querySelector("[data-cluster-booking-service-list]");
+  if (serviceList) serviceList.innerHTML = clusterBookingTypeChecklistHtml(services, "data-cluster-booking-service", clusterId ? "No active services found for this cluster." : "Select a cluster first.", serviceAll, serviceAll);
+  for (const input of form.querySelectorAll("[data-cluster-booking-service]")) input.checked = serviceAll || selectedServices.has(input.value);
+  renderClusterBookingTypeIndividualSettings(form);
+}
+
+function clusterBookingTypeTargetRows(form = $("#clusterBookingTypeForm")) {
+  if (!form) return [];
+  const serviceIds = clusterBookingTypeSelectedServices(form);
+  return serviceIds.map((serviceId) => {
+    const service = cache.services.find((item) => item.id === serviceId);
+    return { targetType: "service", serviceId, categoryId: "", label: service?.name || serviceId, note: "Service-level config" };
+  });
+}
+
+function clusterBookingTypeTargetKey(row) {
+  return `${row.targetType}:${row.targetType === "category" ? row.categoryId : row.serviceId}`;
+}
+
+function clusterBookingTypeOptions(selected = "both") {
+  return ["both", "instant", "schedule"].map((value) => `<option value="${value}" ${selected === value ? "selected" : ""}>${escapeHtml(value === "both" ? "Both" : value === "instant" ? "Instant" : "Schedule")}</option>`).join("");
+}
+
+function clusterBookingAssignmentOptions(selected = "both") {
+  return [["both", "Select"], ["automate", "Auto"], ["manual", "Manual"]].map(([value, label]) => `<option value="${value}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+}
+
+function formatClusterBookingAssistantMode(value = "both") {
+  return value === "automate" ? "Auto" : value === "manual" ? "Manual" : "Select";
+}
+
+function clusterBookingTypeSavedTargetValues(form, row) {
+  const clusterId = form?.elements.clusterId?.value || "";
+  const replaceConfigKey = form?.elements.replaceConfigKey?.value || "";
+  if (!clusterId || !replaceConfigKey) return null;
+  const matches = cache.clusterBookingTypes.filter((setting) => setting.clusterId === clusterId && clusterBookingTypeConfigKey(setting) === replaceConfigKey);
+  const match = matches.find((setting) => setting.targetType === "service" && setting.serviceId === row.serviceId);
+  return match ? {
+    bookingType: match.bookingType || "both",
+    instantMode: match.instantMode || "both",
+    waitWindowMinutes: String(Number(match.waitWindowMinutes || 0)),
+    isActive: match.isActive !== false
+  } : null;
+}
+
+function renderClusterBookingTypeIndividualSettings(form = $("#clusterBookingTypeForm")) {
+  const host = form?.querySelector("[data-cluster-booking-individual-settings]");
+  if (!form || !host) return;
+  if (form.elements.serviceAll?.checked) {
+    host.innerHTML = `<div class="empty-state">All services use the top row setting.</div>`;
+    return;
+  }
+  const existing = new Map([...host.querySelectorAll("[data-cluster-booking-target-row]")].map((row) => [row.dataset.targetKey, {
+    bookingType: row.querySelector('[name="targetBookingType"]')?.value || form.elements.bookingType.value || "both",
+    instantMode: row.querySelector('[name="targetInstantMode"]')?.value || form.elements.instantMode.value || "both",
+    waitWindowMinutes: row.querySelector('[name="targetWaitWindowMinutes"]')?.value || form.elements.waitWindowMinutes.value || "0",
+    isActive: row.querySelector('[name="targetIsActive"]')?.checked !== false
+  }]));
+  const rows = clusterBookingTypeTargetRows(form);
+  const groupedRows = new Map();
+  for (const row of rows) {
+    const service = cache.services.find((item) => item.id === row.serviceId);
+    const serviceKey = row.serviceId || "service";
+    if (!groupedRows.has(serviceKey)) groupedRows.set(serviceKey, { serviceName: service?.name || row.note || "Service", rows: [] });
+    groupedRows.get(serviceKey).rows.push(row);
+  }
+  const targetRowHtml = (row) => {
+    const key = clusterBookingTypeTargetKey(row);
+    const values = existing.get(key) || clusterBookingTypeSavedTargetValues(form, row) || {
+      bookingType: form.elements.bookingType.value || "both",
+      instantMode: form.elements.instantMode.value || "both",
+      waitWindowMinutes: form.elements.waitWindowMinutes.value || "0",
+      isActive: form.elements.isActive.checked
+    };
+    return `<div class="cluster-booking-target-row" data-cluster-booking-target-row data-target-key="${escapeHtml(key)}" data-target-type="${escapeHtml(row.targetType)}" data-service-id="${escapeHtml(row.serviceId || "")}" data-category-id="${escapeHtml(row.categoryId || "")}">
+      <div><b>${escapeHtml(row.label)}</b><small>${escapeHtml(row.note)}</small></div>
+      <select class="form-select" name="targetBookingType">${clusterBookingTypeOptions(values.bookingType)}</select>
+      <input class="form-control" name="targetWaitWindowMinutes" type="number" min="0" max="1440" step="1" value="${escapeHtml(values.waitWindowMinutes)}">
+      <select class="form-select" name="targetInstantMode">${clusterBookingAssignmentOptions(values.instantMode)}</select>
+      <label class="inline-check"><input type="checkbox" name="targetIsActive" ${values.isActive ? "checked" : ""}> Active</label>
+    </div>`;
+  };
+  host.innerHTML = rows.length ? `<div class="cluster-booking-individual-head">Individual Booking Type Settings</div>${[...groupedRows.values()].map((group) => `
+    <div class="cluster-booking-service-group">
+      <div class="cluster-booking-service-group-head">Service: ${escapeHtml(group.serviceName)}</div>
+      ${group.rows.map(targetRowHtml).join("")}
+    </div>
+  `).join("")}` : `<div class="empty-state">Select services or categories to configure individually.</div>`;
+}
+
+function collectClusterBookingTypeIndividualSettings(form = $("#clusterBookingTypeForm")) {
+  if (form?.elements.serviceAll?.checked) return [];
+  return [...(form?.querySelectorAll("[data-cluster-booking-target-row]") || [])].map((row) => ({
+    targetType: row.dataset.targetType,
+    serviceId: row.dataset.serviceId || null,
+    categoryId: row.dataset.categoryId || null,
+    bookingType: row.querySelector('[name="targetBookingType"]')?.value || "both",
+    waitWindowMinutes: Number(row.querySelector('[name="targetWaitWindowMinutes"]')?.value || 0),
+    instantMode: row.querySelector('[name="targetInstantMode"]')?.value || "both",
+    isActive: Boolean(row.querySelector('[name="targetIsActive"]')?.checked)
+  }));
+}
+
+function editClusterBookingTypeSetting(item) {
+  const form = $("#clusterBookingTypeForm");
+  if (!form || !item) return;
+  form.elements.clusterId.value = item.clusterId || "";
+  form.elements.bookingType.value = item.bookingType || "both";
+  form.elements.instantMode.value = item.instantMode || "both";
+  form.elements.waitWindowMinutes.value = item.waitWindowMinutes || 0;
+  form.elements.isActive.checked = item.isActive !== false;
+  if (form.elements.replaceConfigKey) form.elements.replaceConfigKey.value = clusterBookingTypeConfigKey(item);
+  form.elements.serviceAll.checked = false;
+  refreshClusterBookingTypeControls();
+  const serviceInput = [...form.querySelectorAll("[data-cluster-booking-service]")].find((input) => input.value === item.serviceId);
+  if (serviceInput) serviceInput.checked = true;
+  refreshClusterBookingTypeControls();
+  renderClusterBookingTypeIndividualSettings(form);
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function editClusterBookingTypeGroup(clusterId, configKey) {
+  const rows = cache.clusterBookingTypes.filter((setting) => setting.clusterId === clusterId && clusterBookingTypeConfigKey(setting) === configKey);
+  const item = rows[0];
+  const form = $("#clusterBookingTypeForm");
+  if (!form || !item) return;
+  form.elements.clusterId.value = clusterId || "";
+  form.elements.bookingType.value = item.bookingType || "both";
+  form.elements.instantMode.value = item.instantMode || "both";
+  form.elements.waitWindowMinutes.value = item.waitWindowMinutes || 0;
+  form.elements.isActive.checked = item.isActive !== false;
+  if (form.elements.replaceConfigKey) form.elements.replaceConfigKey.value = configKey;
+  const services = clusterBookingTypeServices(clusterId);
+  const allServiceIds = new Set(services.map((service) => service.id));
+  const rowServiceIds = new Set(rows.map((row) => row.serviceId).filter(Boolean));
+  form.elements.serviceAll.checked = Boolean(allServiceIds.size) && rowServiceIds.size === allServiceIds.size;
+  refreshClusterBookingTypeControls();
+  if (!form.elements.serviceAll.checked) {
+    for (const input of form.querySelectorAll("[data-cluster-booking-service]")) input.checked = rowServiceIds.has(input.value);
+  }
+  refreshClusterBookingTypeControls();
+  renderClusterBookingTypeIndividualSettings(form);
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function deleteClusterBookingTypeGroup(clusterId, configKey) {
+  const rows = cache.clusterBookingTypes.filter((setting) => setting.clusterId === clusterId && clusterBookingTypeConfigKey(setting) === configKey);
+  for (const row of rows) {
+    await api(`/masters/cluster-booking-types/${row.targetType || "service"}/${row.id}`, { method: "DELETE" });
+  }
+}
+
+function storeCategoryRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td>${imageCell(item.imageUrl)}</td>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.serviceName || "-")}</td>
+        <td>${escapeHtml(item.serviceCategoryName || "-")}</td>
+        <td>${escapeHtml(item.description || "-")}</td>
+        <td>${escapeHtml(item.priority ?? 0)}</td>
+        <td>${status(item.isUsable === false ? "blocked" : item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-store-category" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/stores/store-categories" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function storeKeywordRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.serviceName || "-")}</td>
+        <td>${escapeHtml(item.serviceCategoryName || "-")}</td>
+        <td>${escapeHtml(item.description || "-")}</td>
+        <td>${escapeHtml(item.priority ?? 0)}</td>
+        <td>${status(item.isUsable === false ? "blocked" : item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-store-keyword" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/stores/store-keywords" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function storeRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td>${imageCell(item.primaryImageUrl)}</td>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.contact || "-")}</td>
+        <td>${escapeHtml(item.address || "-")}</td>
+        <td>${escapeHtml(item.longitude ?? "-")}, ${escapeHtml(item.latitude ?? "-")}</td>
+        <td>${escapeHtml(item.priority ?? 0)}</td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-store" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/stores" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function imageUrlGallery(urls = [], removeAction = "remove-store-image-url") {
+  return (urls || [])
+    .map(
+      (url) => `<span class="store-image-chip">
+        ${imageCell(url)}
+        <button class="btn btn-light btn-xs" data-action="${escapeHtml(removeAction)}" data-url="${escapeHtml(url)}" type="button">Remove</button>
+      </span>`
+    )
+    .join("");
+}
+
+function storeImageGallery(urls = []) {
+  return imageUrlGallery(urls, "remove-store-image-url");
+}
+
+function vehiclePictureGallery(urls = []) {
+  return imageUrlGallery(urls, "remove-vehicle-picture-url");
+}
+
+function vehicleMasterRows(items) {
+  return items
+    .map((item) => {
+      const pictures = item.pictureUrls || [];
+      return `<tr>
+        <td>${imageCell(pictures[0])}<div class="row-note">${pictures.length ? `${pictures.length} picture${pictures.length === 1 ? "" : "s"}` : "No pictures"}</div></td>
+        <td><b>${escapeHtml(item.vehicleName)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td><b>${escapeHtml(item.clusterName || "-")}</b><div class="row-note">${escapeHtml([item.stateName, item.cityName, item.zoneName].filter(Boolean).join(" / ") || "-")}</div></td>
+        <td>${escapeHtml(item.company || "-")}</td>
+        <td>${escapeHtml(item.vehicleNumber || "-")}</td>
+        <td>${escapeHtml(item.model || "-")}</td>
+        <td>${escapeHtml(item.fuelType || "-")}</td>
+        <td>${escapeHtml(item.color || "-")}</td>
+        <td>${vehicleOwnerSummary(item)}</td>
+        <td>${vehicleAllotmentCell(item)}</td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-vehicle-master" data-id="${item.id}" type="button">Edit</button>
+          ${isSuperAdminUser() ? `<button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/vehicle-master" data-id="${item.id}" type="button">Delete</button>` : ""}
+        </td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function vehicleOwnerSummary(item) {
+  const ownerType = item.ownerType === "Self" ? "Own" : item.ownerType === "Rented" ? "Rent" : item.ownerType || "Own";
+  if (ownerType === "Rent") {
+    return `<b>Rent</b><div class="row-note">${escapeHtml(item.rentalCompanyName || "-")} | ${escapeHtml(item.rentSlab || "-")} | ${escapeHtml(item.rentCharges ?? "-")}</div>`;
+  }
+  if (ownerType === "ZIGO") {
+    return `<b>ZIGO</b><div class="row-note">${escapeHtml(item.zigoSlab || "-")} | ${escapeHtml(item.zigoCharges ?? "-")}</div>`;
+  }
+  return "Own";
+}
+
+function assignedAssistantFromVehicle(vehicle = {}) {
+  const assistant = cache.assistantMasters.find((item) => item.id === vehicle.assignedAssistantId);
+  if (assistant) return assistant;
+  if (!vehicle.assignedAssistantId) return null;
+  return {
+    id: vehicle.assignedAssistantId,
+    displayName: vehicle.assignedAssistantName,
+    assistantCode: vehicle.assignedAssistantCode,
+    phone: vehicle.assignedAssistantPhone,
+    profilePictureUrl: vehicle.assignedAssistantProfilePictureUrl
+  };
+}
+
+function assignedAssistantProfileButton(vehicle = {}) {
+  const assistant = assignedAssistantFromVehicle(vehicle);
+  if (!assistant?.id) return `<span class="text-secondary">Allotted</span>`;
+  const name = assistant.displayName || assistant.assistantCode || "Assistant";
+  return `<button class="assigned-assistant-mini" data-action="open-assigned-assistant-profile" data-id="${escapeHtml(assistant.id)}" type="button" title="View assistant profile">
+    ${profileAvatar(assistant.profilePictureUrl || vehicle.assignedAssistantProfilePictureUrl || "", name)}
+    <span><b>Allotted to ${escapeHtml(name)}</b><small>${escapeHtml(assistant.phone || assistant.email || assistant.assistantCode || "")}</small></span>
+  </button>`;
+}
+
+function vehicleAllotmentCell(item) {
+  if (item.assignedAssistantId) {
+    return `<div>${assignedAssistantProfileButton(item)}<button class="btn btn-light btn-xs mt-1" data-action="unallot-vehicle-master" data-id="${item.assignedAssistantId}" data-vehicle-id="${item.id}" type="button">Unallot</button></div>`;
+  }
+  return `<button class="btn btn-primary btn-xs" data-action="open-vehicle-allot" data-id="${item.id}" type="button" ${item.isActive === false ? "disabled" : ""}>Allot</button>`;
+}
+
+function filteredAssistantVehiclePickerItems() {
+  const query = ($("#assistantVehicleSearchInput")?.value || "").trim().toLowerCase();
+  const stateId = $("#assistantVehicleStateFilter")?.value || "";
+  const cityId = $("#assistantVehicleCityFilter")?.value || "";
+  const zoneId = $("#assistantVehicleZoneFilter")?.value || "";
+  const clusterId = $("#assistantVehicleClusterFilter")?.value || "";
+  const fuel = $("#assistantVehicleFuelFilter")?.value || "";
+  const ownerType = $("#assistantVehicleOwnerFilter")?.value || "";
+  const statusValue = $("#assistantVehicleStatusFilter")?.value || "";
+  return cache.vehicleMasters.filter((vehicle) => {
+    const normalizedOwner = normalizedVehicleOwnerType(vehicle.ownerType);
+    const text = [vehicle.vehicleName, vehicle.vehicleNumber, vehicle.model, vehicle.company, vehicle.fuelType, vehicle.color, vehicle.clusterName, vehicle.cityName, vehicle.zoneName, vehicle.stateName]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return (
+      (!query || text.includes(query)) &&
+      (!stateId || vehicle.stateId === stateId) &&
+      (!cityId || vehicle.cityId === cityId) &&
+      (!zoneId || vehicle.zoneId === zoneId) &&
+      (!clusterId || vehicle.clusterId === clusterId) &&
+      (!fuel || vehicle.fuelType === fuel) &&
+      (!ownerType || normalizedOwner === ownerType) &&
+      (!statusValue || (statusValue === "active" ? vehicle.isActive !== false : vehicle.isActive === false))
+    );
+  });
+}
+
+function assistantVehiclePickerRows(assistantId) {
+  const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+  const hasCurrentVehicle = Boolean(assistant?.vehicleMasterId);
+  return filteredAssistantVehiclePickerItems()
+    .map((vehicle) => {
+      const isCurrent = vehicle.assignedAssistantId === assistantId;
+      const assignedToOther = vehicle.assignedAssistantId && vehicle.assignedAssistantId !== assistantId;
+      const action = isCurrent
+        ? `<button class="btn btn-light btn-xs" data-action="remove-assistant-vehicle-master" data-id="${assistantId}" type="button">Unallot</button>`
+        : assignedToOther
+          ? assignedAssistantProfileButton(vehicle)
+          : vehicle.isActive === false
+            ? `<button class="btn btn-primary btn-xs" type="button" disabled>Allot</button><div class="row-note">Vehicle is deactive</div>`
+            : `<button class="btn btn-primary btn-xs" data-action="assign-assistant-master-vehicle" data-id="${vehicle.id}" data-assistant-id="${assistantId}" type="button">${hasCurrentVehicle ? "Change" : "Allot"}</button>`;
+      return `<div class="assistant-vehicle-picker-row">
+        <div class="assistant-vehicle-picker-main">
+          <b>${escapeHtml(vehicle.vehicleName || "-")}</b>
+          <span>${escapeHtml(vehicle.vehicleNumber || "-")}</span>
+          <small>${escapeHtml(vehicle.id)}</small>
+        </div>
+        <div class="assistant-vehicle-picker-cluster">
+          <b>${escapeHtml(vehicle.clusterName || "-")}</b>
+          <span>${escapeHtml([vehicle.cityName, vehicle.zoneName].filter(Boolean).join(" / ") || "-")}</span>
+          <small>${escapeHtml(vehicle.stateName || "-")}</small>
+        </div>
+        <div class="assistant-vehicle-picker-spec">
+          <span><b>Company</b>${escapeHtml(vehicle.company || "-")}</span>
+          <span><b>Model</b>${escapeHtml(vehicle.model || "-")}</span>
+          <span><b>Fuel</b>${escapeHtml(vehicle.fuelType || "-")}</span>
+          <span><b>Color</b>${escapeHtml(vehicle.color || "-")}</span>
+        </div>
+        <div class="assistant-vehicle-picker-owner">${vehicleOwnerSummary(vehicle)}</div>
+        <div class="assistant-vehicle-picker-status">${status(vehicle.isActive ? "active" : "deactive")}</div>
+        <div class="assistant-vehicle-picker-action">${action}</div>
+      </div>`;
+    })
+    .join("");
+}
+
+function renderAssistantVehiclePicker(assistantId) {
+  const target = $("#assistantVehiclePickerResults");
+  if (!target) return;
+  const rows = assistantVehiclePickerRows(assistantId);
+  target.innerHTML = `<div class="assistant-vehicle-picker">
+    <div class="assistant-vehicle-picker-head">
+      <span>Vehicle</span>
+      <span>Cluster</span>
+      <span>Details</span>
+      <span>Owner / Rent</span>
+      <span>Status</span>
+      <span>Allot</span>
+    </div>
+    ${rows || `<div class="empty-state">No vehicles found.</div>`}
+  </div>`;
+}
+
+function applyAssistantVehicleAssignmentLocally(assistantId, vehicleId) {
+  const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+  const selectedVehicle = cache.vehicleMasters.find((item) => item.id === vehicleId);
+  if (!assistant || !selectedVehicle) return;
+
+  cache.assistantMasters = cache.assistantMasters.map((item) => {
+    if (item.id !== assistantId) return item;
+    return {
+      ...item,
+      vehicleMasterId: selectedVehicle.id,
+      vehicleName: selectedVehicle.vehicleName || "",
+      vehicleNumber: selectedVehicle.vehicleNumber || "",
+      vehicleCompany: selectedVehicle.company || "",
+      vehicleModel: selectedVehicle.model || "",
+      vehicleFuelType: selectedVehicle.fuelType || "",
+      vehicleColor: selectedVehicle.color || "",
+      vehicleOwnerType: selectedVehicle.ownerType || "",
+      vehiclePictureUrls: selectedVehicle.pictureUrls || []
+    };
+  });
+
+  cache.vehicleMasters = cache.vehicleMasters.map((item) => {
+    const wasAssignedToAssistant = item.assignedAssistantId === assistantId;
+    if (item.id === vehicleId) {
+      return {
+        ...item,
+        assignedAssistantId: assistantId,
+        assignedAssistantName: assistant.displayName || assistant.assistantCode || "",
+        assignedAssistantCode: assistant.assistantCode || "",
+        assignedAssistantPhone: assistant.phone || assistant.email || "",
+        assignedAssistantProfilePictureUrl: assistant.profilePictureUrl || ""
+      };
+    }
+    if (wasAssignedToAssistant) {
+      return {
+        ...item,
+        assignedAssistantId: null,
+        assignedAssistantName: null,
+        assignedAssistantCode: null,
+        assignedAssistantPhone: null,
+        assignedAssistantProfilePictureUrl: null
+      };
+    }
+    return item;
+  });
+}
+
+function applyAssistantVehicleRemovalLocally(assistantId) {
+  cache.assistantMasters = cache.assistantMasters.map((item) => {
+    if (item.id !== assistantId) return item;
+    return {
+      ...item,
+      vehicleMasterId: null,
+      vehicleName: "",
+      vehicleNumber: "",
+      vehicleCompany: "",
+      vehicleModel: "",
+      vehicleFuelType: "",
+      vehicleColor: "",
+      vehicleOwnerType: "",
+      vehiclePictureUrls: []
+    };
+  });
+  cache.vehicleMasters = cache.vehicleMasters.map((item) => {
+    if (item.assignedAssistantId !== assistantId) return item;
+    return {
+      ...item,
+      assignedAssistantId: null,
+      assignedAssistantName: null,
+      assignedAssistantCode: null,
+      assignedAssistantPhone: null,
+      assignedAssistantProfilePictureUrl: null
+    };
+  });
+}
+
+function assistantProfileDetailValue(label, value) {
+  return `<div class="assistant-profile-detail-item"><span>${escapeHtml(label)}</span><b>${escapeHtml(value || "-")}</b></div>`;
+}
+
+function assistantProfilePictureDocuments(assistant) {
+  return (assistant?.documents || []).filter((document) => ["profile_picture", "profile_photo"].includes(String(document.documentTypeCode || "").toLowerCase()));
+}
+
+function assistantProfileDetailHtml(assistant) {
+  if (!assistant) return `<div class="empty-state">Assistant profile not found.</div>`;
+  const lifecycle = assistantProfileLifecycle(assistant);
+  const docs = (assistant.documents || []).filter((document) => !["profile_picture", "profile_photo"].includes(String(document.documentTypeCode || "")));
+  const verifiedDocs = docs.filter((document) => assistantStatusDotClass(document.verificationStatus || document.status) === "verified").length;
+  const clusterText = [assistant.currentClusterName, assistant.currentZoneName, assistant.currentCityName].filter(Boolean).join(" / ");
+  const vehicleText = [assistant.vehicleName, assistant.vehicleNumber].filter(Boolean).join(" / ");
+  return `<div class="assistant-profile-detail">
+    <div class="assistant-profile-detail-hero">
+      ${profileAvatar(assistant.profilePictureUrl, assistant.displayName)}
+      <div>
+        <h3>${escapeHtml(assistant.displayName || "Assistant")}</h3>
+        <p>${escapeHtml(assistant.assistantCode || "-")}</p>
+        <div class="assistant-profile-detail-pills">
+          ${status(lifecycle.isActive ? "active" : "deactive")}
+          <span class="assistant-status-capsule ${assistantStatusDotClass(lifecycle.verificationStatus)}">${escapeHtml(String(lifecycle.verificationStatus || "verifying").replace(/_/g, " "))}</span>
+        </div>
+      </div>
+    </div>
+    <div class="assistant-profile-detail-grid">
+      ${assistantProfileDetailValue("Mobile Number", assistant.phone)}
+      ${assistantProfileDetailValue("Email", assistant.email)}
+      ${assistantProfileDetailValue("City", assistant.currentCityName)}
+      ${assistantProfileDetailValue("Zone", assistant.currentZoneName)}
+      ${assistantProfileDetailValue("Cluster", assistant.currentClusterName)}
+      ${assistantProfileDetailValue("Cluster Path", clusterText)}
+      ${assistantProfileDetailValue("Working Type", readableLabel(assistant.workingType))}
+      ${assistantProfileDetailValue("Pay Type", readableLabel(assistant.payType))}
+      ${assistantProfileDetailValue("Vehicle", vehicleText)}
+      ${assistantProfileDetailValue("Owner Type", assistant.vehicleOwnerType)}
+      ${assistantProfileDetailValue("Documents", docs.length ? `${verifiedDocs}/${docs.length} verified` : "No documents")}
+      ${assistantProfileDetailValue("Created On", assistant.createdAt ? formatDate(assistant.createdAt) : "-")}
+    </div>
+  </div>`;
+}
+
+function ensureAssignedAssistantProfileModal() {
+  let modal = $("#assignedAssistantProfileModal");
+  if (modal) return modal;
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `<div id="assignedAssistantProfileModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="assignedAssistantProfileModalTitle">
+      <div class="map-modal-card booking-modal-card assigned-assistant-profile-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Assistant Profile</p>
+            <h2 id="assignedAssistantProfileModalTitle">Assistant Details</h2>
+          </div>
+          <button id="closeAssignedAssistantProfileModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="assignedAssistantProfileModalBody"></div>
+        </div>
+      </div>
+    </div>`
+  );
+  modal = $("#assignedAssistantProfileModal");
+  $("#closeAssignedAssistantProfileModalButton")?.addEventListener("click", () => modal.classList.add("d-none"));
+  return modal;
+}
+
+async function ensureAssistantMasterCache() {
+  if (!cache.assistantMasters.length) {
+    const payload = await safeApi(BASE_PATH+"/assistant-master");
+    cache.assistantMasters = (payload.data || []).map((assistant) => ({
+      ...assistant,
+      onlineStartedAt: assistant.onlineStartedAt || (assistantIsOnline(assistant) ? assistant.availabilityUpdatedAt || new Date().toISOString() : null),
+      todayOnlineSyncedAt: new Date().toISOString()
+    }));
+  }
+}
+
+async function openAssignedAssistantProfileModal(assistantId) {
+  await ensureAssistantMasterCache();
+  const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+  const modal = ensureAssignedAssistantProfileModal();
+  $("#assignedAssistantProfileModalTitle").textContent = assistant?.displayName || "Assistant Details";
+  $("#assignedAssistantProfileModalBody").innerHTML = assistantProfileDetailHtml(assistant);
+  modal.classList.remove("d-none");
+}
+
+function setAssistantProfilePictureModalAlert(message = "", tone = "danger") {
+  const alert = $("#assistantProfilePictureModalAlert");
+  if (!alert) return;
+  alert.className = `alert alert-${tone}${message ? "" : " d-none"}`;
+  alert.textContent = message;
+}
+
+function ensureAssistantProfilePictureModal() {
+  let modal = $("#assistantProfilePictureModal");
+  if (modal) return modal;
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `<div id="assistantProfilePictureModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="assistantProfilePictureModalTitle">
+      <div class="map-modal-card booking-modal-card assistant-profile-picture-card">
+        <div class="map-modal-header">
+          <div>
+            <p>Assistant</p>
+            <h2 id="assistantProfilePictureModalTitle">Profile Picture</h2>
+          </div>
+          <button id="closeAssistantProfilePictureModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div class="booking-modal-body">
+          <div id="assistantProfilePictureModalAlert" class="alert alert-danger d-none"></div>
+          <div id="assistantProfilePictureModalBody"></div>
+        </div>
+      </div>
+    </div>`
+  );
+  modal = $("#assistantProfilePictureModal");
+  $("#closeAssistantProfilePictureModalButton")?.addEventListener("click", () => modal.classList.add("d-none"));
+  return modal;
+}
+
+function openAssistantProfilePictureModal(assistantId) {
+  const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+  if (!assistant) {
+    showAlert("Assistant profile not found.");
+    return;
+  }
+  const modal = ensureAssistantProfilePictureModal();
+  $("#assistantProfilePictureModalTitle").textContent = `${assistant.displayName || "Assistant"} Profile Picture`;
+  $("#assistantProfilePictureModalBody").innerHTML = `<form id="assistantProfilePictureForm" class="master-form stack">
+    <input type="hidden" name="assistantId" value="${escapeHtml(assistant.id)}">
+    <div class="assistant-profile-picture-current">${profileAvatar(assistant.profilePictureUrl, assistant.displayName)}</div>
+    ${assistantProfilePictureUploadControl(assistant.profilePictureUrl || "")}
+    <div class="form-actions">
+      <button class="btn btn-primary" id="assistantProfilePictureSubmitButton" type="submit">Update Profile Picture</button>
+      <button class="btn btn-outline-danger" type="button" data-action="remove-assistant-profile-picture" data-id="${escapeHtml(assistant.id)}" ${assistant.profilePictureUrl ? "" : "disabled"}>Remove</button>
+      <button class="btn btn-light" type="button" data-action="close-assistant-profile-picture">Cancel</button>
+    </div>
+  </form>`;
+  setAssistantProfilePictureModalAlert();
+  modal.classList.remove("d-none");
+}
+
+function updateAssistantProfilePictureCache(assistantId, upload) {
+  const field = assistantUserDocumentFields.find((item) => item.key === "profilePictureDocument");
+  const documentType = field?.codes.map((code) => cache.documentTypes.find((item) => item.code === code)).find(Boolean);
+  cache.assistantMasters = cache.assistantMasters.map((assistant) => {
+    if (assistant.id !== assistantId) return assistant;
+    const remainingDocs = (assistant.documents || []).filter((document) => !["profile_picture", "profile_photo"].includes(String(document.documentTypeCode || "").toLowerCase()));
+    return {
+      ...assistant,
+      profilePictureUrl: upload.previewUrl,
+      documents: [
+        ...remainingDocs,
+        {
+          id: `profile-${Date.now()}`,
+          documentTypeId: documentType?.id || "",
+          documentTypeCode: documentType?.code || "profile_picture",
+          documentTypeName: documentType?.name || "Profile Picture",
+          originalName: upload.originalName,
+          mimeType: upload.mimeType,
+          previewUrl: upload.previewUrl,
+          verificationStatus: "verified"
+        }
+      ]
+    };
+  });
+  cache.vehicleMasters = cache.vehicleMasters.map((vehicle) => (
+    vehicle.assignedAssistantId === assistantId ? { ...vehicle, assignedAssistantProfilePictureUrl: upload.previewUrl } : vehicle
+  ));
+}
+
+function removeAssistantProfilePictureCache(assistantId) {
+  cache.assistantMasters = cache.assistantMasters.map((assistant) => {
+    if (assistant.id !== assistantId) return assistant;
+    return {
+      ...assistant,
+      profilePictureUrl: "",
+      documents: (assistant.documents || []).filter((document) => !["profile_picture", "profile_photo"].includes(String(document.documentTypeCode || "").toLowerCase()))
+    };
+  });
+  cache.vehicleMasters = cache.vehicleMasters.map((vehicle) => (
+    vehicle.assignedAssistantId === assistantId ? { ...vehicle, assignedAssistantProfilePictureUrl: "" } : vehicle
+  ));
+}
+
+function setAssistantMasterEditModalAlert(message = "", tone = "danger") {
+  const alert = $("#assistantMasterEditModalAlert");
+  if (!alert) return;
+  alert.className = `alert alert-${tone}${message ? "" : " d-none"}`;
+  alert.textContent = message;
+}
+
+function documentPreviewList(documents = []) {
+  if (!documents.length) return `<span class="text-secondary">No documents</span>`;
+  return `<div class="doc-preview-grid">${documents
+    .map((document) => {
+      const label = document.documentTypeName || document.documentTypeCode || "Document";
+      if (String(document.mimeType || "").startsWith("image/") && document.previewUrl) {
+        return `<button class="doc-thumb image-thumb-button" data-action="view-image" data-url="${escapeHtml(document.previewUrl)}" data-title="${escapeHtml(label)}" type="button"><img src="${escapeHtml(withBasePath(document.previewUrl))}" alt="${escapeHtml(label)}"><span>${escapeHtml(label)}</span></button>`;
+      }
+      return document.previewUrl
+        ? `<a class="doc-thumb doc-file" href="${escapeHtml(document.previewUrl)}" target="_blank" rel="noreferrer"><span>${escapeHtml(label)}</span></a>`
+        : `<span class="doc-thumb doc-file disabled"><span>${escapeHtml(label)}</span></span>`;
+    })
+    .join("")}</div>`;
+}
+
+function assistantLogRows(logs = []) {
+  return logs
+    .map((log) => {
+      const actor = log.actorName || log.actorEmail || log.actorPhone || "-";
+      return `<tr>
+        <td><b>${escapeHtml(String(log.action || "").replace(/_/g, " "))}</b><div class="row-note">${formatDate(log.createdAt)}</div></td>
+        <td>${escapeHtml(log.entityType || "-")}<div class="row-note">${escapeHtml(log.entityId || "")}</div></td>
+        <td>${escapeHtml(actor)}</td>
+        <td>${assistantLogReport(log.details || {})}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function readableLabel(value) {
+  return String(value || "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function readableValue(value) {
+  if (value == null || value === "") return "-";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "-";
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, nestedValue]) => `${readableLabel(key)}: ${readableValue(nestedValue)}`)
+      .join(" | ");
+  }
+  return String(value);
+}
+
+function assistantLogReport(details = {}) {
+  const entries = Object.entries(details || {});
+  if (!entries.length) return `<span class="text-secondary">No extra details</span>`;
+  return `<div class="log-report-details">${entries
+    .map(([key, value]) => `<div class="report-field"><span>${escapeHtml(readableLabel(key))}</span><b>${escapeHtml(readableValue(value))}</b></div>`)
+    .join("")}</div>`;
+}
+
+async function openAssistantLogsModal(assistantId) {
+  const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+  $("#assistantLogsModalTitle").textContent = `${assistant?.displayName || "Assistant"} Logs`;
+  $("#assistantLogsModalBody").innerHTML = `<div class="text-secondary">Loading logs...</div>`;
+  $("#assistantLogsModal").classList.remove("d-none");
+  const payload = await api(`/assistant-master/${assistantId}/logs`);
+  $("#assistantLogsModalBody").innerHTML = table(["Activity", "Record", "Changed By", "Report Details"], assistantLogRows(payload.data || []));
+}
+
+function damageReportRows(reports = []) {
+  return reports
+    .map((report) => {
+      const proofLinks = (report.proofPictureUrls || [])
+        .map((url, index) => `<button class="btn btn-soft btn-xs" data-action="view-image" data-url="${escapeHtml(url)}" data-title="Damage proof ${index + 1}" type="button">Proof ${index + 1}</button>`)
+        .join(" ");
+      const paymentProof = report.paymentProofUrl
+        ? `<button class="btn btn-soft btn-xs" data-action="view-image" data-url="${escapeHtml(report.paymentProofUrl)}" data-title="Payment proof" type="button">Payment Proof</button>`
+        : "-";
+      return `<tr>
+        <td><b>${escapeHtml(report.vehicleName || "-")}</b><div class="row-note">${formatDate(report.createdAt)}</div></td>
+        <td>${escapeHtml(report.reason || "-")}</td>
+        <td>${escapeHtml(report.expense ?? "-")}</td>
+        <td>${escapeHtml(readableLabel(report.paidBy || "-"))}</td>
+        <td>${proofLinks || "-"}</td>
+        <td>${paymentProof}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function assistantMasterRows(items) {
+  return items
+    .map((item) => {
+      const clusterLabel = item.currentClusterName || item.clusters?.[0]?.clusterName || "-";
+      const clusterCell = item.currentClusterName || item.clusters?.[0]?.clusterName
+        ? `<button class="assistant-cell-button text-start" data-action="open-assistant-master-cell" data-field="cluster" data-id="${item.id}" type="button">${escapeHtml(clusterLabel)}</button>`
+        : `<button class="btn btn-primary btn-xs" data-action="open-assistant-master-cell" data-field="cluster" data-id="${item.id}" type="button">Assign Cluster</button>`;
+      const vehicleLabel = item.vehicleName
+        ? `${item.vehicleName}${item.vehicleNumber ? ` (${item.vehicleNumber})` : ""}`
+        : "-";
+      const scheduleSummary = summarizeWeeklySchedule(item.workingSchedule || {});
+      const workLabel = `${String(item.workingType || "full_time").replace("_", " ")}${scheduleSummary ? ` | ${scheduleSummary}` : item.workingTimeSlot ? ` | ${item.workingTimeSlot}` : ""}`;
+      const payLabel = String(item.payType || "per_task").replace("_", " ");
+      const damageCount = (item.damageReports || []).length;
+      return `<tr>
+        <td class="profile-pic-cell"><button class="assistant-profile-button" data-action="open-assistant-master-cell" data-field="basic" data-id="${item.id}" type="button">${profileAvatar(item.profilePictureUrl, item.displayName)}</button></td>
+        <td><button class="assistant-cell-button text-start" data-action="open-assistant-master-cell" data-field="basic" data-id="${item.id}" type="button"><b>${escapeHtml(item.displayName)}</b><div class="row-note">${escapeHtml(item.assistantCode || item.id)}</div></button></td>
+        <td><button class="assistant-cell-button text-start" data-action="open-assistant-master-cell" data-field="basic" data-id="${item.id}" type="button">${escapeHtml(item.phone || item.email || "-")}</button></td>
+        <td>${clusterCell}</td>
+        <td><button class="assistant-cell-button text-start" data-action="open-assistant-master-cell" data-field="vehicle" data-id="${item.id}" type="button">${escapeHtml(vehicleLabel)}</button></td>
+        <td><button class="assistant-cell-button text-start" data-action="open-assistant-master-cell" data-field="work" data-id="${item.id}" type="button">${escapeHtml(workLabel)}</button></td>
+        <td><button class="assistant-cell-button text-start" data-action="open-assistant-master-cell" data-field="work" data-id="${item.id}" type="button">${escapeHtml(payLabel)}</button></td>
+        <td><button class="assistant-cell-button text-start" data-action="open-assistant-master-cell" data-field="documents" data-id="${item.id}" type="button">${escapeHtml((item.documents || []).length)} document${(item.documents || []).length === 1 ? "" : "s"}</button></td>
+        <td><button class="assistant-cell-button" data-action="open-assistant-master-cell" data-field="status" data-id="${item.id}" type="button">${status(item.status || "verifying")}</button></td>
+        <td><button class="assistant-cell-button text-start" data-action="open-assistant-master-cell" data-field="damage" data-id="${item.id}" type="button">${escapeHtml(damageCount)} damage${damageCount === 1 ? "" : "s"}</button></td>
+        <td><button class="btn btn-soft btn-xs" data-action="open-assistant-logs" data-id="${item.id}" type="button">Logs</button></td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function filteredAssistantMasters() {
+  const query = ($("#assistantMasterSearchInput")?.value || "").trim().toLowerCase();
+  const cityId = $("#assistantMasterCityFilter")?.value || "";
+  const zoneId = $("#assistantMasterZoneFilter")?.value || "";
+  const clusterId = $("#assistantMasterClusterFilter")?.value || "";
+  const statusValue = $("#assistantMasterStatusFilter")?.value || "";
+  return cache.assistantMasters.filter((assistant) => {
+    const text = [
+      assistant.displayName,
+      assistant.phone,
+      assistant.email,
+      assistant.assistantCode,
+      assistant.cityName,
+      assistant.zoneName,
+      assistant.currentClusterName,
+      assistant.vehicleName,
+      assistant.vehicleNumber
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return (
+      (!query || text.includes(query)) &&
+      (!cityId || assistant.cityId === cityId) &&
+      (!zoneId || assistant.zoneId === zoneId) &&
+      (!clusterId || assistant.currentClusterId === clusterId) &&
+      (!statusValue || assistant.status === statusValue)
+    );
+  });
+}
+
+function renderAssistantMasterRecords() {
+  const target = $("#assistantMasterRecords");
+  if (!target) return;
+  target.innerHTML = table(
+    ["Profile Pic", "Name / ID", "Mobile / Email", "Cluster", "Vehicle", "Working Time", "Salary / Pay", "Documents", "Status", "Damage", "Logs"],
+    assistantMasterRows(filteredAssistantMasters())
+  );
+}
+
+function assistantLocationText(assistant) {
+  return [assistant.cityName, assistant.zoneName, assistant.currentClusterName || assistant.clusters?.[0]?.clusterName].filter(Boolean).join(" / ") || "-";
+}
+
+function assistantClusterPreview(assistant) {
+  const clusterName = assistant.currentClusterName || assistant.clusters?.[0]?.clusterName || "";
+  if (!clusterName) {
+    return `<button class="btn btn-primary btn-xs" data-action="open-assistant-master-cell" data-field="cluster" data-id="${escapeHtml(assistant.id)}" type="button">Assign Cluster</button>`;
+  }
+  return `<button class="assistant-cluster-lines assistant-cluster-button" data-action="open-assistant-master-cell" data-field="cluster" data-id="${escapeHtml(assistant.id)}" type="button" title="Change or remove cluster">
+    <b>${escapeHtml(clusterName)}</b>
+    <span>${escapeHtml(assistant.zoneName || "-")}</span>
+    <small>${escapeHtml(assistant.cityName || "-")}</small>
+  </button>`;
+}
+
+function assistantStatusMatchesTab(assistant, tab = assistantStatusTab) {
+  const lifecycle = assistantProfileLifecycle(assistant);
+  const statusValue = lifecycle.verificationStatus;
+  if (tab === "all") return true;
+  if (tab === "deactive") return !lifecycle.isActive;
+  if (tab === "active") return lifecycle.isActive;
+  return statusValue === tab;
+}
+
+function assistantIsWorking(assistant = {}) {
+  return ["working", "busy", "in_progress", "approval_pending", "in_task", "on_task"].includes(String(assistant.availabilityStatus || "").toLowerCase());
+}
+
+function assistantAvailabilityMatchesTab(assistant, tab = assistantAvailabilityTab) {
+  if (tab === "all") return true;
+  if (tab === "logged-out") return !assistantIsLoggedIn(assistant);
+  if (tab === "working") return assistantIsWorking(assistant);
+  if (tab === "online") return assistantIsLoggedIn(assistant) && assistantIsOnline(assistant) && !assistantIsWorking(assistant);
+  if (tab === "offline") return assistantIsLoggedIn(assistant) && !assistantIsOnline(assistant) && !assistantIsWorking(assistant);
+  return true;
+}
+
+function assistantBaseMatchesFilters(assistant = {}) {
+  const query = ($("#assistantSearchInput")?.value || "").trim().toLowerCase();
+  const cityId = $("#assistantCityFilter")?.value || "";
+  const zoneId = $("#assistantZoneFilter")?.value || "";
+  const clusterId = $("#assistantClusterFilter")?.value || "";
+  const text = [
+    assistant.displayName,
+    assistant.phone,
+    assistant.email,
+    assistant.assistantCode,
+    assistant.id,
+    assistant.cityName,
+    assistant.zoneName,
+    assistant.currentClusterName
+  ].filter(Boolean).join(" ").toLowerCase();
+  return (
+    (!query || text.includes(query)) &&
+    (!cityId || assistant.cityId === cityId) &&
+    (!zoneId || assistant.zoneId === zoneId) &&
+    (!clusterId || assistant.currentClusterId === clusterId || assistant.clusters?.some((cluster) => cluster.clusterId === clusterId))
+  );
+}
+
+function assistantTabCountBadge(count) {
+  return `<span class="assistant-tab-count">${escapeHtml(count)}</span>`;
+}
+
+function assistantLifecycleTabButtons() {
+  const tabs = [["all", "All"], ["active", "Active"], ["verifying", "Verifying"], ["rejected", "Rejected"], ["deactive", "Deactive"]];
+  const baseItems = (cache.assistantMasters || []).filter((assistant) => assistantBaseMatchesFilters(assistant));
+  return tabs.map(([value, label]) => {
+    const count = baseItems.filter((assistant) => assistantStatusMatchesTab(assistant, value)).length;
+    return `<button class="assistant-tab ${assistantActiveTabGroup === "lifecycle" && assistantStatusTab === value ? "active" : ""}" data-action="assistant-tab" data-assistant-tab="${value}" type="button"><span>${label}</span>${assistantTabCountBadge(count)}</button>`;
+  }).join("");
+}
+
+function assistantAvailabilityTabButtons() {
+  const tabs = [["all", "All"], ["online", "Online"], ["working", "Working"], ["offline", "Offline"], ["logged-out", "Logged-Out"]];
+  const baseItems = (cache.assistantMasters || []).filter((assistant) => assistantBaseMatchesFilters(assistant));
+  return tabs.map(([value, label]) => {
+    const count = baseItems.filter((assistant) => assistantAvailabilityMatchesTab(assistant, value)).length;
+    return `<button class="assistant-status-tab ${assistantActiveTabGroup === "availability" && assistantAvailabilityTab === value ? "active" : ""}" data-action="assistant-availability-tab" data-assistant-availability-tab="${value}" type="button"><span>${label}</span>${assistantTabCountBadge(count)}</button>`;
+  }).join("");
+}
+
+function assistantProfileLifecycle(assistant) {
+  const docs = (assistant.documents || []).filter((document) => !["profile_picture", "profile_photo"].includes(String(document.documentTypeCode || "")));
+  if (docs.length && docs.every((document) => document.verificationStatus === "verified")) return { verificationStatus: "verified", isActive: true };
+  if (docs.length && docs.every((document) => ["rejected", "invalid_document"].includes(document.verificationStatus))) return { verificationStatus: "rejected", isActive: false };
+  if (docs.some((document) => !["verified", "rejected", "invalid_document"].includes(document.verificationStatus))) return { verificationStatus: "verifying", isActive: true };
+  if (docs.some((document) => ["rejected", "invalid_document"].includes(document.verificationStatus))) return { verificationStatus: "rejected", isActive: false };
+  return { verificationStatus: assistant.status || "verifying", isActive: assistant.isActive !== false };
+}
+
+function assistantRequiredDocumentsVerified(assistant = {}) {
+  const documents = assistant.documents || [];
+  return assistantMasterDocumentFields.every((field) =>
+    documents.some((document) =>
+      field.codes.some((code) => String(document.documentTypeCode || "").toLowerCase() === String(code).toLowerCase()) &&
+      String(document.verificationStatus || "").toLowerCase() === "verified"
+    )
+  );
+}
+
+function assistantOnlineBlockers(assistant = {}) {
+  const blockers = [];
+  if (assistant.isActive === false) blockers.push("assistant is deactive");
+  if (!assistant.currentClusterId && !assistant.clusters?.some((cluster) => cluster.isActive !== false)) blockers.push("assign cluster");
+  if (!assistant.vehicleAssignmentId && !assistant.vehicleMasterId) blockers.push("allot vehicle");
+  if (!assistantRequiredDocumentsVerified(assistant)) blockers.push("verify all documents");
+  return blockers;
+}
+
+function filteredAssistants() {
+  return (cache.assistantMasters || []).filter((assistant) => {
+    const tabMatches = assistantActiveTabGroup === "availability"
+      ? assistantAvailabilityMatchesTab(assistant)
+      : assistantStatusMatchesTab(assistant);
+    return (
+      assistantBaseMatchesFilters(assistant) &&
+      tabMatches
+    );
+  });
+}
+
+function assistantDocumentPreview(documents = [], assistantId = "") {
+  const previewDocuments = documents.filter((document) => !["profile_picture", "profile_photo"].includes(String(document.documentTypeCode || "")));
+  const missingCount = assistantMissingDocumentFields(documents).length;
+  const uploadButton = missingCount
+    ? `<button class="btn btn-primary btn-xs assistant-doc-upload-action" data-action="open-assistant-master-cell" data-field="documents" data-id="${escapeHtml(assistantId)}" type="button">${escapeHtml(missingCount)} Upload</button>`
+    : "";
+  if (!previewDocuments.length) {
+    return uploadButton;
+  }
+  return `<div class="assistant-doc-column"><div class="assistant-doc-row">${previewDocuments.map((document, index) => {
+    const label = document.documentTypeName || document.documentTypeCode || document.originalName || "Document";
+    const dot = `<span class="assistant-doc-status-dot ${assistantStatusDotClass(document.verificationStatus || "verifying")}"></span>`;
+    if (document.previewUrl) {
+      const previewAttrs = `data-action="preview-assistant-doc" data-doc-id="${escapeHtml(document.id || "")}" data-doc-index="${index}" title="${escapeHtml(label)}"`;
+      if (String(document.mimeType || "").startsWith("image/")) {
+        return `<button class="assistant-doc-preview image-thumb-button" ${previewAttrs} type="button"><img src="${escapeHtml(withBasePath(document.previewUrl))}" alt="${escapeHtml(label)}">${dot}</button>`;
+      }
+      return `<button class="assistant-doc-preview assistant-doc-file" ${previewAttrs} type="button">DOC${dot}</button>`;
+    }
+    return `<span class="assistant-doc-preview assistant-doc-file disabled" title="${escapeHtml(label)}">DOC${dot}</span>`;
+  }).join("")}</div>${uploadButton}</div>`;
+}
+
+function assistantPreviewDocs(assistantId) {
+  const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+  return (assistant?.documents || []).filter((document) => document.previewUrl && !["profile_picture", "profile_photo"].includes(String(document.documentTypeCode || "")));
+}
+
+function openAssistantDocPreview(assistantId, documentIdOrIndex = 0) {
+  const docs = assistantPreviewDocs(assistantId);
+  if (!docs.length) return;
+  clearImagePreviewAlert();
+  const requestedIndex = typeof documentIdOrIndex === "string"
+    ? docs.findIndex((document) => document.id === documentIdOrIndex)
+    : Number(documentIdOrIndex);
+  const boundedIndex = Math.max(0, Math.min(requestedIndex >= 0 ? requestedIndex : 0, docs.length - 1));
+  const document = docs[boundedIndex];
+  const title = document.documentTypeName || document.documentTypeCode || document.originalName || `Document ${boundedIndex + 1}`;
+  const statusValue = ["verified", "verifying", "rejected"].includes(document.verificationStatus) ? document.verificationStatus : "verifying";
+  assistantDocPreviewState = { assistantId, documentId: document.id || "", replacementFile: null };
+  $("#imagePreviewKind").textContent = "Document Preview";
+  $("#imagePreviewModalTitle").textContent = title;
+  const isImage = String(document.mimeType || "").startsWith("image/");
+  const video = $("#documentPreviewVideo");
+  if (video) {
+    video.pause?.();
+    video.src = "";
+    video.classList.add("d-none");
+  }
+  $("#imagePreviewLarge").classList.toggle("d-none", !isImage);
+  $("#documentPreviewFrame").classList.toggle("d-none", isImage);
+  $("#documentPreviewLink").classList.toggle("d-none", false);
+  $("#documentPreviewLink").href = withBasePath(document.previewUrl);
+  if (isImage) {
+    $("#imagePreviewLarge").src = withBasePath(document.previewUrl);
+    $("#documentPreviewFrame").src = "";
+  } else {
+    $("#imagePreviewLarge").src = "";
+    $("#documentPreviewFrame").src = withBasePath(document.previewUrl);
+  }
+  $("#previewPrevButton").classList.toggle("d-none", docs.length <= 1);
+  $("#previewNextButton").classList.toggle("d-none", docs.length <= 1);
+  $("#previewPrevButton").disabled = boundedIndex <= 0;
+  $("#previewNextButton").disabled = boundedIndex >= docs.length - 1;
+  $("#documentPreviewStatusSelect").classList.remove("d-none");
+  $("#documentPreviewStatusSelect").value = statusValue;
+  $("#documentPreviewStatusSelect").dataset.status = statusValue;
+  $("#documentPreviewStatusSaveButton").classList.remove("d-none");
+  $("#documentPreviewStatusSaveButton").textContent = "Update";
+  $("#documentPreviewReuploadButton").classList.remove("d-none");
+  $("#documentPreviewDeleteButton").classList.remove("d-none");
+  $("#documentPreviewReuploadInput").value = "";
+  $("#imagePreviewModal").classList.remove("d-none");
+}
+
+function stepAssistantDocPreview(direction) {
+  const docs = assistantPreviewDocs(assistantDocPreviewState.assistantId);
+  if (!docs.length) return;
+  const currentIndex = docs.findIndex((document) => document.id === assistantDocPreviewState.documentId);
+  openAssistantDocPreview(assistantDocPreviewState.assistantId, currentIndex + direction);
+}
+
+async function saveAssistantDocPreviewStatus() {
+  const docs = assistantPreviewDocs(assistantDocPreviewState.assistantId);
+  const document = docs.find((item) => item.id === assistantDocPreviewState.documentId);
+  if (!assistantDocPreviewState.assistantId || !document?.id) return;
+  clearImagePreviewAlert();
+  const statusValue = $("#documentPreviewStatusSelect")?.value || "verifying";
+  const button = $("#documentPreviewStatusSaveButton");
+  const originalText = button?.textContent || "Update";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Updating...";
+  }
+  try {
+    const hadReplacement = Boolean(assistantDocPreviewState.replacementFile);
+    if (assistantDocPreviewState.replacementFile) {
+      if (!document.documentTypeId) throw new Error("Document type is missing. Refresh Assistant data and try again.");
+      await api(`/verification/assistants/${assistantDocPreviewState.assistantId}/documents`, {
+        method: "POST",
+        body: JSON.stringify({
+          documentTypeId: document.documentTypeId,
+          originalName: assistantDocPreviewState.replacementFile.originalName,
+          mimeType: assistantDocPreviewState.replacementFile.mimeType || null,
+          previewUrl: assistantDocPreviewState.replacementFile.previewUrl
+        })
+      });
+      document.originalName = assistantDocPreviewState.replacementFile.originalName;
+      document.mimeType = assistantDocPreviewState.replacementFile.mimeType || null;
+      document.previewUrl = assistantDocPreviewState.replacementFile.previewUrl;
+      assistantDocPreviewState.replacementFile = null;
+    }
+    await api(`/verification/assistants/${assistantDocPreviewState.assistantId}/documents/${document.id}/verify`, {
+      method: "POST",
+      body: JSON.stringify({ status: statusValue })
+    });
+    document.verificationStatus = statusValue;
+    const assistant = cache.assistantMasters.find((item) => item.id === assistantDocPreviewState.assistantId);
+    if (assistant) {
+      const lifecycle = assistantProfileLifecycle(assistant);
+      assistant.status = lifecycle.verificationStatus;
+      assistant.isActive = lifecycle.isActive;
+    }
+    renderAssistantRecords();
+    openAssistantDocPreview(assistantDocPreviewState.assistantId, document.id);
+    showImagePreviewAlert(hadReplacement ? "Document re-uploaded and status updated." : "Document status updated.", "success");
+  } catch (error) {
+    showImagePreviewAlert(error.message, "danger");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function deleteAssistantDocPreview() {
+  const docs = assistantPreviewDocs(assistantDocPreviewState.assistantId);
+  const document = docs.find((item) => item.id === assistantDocPreviewState.documentId);
+  if (!assistantDocPreviewState.assistantId || !document?.id) return;
+  if (!confirm("Delete this assistant document?")) return;
+  clearImagePreviewAlert();
+  try {
+    await api(`/verification/assistants/${assistantDocPreviewState.assistantId}/documents/${document.id}`, { method: "DELETE" });
+    const assistant = cache.assistantMasters.find((item) => item.id === assistantDocPreviewState.assistantId);
+    if (assistant) {
+      assistant.documents = (assistant.documents || []).filter((item) => item.id !== document.id);
+      const lifecycle = assistantProfileLifecycle(assistant);
+      assistant.status = lifecycle.verificationStatus;
+      assistant.isActive = lifecycle.isActive;
+    }
+    const nextDocs = assistantPreviewDocs(assistantDocPreviewState.assistantId);
+    renderAssistantRecords();
+    if (nextDocs.length) {
+      openAssistantDocPreview(assistantDocPreviewState.assistantId, Math.max(0, docs.findIndex((item) => item.id === document.id) - 1));
+      showImagePreviewAlert("Document deleted.", "success");
+    } else {
+      $("#imagePreviewModal").classList.add("d-none");
+      showAlert("Document deleted.", "success");
+    }
+  } catch (error) {
+    showImagePreviewAlert(error.message, "danger");
+  }
+}
+
+function assistantVehiclePreview(assistant) {
+  const vehicleImage = Array.isArray(assistant.vehiclePictureUrls) ? assistant.vehiclePictureUrls.find(Boolean) : "";
+  if (!assistant.vehicleName && !assistant.vehicleNumber && !assistant.vehicleModel && !assistant.vehicleCompany && !vehicleImage) {
+    return `<button class="btn btn-primary btn-xs" data-action="open-assistant-master-cell" data-field="vehicle" data-id="${escapeHtml(assistant.id)}" type="button">Allot</button>`;
+  }
+  const imageHtml = vehicleImage
+    ? `<span class="assistant-vehicle-image"><img src="${escapeHtml(withBasePath(vehicleImage))}" alt="${escapeHtml(assistant.vehicleName || "Vehicle")}"></span>`
+    : `<span class="assistant-vehicle-image placeholder">VH</span>`;
+  const ownerType = normalizedVehicleOwnerType(assistant.vehicleOwnerType || assistant.ownerType || "");
+  return `<button class="assistant-vehicle-preview assistant-vehicle-button" data-action="open-assistant-master-cell" data-field="vehicle" data-id="${escapeHtml(assistant.id)}" type="button" title="Change or unallot vehicle">
+    <span class="assistant-vehicle-image-wrap">
+      ${imageHtml}
+      <span class="assistant-vehicle-edit-icon">${iconSvg("edit")}</span>
+    </span>
+    <div class="assistant-vehicle-lines">
+      <b>${escapeHtml(assistant.vehicleName || "-")}</b>
+      <span>${escapeHtml([assistant.vehicleCompany, assistant.vehicleModel].filter(Boolean).join(" / ") || "-")}</span>
+      <small>${escapeHtml(assistant.vehicleNumber || "-")}</small>
+      ${ownerType ? `<small>${escapeHtml(ownerType)}</small>` : ""}
+    </div>
+  </button>`;
+}
+
+function assistantStatusDotClass(statusValue = "") {
+  const normalized = String(statusValue || "").toLowerCase();
+  if (["active", "verified", "completed", "document_verified"].includes(normalized)) return "verified";
+  if (["rejected", "invalid_document"].includes(normalized)) return "rejected";
+  if (["inactive", "deactive"].includes(normalized)) return "inactive";
+  return "verifying";
+}
+
+function assistantProfilePictureButton(assistant, name) {
+  return `<button class="assistant-profile-edit-button" data-action="open-assistant-profile-picture" data-id="${escapeHtml(assistant.id)}" type="button" title="Upload or change profile picture">
+    ${profileAvatar(assistant.profilePictureUrl, name)}
+    <span class="assistant-profile-edit-icon">${iconSvg("edit")}</span>
+  </button>`;
+}
+
+function assistantIsOnline(assistant = {}) {
+  return ["available", "online", "active", "working"].includes(String(assistant.availabilityStatus || "").toLowerCase());
+}
+
+function assistantIsLoggedIn(assistant = {}) {
+  if (assistant.isLoggedIn === false) return false;
+  return Boolean(assistant.isLoggedIn || assistant.lastLoginAt || assistant.loggedInAt);
+}
+
+function assistantAvailabilityToggle(assistant = {}) {
+  const isOnline = assistantIsOnline(assistant);
+  const blockers = isOnline ? [] : assistantOnlineBlockers(assistant);
+  const isBlocked = Boolean(blockers.length);
+  const title = isOnline ? "Set Offline" : isBlocked ? `Cannot go Online: ${blockers.join(", ")}` : "Set Online";
+  return `<button class="assistant-online-toggle ${isOnline ? "online" : "offline"}" data-action="toggle-assistant-availability" data-id="${escapeHtml(assistant.id || "")}" data-online="${isOnline ? "false" : "true"}" type="button" aria-pressed="${isOnline ? "true" : "false"}" title="${escapeHtml(title)}" ${isBlocked ? "disabled" : ""}>
+    <span class="assistant-online-toggle-dot"></span>
+    <span>${isOnline ? "Online" : "Offline"}</span>
+  </button>`;
+}
+
+function assistantTodayOnlineLabel(assistant = {}) {
+  const seconds = assistantTodayOnlineSeconds(assistant);
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `Today Online ${seconds > 0 ? Math.max(1, minutes) : 0} mins`;
+  const hours = minutes / 60;
+  return `Today Online ${Number.isInteger(hours) ? hours : hours.toFixed(1)} Hrs`;
+}
+
+function assistantTodayOnlineSeconds(assistant = {}) {
+  let seconds = Math.max(0, Number(assistant.todayOnlineSeconds || 0));
+  if (assistantIsOnline(assistant)) {
+    const syncedAt = new Date(assistant.todayOnlineSyncedAt || "").getTime();
+    if (!Number.isNaN(syncedAt)) seconds += Math.max(0, Math.floor((Date.now() - syncedAt) / 1000));
+  }
+  return seconds;
+}
+
+function refreshAssistantOnlineTimers() {
+  document.querySelectorAll("[data-assistant-online-timer]").forEach((element) => {
+    const assistant = cache.assistantMasters.find((item) => item.id === element.dataset.assistantId);
+    if (assistant) element.textContent = assistantTodayOnlineLabel(assistant);
+  });
+}
+
+function assistantLoginCapsule(assistant = {}) {
+  const isLoggedIn = assistantIsLoggedIn(assistant);
+  const lifecycle = assistantProfileLifecycle(assistant);
+  const loginBlocked = !isLoggedIn && !lifecycle.isActive;
+  const title = isLoggedIn ? "Mark Logged-Out" : loginBlocked ? "Deactive assistant cannot be marked Logged-In" : "Mark Logged-In";
+  return `<button class="assistant-login-capsule ${isLoggedIn ? "logged-in" : "logged-out"}" data-action="toggle-assistant-login" data-id="${escapeHtml(assistant.id || "")}" data-logged-in="${isLoggedIn ? "false" : "true"}" type="button" title="${escapeHtml(title)}" ${loginBlocked ? "disabled" : ""}>${isLoggedIn ? "Logged-In" : "Logged-Out"}</button>`;
+}
+
+function assistantTaskStats(assistant = {}) {
+  const stats = assistant.taskStats || {};
+  return {
+    totalTask: Number(stats.totalTask || 0),
+    success: Number(stats.success || 0),
+    working: Number(stats.working || 0),
+    rejected: Number(stats.rejected || 0),
+    cancelled: Number(stats.cancelled || 0),
+    totalValuePaise: Number(stats.totalValuePaise || 0),
+    successValuePaise: Number(stats.successValuePaise || 0),
+    workingValuePaise: Number(stats.workingValuePaise || 0),
+    rejectedValuePaise: Number(stats.rejectedValuePaise || 0),
+    cancelledValuePaise: Number(stats.cancelledValuePaise || 0)
+  };
+}
+
+function assistantTodayTaskStats(assistant = {}) {
+  const stats = assistant.todayTaskStats || {};
+  return {
+    assigned: Number(stats.assigned || 0),
+    pending: Number(stats.pending || 0),
+    completed: Number(stats.completed || stats.success || 0),
+    cancelled: Number(stats.cancelled || 0)
+  };
+}
+
+function assistantStatusLabel(assistant = {}) {
+  if (assistantIsWorking(assistant)) return `<span class="assistant-status-dot-label working"><span></span>Working</span>`;
+  if (assistantIsOnline(assistant)) return `<span class="assistant-status-dot-label online"><span></span>Online</span>`;
+  return `<span class="assistant-status-dot-label offline"><span></span>Offline</span>`;
+}
+
+function assistantTaskPill(label, value, tone = "") {
+  return `<span class="assistant-task-pill ${tone}"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></span>`;
+}
+
+function assistantStatusCards(items) {
+  if (!items.length) return `<div class="empty-state">No assistant status data found.</div>`;
+  const rows = items.map((assistant) => {
+    const name = assistant.displayName || "Assistant";
+    const stats = assistantTaskStats(assistant);
+    return `<article class="assistant-status-row">
+      <div class="assistant-record-person">
+        <div class="assistant-record-photo-wrap">
+          <div class="assistant-record-photo">${assistantProfilePictureButton(assistant, name)}</div>
+          <span class="assistant-status-capsule ${assistantStatusDotClass(assistantProfileLifecycle(assistant).verificationStatus)}">${escapeHtml(String(assistantProfileLifecycle(assistant).verificationStatus).replace(/_/g, " "))}</span>
+        </div>
+        <div class="assistant-record-lines">
+          <b>${escapeHtml(name)}</b>
+          <span>${escapeHtml(assistant.phone || "-")}</span>
+          <small>${escapeHtml(assistant.assistantCode || "-")}</small>
+          ${assistantLoginCapsule(assistant)}
+        </div>
+      </div>
+      <div class="assistant-status-summary">
+        ${assistantStatusLabel(assistant)}
+        <small data-assistant-online-timer data-assistant-id="${escapeHtml(assistant.id)}">${escapeHtml(assistantTodayOnlineLabel(assistant))}</small>
+        <small>Working ${escapeHtml(stats.working)} task${stats.working === 1 ? "" : "s"}</small>
+      </div>
+      <div class="assistant-task-list">
+        ${assistantTaskPill("Total Task", stats.totalTask, "total")}
+        ${assistantTaskPill("Success", stats.success, "success")}
+        ${assistantTaskPill("Working", stats.working, "working")}
+        ${assistantTaskPill("Rejected", stats.rejected, "danger")}
+        ${assistantTaskPill("Cancelled", stats.cancelled, "cancelled")}
+      </div>
+      <div class="assistant-task-list">
+        ${assistantTaskPill("Total Value", money(stats.totalValuePaise), "total")}
+        ${assistantTaskPill("Success", money(stats.successValuePaise), "success")}
+        ${assistantTaskPill("Working", money(stats.workingValuePaise), "working")}
+        ${assistantTaskPill("Rejected", money(stats.rejectedValuePaise), "danger")}
+        ${assistantTaskPill("Cancelled", money(stats.cancelledValuePaise), "cancelled")}
+      </div>
+    </article>`;
+  }).join("");
+  return `<div class="assistant-status-report">
+    <div class="assistant-status-head"><span>Assistant</span><span>Status</span><span>Tasks</span><span>Task Values</span></div>
+    ${rows}
+  </div>`;
+}
+
+function assistantCards(items) {
+  if (!items.length) return `<div class="empty-state">No assistants found.</div>`;
+  const rows = items.map((assistant) => {
+    const name = assistant.displayName || "Assistant";
+    const lifecycle = assistantProfileLifecycle(assistant);
+    const statusValue = lifecycle.verificationStatus;
+    const createdOn = assistant.createdAt ? formatDate(assistant.createdAt) : "-";
+    const deleteButton = isSuperAdminUser()
+      ? `<button class="btn btn-outline-danger btn-xs" data-action="delete-assistant" data-id="${escapeHtml(assistant.id)}" type="button">Delete</button>`
+      : "";
+    return `<article class="assistant-record-row">
+      <div class="assistant-record-person">
+        <div class="assistant-record-photo-wrap">
+          <div class="assistant-record-photo">${assistantProfilePictureButton(assistant, name)}</div>
+          <span class="assistant-status-capsule ${assistantStatusDotClass(statusValue)}">${escapeHtml(String(statusValue).replace(/_/g, " "))}</span>
+        </div>
+        <div class="assistant-record-lines">
+          <div class="assistant-name-status-row"><b>${escapeHtml(name)}</b><span class="assistant-availability-stack">${assistantAvailabilityToggle(assistant)}<small data-assistant-online-timer data-assistant-id="${escapeHtml(assistant.id)}">${escapeHtml(assistantTodayOnlineLabel(assistant))}</small></span></div>
+          <span>${escapeHtml(assistant.phone || assistant.email || "-")}</span>
+          <small>${escapeHtml(assistant.assistantCode || "-")}</small>
+          ${assistantLoginCapsule(assistant)}
+        </div>
+      </div>
+      <div class="assistant-record-location">${assistantClusterPreview(assistant)}</div>
+      <div class="assistant-record-docs" data-assistant-docs="${escapeHtml(assistant.id)}">${assistantDocumentPreview(assistant.documents || [], assistant.id)}</div>
+      <div class="assistant-record-vehicle">${assistantVehiclePreview(assistant)}</div>
+      <div class="assistant-record-status">${status(lifecycle.isActive ? "active" : "deactive")}<small>${escapeHtml(createdOn)}</small></div>
+      <div class="assistant-record-actions">
+        <button class="btn btn-soft btn-xs" data-action="open-assistant-master-cell" data-field="basic" data-id="${escapeHtml(assistant.id)}" type="button">Edit</button>
+        ${deleteButton}
+      </div>
+    </article>`;
+  }).join("");
+  return `<div class="assistant-report">
+    <div class="assistant-report-head"><span>Assistant</span><span>Cluster</span><span>Documents</span><span>Vehicle</span><span>Status</span><span>Action</span></div>
+    ${rows}
+  </div>`;
+}
+
+function assistantPaginationControls(totalRecords, totalPages) {
+  if (!totalRecords) return "";
+  const start = (assistantPage - 1) * assistantPageSize + 1;
+  const end = Math.min(totalRecords, assistantPage * assistantPageSize);
+  return `<div class="assistant-pagination">
+    <div class="assistant-pagination-summary">Showing ${escapeHtml(start)}-${escapeHtml(end)} of ${escapeHtml(totalRecords)} assistants</div>
+    <div class="assistant-pagination-controls">
+      <select id="assistantPageSizeSelect" class="form-select form-select-sm" aria-label="Assistant page size">
+        ${[5, 10, 20, 50].map((size) => `<option value="${size}" ${assistantPageSize === size ? "selected" : ""}>${size} / page</option>`).join("")}
+      </select>
+      <button class="btn btn-soft btn-sm" data-action="assistant-page" data-page="${Math.max(1, assistantPage - 1)}" type="button" ${assistantPage <= 1 ? "disabled" : ""}>Previous</button>
+      <span class="helper-text">Page ${escapeHtml(assistantPage)} of ${escapeHtml(totalPages)}</span>
+      <button class="btn btn-soft btn-sm" data-action="assistant-page" data-page="${Math.min(totalPages, assistantPage + 1)}" type="button" ${assistantPage >= totalPages ? "disabled" : ""}>Next</button>
+    </div>
+  </div>`;
+}
+
+function renderAssistantRecords() {
+  const target = $("#assistantRecords");
+  if (!target) return;
+  const assistants = filteredAssistants();
+  const totalPages = Math.max(1, Math.ceil(assistants.length / assistantPageSize));
+  assistantPage = Math.min(Math.max(1, assistantPage), totalPages);
+  const start = (assistantPage - 1) * assistantPageSize;
+  const pageItems = assistants.slice(start, start + assistantPageSize);
+  target.innerHTML = `${assistantActiveTabGroup === "availability" ? assistantStatusCards(pageItems) : assistantCards(pageItems)}${assistantPaginationControls(assistants.length, totalPages)}`;
+  const lifecycleTabs = $("#assistantLifecycleTabs");
+  if (lifecycleTabs) lifecycleTabs.innerHTML = assistantLifecycleTabButtons();
+  const availabilityTabs = $("#assistantAvailabilityTabs");
+  if (availabilityTabs) availabilityTabs.innerHTML = assistantAvailabilityTabButtons();
+}
+
+async function loadAssistant() {
+  const [assistants, cities, zones, clusters, states, documentTypes, vehicles] = await Promise.all([
+    api(BASE_PATH+"/assistant-master"),
+    safeApi(BASE_PATH+"/masters/cities"),
+    safeApi(BASE_PATH+"/masters/zones"),
+    safeApi(BASE_PATH+"/masters/clusters"),
+    safeApi(BASE_PATH+"/masters/states"),
+    safeApi(BASE_PATH+"/verification/document-types"),
+    safeApi(BASE_PATH+"/vehicle-master")
+  ]);
+  cache.assistantMasters = (assistants.data || []).map((assistant) => ({
+    ...assistant,
+    onlineStartedAt: assistant.onlineStartedAt || (assistantIsOnline(assistant) ? assistant.availabilityUpdatedAt || new Date().toISOString() : null),
+    todayOnlineSyncedAt: new Date().toISOString()
+  }));
+  cache.cities = cities.data || [];
+  cache.zones = zones.data || [];
+  cache.clusters = clusters.data || [];
+  cache.states = states.data || [];
+  cache.documentTypes = documentTypes.data || [];
+  cache.vehicleMasters = vehicles.data || [];
+  $("#assistantSection").innerHTML =
+    pageTitleBlock("Assistant", "Search, verify, edit, and manage assistant records") +
+    `<div class="assistant-page">
+      <div class="assistant-sticky-controls">
+        <div class="assistant-filter-row">
+          <input id="assistantSearchInput" class="form-control" placeholder="Search name, number, ID, code, city, zone, cluster">
+          <select id="assistantCityFilter" class="form-select"><option value="">All Cities</option>${optionRows(activeItems(cache.cities))}</select>
+          <select id="assistantZoneFilter" class="form-select"><option value="">All Zones</option>${optionRows(activeItems(cache.zones))}</select>
+          <select id="assistantClusterFilter" class="form-select"><option value="">All Clusters</option>${optionRows(activeItems(cache.clusters))}</select>
+          <button class="btn btn-primary" data-action="assistant-search" type="button">Search</button>
+        </div>
+        <div class="assistant-tabs-row">
+          <div id="assistantLifecycleTabs" class="assistant-tabs">
+            ${assistantLifecycleTabButtons()}
+          </div>
+          <div class="assistant-status-control" aria-label="Assistant Status">
+            <span>Assistant Status</span>
+            <div id="assistantAvailabilityTabs" class="assistant-status-tabs">
+              ${assistantAvailabilityTabButtons()}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="assistantRecords" class="assistant-record-list"></div>
+    </div>`;
+  if (assistantOnlineTimer) clearInterval(assistantOnlineTimer);
+  assistantOnlineTimer = setInterval(() => {
+    if (state.section === "assistant" && cache.assistantMasters.some(assistantIsOnline)) refreshAssistantOnlineTimers();
+  }, 60000);
+  renderAssistantRecords();
+}
+
+function assistantOptionRows(items) {
+  return items
+    .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.displayName || item.assistantCode || item.id)}${item.phone ? ` - ${escapeHtml(item.phone)}` : ""}</option>`)
+    .join("");
+}
+
+function setSelectOptions(select, placeholder, items, selectedValue = "") {
+  if (!select) return;
+  select.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>${optionRows(activeItems(items || []))}`;
+  select.value = selectedValue || "";
+}
+
+function cityStateId(cityId) {
+  return cache.cities.find((city) => city.id === cityId)?.stateId || "";
+}
+
+function clusterStateId(cluster) {
+  return cluster?.stateId || cityStateId(cluster?.cityId || "");
+}
+
+function filterCitiesByState(stateId) {
+  return activeItems(cache.cities || []).filter((city) => !stateId || city.stateId === stateId);
+}
+
+function filterZonesByCity(cityId) {
+  return activeItems(cache.zones || []).filter((zone) => !cityId || zone.cityId === cityId);
+}
+
+function filterClustersByLocation({ stateId = "", cityId = "", zoneId = "" } = {}) {
+  return activeClusters(cache.clusters || []).filter((cluster) => {
+    const clusterCityId = cluster.cityId || "";
+    const clusterZoneId = cluster.zoneId || "";
+    return (!stateId || clusterStateId(cluster) === stateId) &&
+      (!cityId || clusterCityId === cityId) &&
+      (!zoneId || clusterZoneId === zoneId);
+  });
+}
+
+function filterCategoriesByService(serviceId) {
+  return activeItems(cache.categories || []).filter((category) => !serviceId || category.serviceId === serviceId);
+}
+
+function filterStoresByCategory(categoryId) {
+  return activeItems(cache.stores || []).filter((store) => !categoryId || (store.serviceCategoryIds || []).includes(categoryId));
+}
+
+function refreshZoneFormCityOptions(selectedCityId = "") {
+  const form = $("#zoneForm");
+  if (!form) return;
+  const stateId = form.elements.stateFilterId?.value || "";
+  setSelectOptions(form.elements.cityId, "City optional", filterCitiesByState(stateId), selectedCityId);
+}
+
+function refreshClusterFormZoneOptions(selectedZoneId = "") {
+  const form = $("#clusterForm");
+  if (!form) return;
+  const cityId = form.elements.cityId?.value || "";
+  setSelectOptions(form.elements.zoneId, "Zone optional", filterZonesByCity(cityId), selectedZoneId);
+}
+
+function refreshClusterFormLocationCascade(level = "state", selected = {}) {
+  const form = $("#clusterForm");
+  if (!form) return;
+  const stateId = selected.stateId ?? form.elements.stateFilterId?.value ?? "";
+  const cityId = selected.cityId ?? form.elements.cityId?.value ?? "";
+  const zoneId = selected.zoneId ?? form.elements.zoneId?.value ?? "";
+  if (level === "state") {
+    setSelectOptions(form.elements.cityId, "City", filterCitiesByState(stateId), cityId);
+    setSelectOptions(form.elements.zoneId, "Zone optional", cityId ? filterZonesByCity(cityId) : [], zoneId);
+  }
+  if (level === "city") {
+    setSelectOptions(form.elements.zoneId, "Zone optional", filterZonesByCity(cityId), zoneId);
+  }
+}
+
+function refreshPriceMasterLocationCascade(level = "scope", selected = {}) {
+  const form = $("#priceMasterForm");
+  if (!form) return;
+  const scopeType = form.elements.scopeType?.value || "all";
+  const hierarchy = priceMasterSelectedLocationHierarchy(selected);
+  const stateId = hierarchy.stateId;
+  const cityId = hierarchy.cityId;
+  const zoneId = hierarchy.zoneId;
+  const clusterId = hierarchy.clusterId;
+  if (scopeType === "all") {
+    setSelectOptions(form.elements.cityId, "City", [], "");
+    setSelectOptions(form.elements.zoneId, "Zone", [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "scope") {
+    if (form.elements.stateId) form.elements.stateId.value = stateId;
+    setSelectOptions(form.elements.cityId, "City", stateId ? filterCitiesByState(stateId) : [], ["city", "zone", "cluster"].includes(scopeType) ? cityId : "");
+    setSelectOptions(form.elements.zoneId, "Zone", cityId && ["zone", "cluster"].includes(scopeType) ? filterZonesByCity(cityId) : [], ["zone", "cluster"].includes(scopeType) ? zoneId : "");
+    setSelectOptions(form.elements.clusterId, "Cluster", zoneId && scopeType === "cluster" ? filterClustersByLocation({ stateId, cityId, zoneId }) : [], scopeType === "cluster" ? clusterId : "");
+  } else if (level === "state") {
+    setSelectOptions(form.elements.cityId, "City", stateId ? filterCitiesByState(stateId) : [], "");
+    setSelectOptions(form.elements.zoneId, "Zone", [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "city") {
+    setSelectOptions(form.elements.zoneId, "Zone", cityId ? filterZonesByCity(cityId) : [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "zone") {
+    setSelectOptions(form.elements.clusterId, "Cluster", zoneId ? filterClustersByLocation({ stateId, cityId, zoneId }) : [], "");
+  }
+  const disable = {
+    stateId: scopeType === "all",
+    cityId: !["city", "zone", "cluster"].includes(scopeType),
+    zoneId: !["zone", "cluster"].includes(scopeType),
+    clusterId: scopeType !== "cluster"
+  };
+  for (const [name, disabled] of Object.entries(disable)) {
+    if (form.elements[name]) form.elements[name].disabled = disabled;
+  }
+}
+
+function priceMasterSelectedLocationHierarchy(selected = {}) {
+  const form = $("#priceMasterForm");
+  const cluster = selected.clusterId ? cache.clusters.find((item) => item.id === selected.clusterId) : null;
+  const zone = selected.zoneId ? cache.zones.find((item) => item.id === selected.zoneId) : null;
+  const city = selected.cityId ? cache.cities.find((item) => item.id === selected.cityId) : null;
+  const derivedCityId = selected.cityId || cluster?.cityId || zone?.cityId || form?.elements.cityId?.value || "";
+  const derivedZoneId = selected.zoneId || cluster?.zoneId || form?.elements.zoneId?.value || "";
+  return {
+    stateId: selected.stateId || city?.stateId || cityStateId(derivedCityId) || form?.elements.stateId?.value || "",
+    cityId: derivedCityId,
+    zoneId: derivedZoneId,
+    clusterId: selected.clusterId || form?.elements.clusterId?.value || ""
+  };
+}
+
+function refreshPriceMasterServiceCascade(level = "service", selected = {}) {
+  const form = $("#priceMasterForm");
+  if (!form) return;
+  const serviceId = selected.serviceId ?? form.elements.serviceId?.value ?? "";
+  const categoryId = selected.categoryId ?? form.elements.categoryId?.value ?? "";
+  const storeId = selected.storeId ?? form.elements.storeId?.value ?? "";
+  if (level === "service") {
+    setSelectOptions(form.elements.categoryId, "Category", filterCategoriesByService(serviceId), categoryId);
+    setSelectOptions(form.elements.storeId, "Store optional", categoryId ? filterStoresByCategory(categoryId) : activeItems(cache.stores || []), storeId);
+  }
+  if (level === "category") {
+    setSelectOptions(form.elements.storeId, "Store optional", filterStoresByCategory(categoryId), storeId);
+  }
+  renderPriceMasterCategoryGroupRows(form.elements.categoryGroupEnabled?.checked ? collectPriceMasterCategoryGroupPricing(form) : normalizePriceMasterCategoryGroupPricing());
+  togglePriceMasterCategoryGroupFields(form);
+}
+
+function surgeSelectedLocationHierarchy(selected = {}) {
+  const form = $("#surgeRuleForm");
+  const cluster = selected.clusterId ? cache.clusters.find((item) => item.id === selected.clusterId) : null;
+  const zone = selected.zoneId ? cache.zones.find((item) => item.id === selected.zoneId) : null;
+  const city = selected.cityId ? cache.cities.find((item) => item.id === selected.cityId) : null;
+  const derivedCityId = selected.cityId || cluster?.cityId || zone?.cityId || form?.elements.cityId?.value || "";
+  const derivedZoneId = selected.zoneId || cluster?.zoneId || form?.elements.zoneId?.value || "";
+  return {
+    stateId: selected.stateId || city?.stateId || cityStateId(derivedCityId) || form?.elements.stateId?.value || "",
+    cityId: derivedCityId,
+    zoneId: derivedZoneId,
+    clusterId: selected.clusterId || form?.elements.clusterId?.value || ""
+  };
+}
+
+function refreshSurgeRuleLocationCascade(level = "scope", selected = {}) {
+  const form = $("#surgeRuleForm");
+  if (!form) return;
+  const scopeType = form.elements.scopeType?.value || "all";
+  const hierarchy = surgeSelectedLocationHierarchy(selected);
+  const stateId = hierarchy.stateId;
+  const cityId = hierarchy.cityId;
+  const zoneId = hierarchy.zoneId;
+  const clusterId = hierarchy.clusterId;
+  if (scopeType === "all") {
+    setSelectOptions(form.elements.cityId, "City", [], "");
+    setSelectOptions(form.elements.zoneId, "Zone", [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "scope") {
+    if (form.elements.stateId) form.elements.stateId.value = stateId;
+    setSelectOptions(form.elements.cityId, "City", stateId ? filterCitiesByState(stateId) : [], ["city", "zone", "cluster"].includes(scopeType) ? cityId : "");
+    setSelectOptions(form.elements.zoneId, "Zone", cityId && ["zone", "cluster"].includes(scopeType) ? filterZonesByCity(cityId) : [], ["zone", "cluster"].includes(scopeType) ? zoneId : "");
+    setSelectOptions(form.elements.clusterId, "Cluster", zoneId && scopeType === "cluster" ? filterClustersByLocation({ stateId, cityId, zoneId }) : [], scopeType === "cluster" ? clusterId : "");
+  } else if (level === "state") {
+    setSelectOptions(form.elements.cityId, "City", stateId ? filterCitiesByState(stateId) : [], "");
+    setSelectOptions(form.elements.zoneId, "Zone", [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "city") {
+    setSelectOptions(form.elements.zoneId, "Zone", cityId ? filterZonesByCity(cityId) : [], "");
+    setSelectOptions(form.elements.clusterId, "Cluster", [], "");
+  } else if (level === "zone") {
+    setSelectOptions(form.elements.clusterId, "Cluster", zoneId ? filterClustersByLocation({ stateId, cityId, zoneId }) : [], "");
+  }
+  const disable = {
+    stateId: scopeType === "all",
+    cityId: !["city", "zone", "cluster"].includes(scopeType),
+    zoneId: !["zone", "cluster"].includes(scopeType),
+    clusterId: scopeType !== "cluster"
+  };
+  for (const [name, disabled] of Object.entries(disable)) {
+    if (form.elements[name]) form.elements[name].disabled = disabled;
+  }
+}
+
+function refreshSurgeRuleTargetCascade(level = "service", selected = {}) {
+  const form = $("#surgeRuleForm");
+  if (!form) return;
+  const serviceId = selected.serviceId ?? form.elements.serviceId?.value ?? "";
+  const categoryId = selected.categoryId ?? form.elements.categoryId?.value ?? "";
+  if (level === "service") {
+    if (form.elements.serviceId) form.elements.serviceId.value = serviceId;
+    setSelectOptions(form.elements.categoryId, "All", serviceId ? filterCategoriesByService(serviceId) : activeItems(cache.categories || []), categoryId);
+  }
+}
+
+function refreshAssistantClusterCascade(level = "state") {
+  const stateId = $("#assistantClusterStateSelect")?.value || "";
+  const cityId = $("#assistantClusterCitySelect")?.value || "";
+  const zoneId = $("#assistantClusterZoneSelect")?.value || "";
+  const cities = cache.cities.filter((city) => !stateId || city.stateId === stateId);
+  const zones = cache.zones.filter((zone) => !cityId || zone.cityId === cityId);
+  const clusters = cache.clusters.filter((cluster) => {
+    const cityOk = !cityId || cluster.cityId === cityId;
+    const zoneOk = !zoneId || cluster.zoneId === zoneId;
+    return cityOk && zoneOk;
+  });
+  if (level === "state") {
+    setSelectOptions($("#assistantClusterCitySelect"), "Select City", cities);
+    setSelectOptions($("#assistantClusterZoneSelect"), "Select Zone", []);
+    setSelectOptions($("#assistantClusterSelect"), "Select Cluster", []);
+  }
+  if (level === "city") {
+    setSelectOptions($("#assistantClusterZoneSelect"), "Select Zone", zones);
+    setSelectOptions($("#assistantClusterSelect"), "Select Cluster", clusters);
+  }
+  if (level === "zone") {
+    setSelectOptions($("#assistantClusterSelect"), "Select Cluster", clusters);
+  }
+}
+
+function initializeAssistantClusterCascade(assistant) {
+  const cluster = cache.clusters.find((item) => item.id === assistant.currentClusterId);
+  const city = cache.cities.find((item) => item.id === (cluster?.cityId || assistant.cityId));
+  const stateId = city?.stateId || "";
+  $("#assistantClusterStateSelect").value = stateId;
+  setSelectOptions($("#assistantClusterCitySelect"), "Select City", cache.cities.filter((item) => !stateId || item.stateId === stateId), city?.id || assistant.cityId || "");
+  setSelectOptions($("#assistantClusterZoneSelect"), "Select Zone", cache.zones.filter((item) => !city?.id || item.cityId === city.id), cluster?.zoneId || assistant.zoneId || "");
+  setSelectOptions(
+    $("#assistantClusterSelect"),
+    "Select Cluster",
+    cache.clusters.filter((item) => (!city?.id || item.cityId === city.id) && (!(cluster?.zoneId || assistant.zoneId) || item.zoneId === (cluster?.zoneId || assistant.zoneId))),
+    assistant.currentClusterId || ""
+  );
+}
+
+function refreshVehicleMasterClusterCascade(level = "state") {
+  const stateId = $("#vehicleMasterStateSelect")?.value || "";
+  const cityId = $("#vehicleMasterCitySelect")?.value || "";
+  const zoneId = $("#vehicleMasterZoneSelect")?.value || "";
+  const cities = cache.cities.filter((city) => !stateId || city.stateId === stateId);
+  const zones = cache.zones.filter((zone) => !cityId || zone.cityId === cityId);
+  const clusters = activeClusters(cache.clusters).filter((cluster) => {
+    const cityOk = !cityId || cluster.cityId === cityId;
+    const zoneOk = !zoneId || cluster.zoneId === zoneId;
+    return cityOk && zoneOk;
+  });
+  if (level === "state") {
+    setSelectOptions($("#vehicleMasterCitySelect"), "Select City", cities);
+    setSelectOptions($("#vehicleMasterZoneSelect"), "Select Zone", []);
+    setSelectOptions($("#vehicleMasterClusterSelect"), "Select Cluster", []);
+  }
+  if (level === "city") {
+    setSelectOptions($("#vehicleMasterZoneSelect"), "Select Zone", zones);
+    setSelectOptions($("#vehicleMasterClusterSelect"), "Select Cluster", clusters);
+  }
+  if (level === "zone") {
+    setSelectOptions($("#vehicleMasterClusterSelect"), "Select Cluster", clusters);
+  }
+}
+
+function initializeVehicleMasterClusterCascade(vehicle = {}) {
+  const cluster = cache.clusters.find((item) => item.id === vehicle.clusterId);
+  const city = cache.cities.find((item) => item.id === (cluster?.cityId || vehicle.cityId));
+  const stateId = city?.stateId || vehicle.stateId || "";
+  $("#vehicleMasterStateSelect").value = stateId;
+  setSelectOptions($("#vehicleMasterCitySelect"), "Select City", cache.cities.filter((item) => !stateId || item.stateId === stateId), city?.id || vehicle.cityId || "");
+  setSelectOptions($("#vehicleMasterZoneSelect"), "Select Zone", cache.zones.filter((item) => !(city?.id || vehicle.cityId) || item.cityId === (city?.id || vehicle.cityId)), cluster?.zoneId || vehicle.zoneId || "");
+  setSelectOptions(
+    $("#vehicleMasterClusterSelect"),
+    "Select Cluster",
+    activeClusters(cache.clusters).filter((item) => (!(city?.id || vehicle.cityId) || item.cityId === (city?.id || vehicle.cityId)) && (!(cluster?.zoneId || vehicle.zoneId) || item.zoneId === (cluster?.zoneId || vehicle.zoneId))),
+    vehicle.clusterId || ""
+  );
+}
+
+function refreshAssistantVehiclePickerCascade(level = "state") {
+  const stateId = $("#assistantVehicleStateFilter")?.value || "";
+  const cityId = $("#assistantVehicleCityFilter")?.value || "";
+  const zoneId = $("#assistantVehicleZoneFilter")?.value || "";
+  const cities = cache.cities.filter((city) => !stateId || city.stateId === stateId);
+  const zones = cache.zones.filter((zone) => !cityId || zone.cityId === cityId);
+  const clusters = activeClusters(cache.clusters).filter((cluster) => {
+    const cityOk = !cityId || cluster.cityId === cityId;
+    const zoneOk = !zoneId || cluster.zoneId === zoneId;
+    return cityOk && zoneOk;
+  });
+  if (level === "state") {
+    setSelectOptions($("#assistantVehicleCityFilter"), "City", cities);
+    setSelectOptions($("#assistantVehicleZoneFilter"), "Zone", []);
+    setSelectOptions($("#assistantVehicleClusterFilter"), "Cluster", []);
+  }
+  if (level === "city") {
+    setSelectOptions($("#assistantVehicleZoneFilter"), "Zone", zones);
+    setSelectOptions($("#assistantVehicleClusterFilter"), "Cluster", clusters);
+  }
+  if (level === "zone") {
+    setSelectOptions($("#assistantVehicleClusterFilter"), "Cluster", clusters);
+  }
+  renderAssistantVehiclePicker($("#assistantVehiclePickerAssistantId")?.value || "");
+}
+
+function initializeAssistantVehiclePickerFilters(assistant) {
+  const cluster = cache.clusters.find((item) => item.id === assistant.currentClusterId);
+  const city = cache.cities.find((item) => item.id === (cluster?.cityId || assistant.cityId));
+  const stateId = city?.stateId || assistant.stateId || "";
+  $("#assistantVehicleStateFilter").innerHTML = `<option value="">State</option>${optionRows(activeItems(cache.states))}`;
+  $("#assistantVehicleStateFilter").value = stateId;
+  setSelectOptions($("#assistantVehicleCityFilter"), "City", cache.cities.filter((item) => !stateId || item.stateId === stateId), city?.id || assistant.cityId || "");
+  setSelectOptions($("#assistantVehicleZoneFilter"), "Zone", cache.zones.filter((item) => !(city?.id || assistant.cityId) || item.cityId === (city?.id || assistant.cityId)), cluster?.zoneId || assistant.zoneId || "");
+  setSelectOptions(
+    $("#assistantVehicleClusterFilter"),
+    "Cluster",
+    activeClusters(cache.clusters).filter((item) => (!(city?.id || assistant.cityId) || item.cityId === (city?.id || assistant.cityId)) && (!(cluster?.zoneId || assistant.zoneId) || item.zoneId === (cluster?.zoneId || assistant.zoneId))),
+    assistant.currentClusterId || ""
+  );
+}
+
+function uniqueOptions(items, valueKey, labelKey) {
+  const seen = new Map();
+  for (const item of items) {
+    const value = item[valueKey];
+    const label = item[labelKey];
+    if (value && label && !seen.has(value)) seen.set(value, label);
+  }
+  return [...seen.entries()]
+    .sort((a, b) => String(a[1]).localeCompare(String(b[1])))
+    .map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`)
+    .join("");
+}
+
+function assistantAllotRows(items) {
+  return items
+    .map((assistant) => {
+      const vehicleLabel = assistant.vehicleName
+        ? `${assistant.vehicleName}${assistant.vehicleNumber ? ` (${assistant.vehicleNumber})` : ""}`
+        : "-";
+      const scheduleSummary = summarizeWeeklySchedule(assistant.workingSchedule || {});
+      const workingSlot = `${String(assistant.workingType || "full_time").replace("_", " ")}${scheduleSummary ? ` | ${scheduleSummary}` : assistant.workingTimeSlot ? ` | ${assistant.workingTimeSlot}` : ""}`;
+      const isCurrentVehicle = assistant.vehicleMasterId === allotVehicleId;
+      const hasAnotherVehicle = assistant.vehicleMasterId && assistant.vehicleMasterId !== allotVehicleId;
+      return `<tr>
+        <td>${profileCircle(assistant.profilePictureUrl, assistant.displayName)}</td>
+        <td><b>${escapeHtml(assistant.displayName || "-")}</b><div class="row-note">${escapeHtml(assistant.phone || assistant.email || assistant.assistantCode || "-")}</div></td>
+        <td>${escapeHtml(assistant.currentClusterName || "-")}</td>
+        <td>${escapeHtml(vehicleLabel)}</td>
+        <td>${status(["active", "verified", "approved"].includes(String(assistant.status)) ? "active" : assistant.status || "inactive")}</td>
+        <td>${escapeHtml(workingSlot)}</td>
+        <td class="text-end">
+          <button class="btn btn-primary btn-xs" data-action="allot-vehicle-to-assistant" data-id="${assistant.id}" type="button" ${isCurrentVehicle || hasAnotherVehicle ? "disabled" : ""}>${isCurrentVehicle ? "Allotted" : hasAnotherVehicle ? "Has Vehicle" : "Allot"}</button>
+        </td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function filteredVehicleAllotAssistants() {
+  const query = ($("#vehicleAssistantSearchInput")?.value || "").trim().toLowerCase();
+  const cityId = $("#vehicleAssistantCityFilter")?.value || "";
+  const zoneId = $("#vehicleAssistantZoneFilter")?.value || "";
+  const clusterId = $("#vehicleAssistantClusterFilter")?.value || "";
+  return cache.assistantMasters.filter((assistant) => {
+    const text = [
+      assistant.displayName,
+      assistant.phone,
+      assistant.email,
+      assistant.cityName,
+      assistant.zoneName,
+      assistant.currentClusterName,
+      assistant.assistantCode
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return (
+      (!query || text.includes(query)) &&
+      (!cityId || assistant.cityId === cityId) &&
+      (!zoneId || assistant.zoneId === zoneId) &&
+      (!clusterId || assistant.currentClusterId === clusterId)
+    );
+  });
+}
+
+function renderVehicleAllotmentResults() {
+  const rows = assistantAllotRows(filteredVehicleAllotAssistants());
+  $("#vehicleAssistantResults").innerHTML = table(["Pic", "Name / Number", "Cluster", "Vehicle", "IsActive", "Working Slot", ""], rows);
+}
+
+async function openVehicleAllotmentModal(vehicleId) {
+  allotVehicleId = vehicleId;
+  const vehicle = cache.vehicleMasters.find((item) => item.id === vehicleId);
+  const [assistantsPayload, citiesPayload, zonesPayload, clustersPayload] = await Promise.all([
+    safeApi(BASE_PATH+"/assistant-master"),
+    safeApi(BASE_PATH+"/masters/cities"),
+    safeApi(BASE_PATH+"/masters/zones"),
+    safeApi(BASE_PATH+"/masters/clusters")
+  ]);
+  cache.assistantMasters = assistantsPayload.data || [];
+  cache.cities = citiesPayload.data || [];
+  cache.zones = zonesPayload.data || [];
+  cache.clusters = clustersPayload.data || [];
+  $("#vehicleAllotModalTitle").textContent = `Allot Vehicle ${vehicle?.vehicleName || ""}`.trim();
+  $("#vehicleAllotModalAlert").classList.add("d-none");
+  $("#vehicleAssistantSearchInput").value = "";
+  $("#vehicleAssistantCityFilter").innerHTML = `<option value="">City filter</option>${optionRows(activeItems(cache.cities))}`;
+  $("#vehicleAssistantZoneFilter").innerHTML = `<option value="">Zone filter</option>${optionRows(activeItems(cache.zones))}`;
+  $("#vehicleAssistantClusterFilter").innerHTML = `<option value="">Cluster filter</option>${optionRows(activeItems(cache.clusters))}`;
+  renderVehicleAllotmentResults();
+  $("#vehicleAllotModal").classList.remove("d-none");
+}
+
+function assistantMasterModalForm(assistant, field) {
+  const vehicleOptions = optionRows(activeItems(cache.vehicleMasters), "vehicleName");
+  if (field === "basic" || field === "status") {
+    return `<form class="master-form stack" data-form="assistant-master-basic">
+      <input type="hidden" name="assistantId" value="${escapeHtml(assistant.id)}">
+      <input class="form-control" name="displayName" value="${escapeHtml(assistant.displayName || "")}" placeholder="Assistant name" required>
+      <input class="form-control" name="assistantCode" value="${escapeHtml(assistant.assistantCode || "")}" placeholder="Assistant ID" required>
+      <input class="form-control" name="phone" value="${escapeHtml(assistant.phone || "")}" placeholder="Mobile number">
+      <input class="form-control" name="email" value="${escapeHtml(assistant.email || "")}" placeholder="Email optional">
+      <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" ${assistant.isActive === false ? "" : "checked"}> Active</label>
+      <button class="btn btn-primary">Update Assistant</button>
+    </form>`;
+  }
+  if (field === "work") {
+    return `<form class="master-form stack" data-form="assistant-master-work">
+      <input type="hidden" name="assistantId" value="${escapeHtml(assistant.id)}">
+      <select class="form-select" name="workingType">
+        <option value="full_time" ${assistant.workingType === "full_time" ? "selected" : ""}>Full Time</option>
+        <option value="part_time" ${assistant.workingType === "part_time" ? "selected" : ""}>Part Time</option>
+      </select>
+      <div><p class="helper-text mb-2">Working schedule</p>${weeklyScheduleFields(assistant.workingSchedule || {})}</div>
+      <select class="form-select" name="payType">
+        <option value="salaried" ${assistant.payType === "salaried" ? "selected" : ""}>Salaried</option>
+        <option value="per_day" ${assistant.payType === "per_day" ? "selected" : ""}>Per Day</option>
+        <option value="per_task" ${assistant.payType === "per_task" ? "selected" : ""}>Per Task Base</option>
+      </select>
+      <button class="btn btn-primary">Update Working / Pay</button>
+    </form>`;
+  }
+  if (field === "cluster") {
+    return `<form class="master-form stack" data-form="assistant-master-cluster">
+      <input type="hidden" name="assistantId" value="${escapeHtml(assistant.id)}">
+      <select class="form-select" id="assistantClusterStateSelect" name="stateId" required><option value="">Select State</option>${optionRows(activeItems(cache.states))}</select>
+      <select class="form-select" id="assistantClusterCitySelect" name="cityId" required><option value="">Select City</option></select>
+      <select class="form-select" id="assistantClusterZoneSelect" name="zoneId"><option value="">Select Zone</option></select>
+      <select class="form-select" id="assistantClusterSelect" name="clusterId" required><option value="">Select Cluster</option></select>
+      <div class="form-actions">
+        <button class="btn btn-primary">Assign / Switch Cluster</button>
+        <button class="btn btn-light" data-action="remove-assistant-cluster-master" data-id="${assistant.id}" type="button">Remove Current Cluster</button>
+      </div>
+    </form>`;
+  }
+  if (field === "vehicle") {
+    return `<div class="stack">
+      <input type="hidden" id="assistantVehiclePickerAssistantId" value="${escapeHtml(assistant.id)}">
+      <div class="vehicle-picker-filter-row">
+        <input class="form-control" id="assistantVehicleSearchInput" placeholder="Search by vehicle name, vehicle no, model, company, fuel, color">
+        <select class="form-select" id="assistantVehicleStateFilter"><option value="">State</option>${optionRows(activeItems(cache.states))}</select>
+        <select class="form-select" id="assistantVehicleCityFilter"><option value="">City</option></select>
+        <select class="form-select" id="assistantVehicleZoneFilter"><option value="">Zone</option></select>
+        <select class="form-select" id="assistantVehicleClusterFilter"><option value="">Cluster</option></select>
+        <select class="form-select" id="assistantVehicleFuelFilter">
+          <option value="">Fuel</option>
+          <option value="EV">EV</option>
+          <option value="Petrol">Petrol</option>
+          <option value="Diesel">Diesel</option>
+        </select>
+        <select class="form-select" id="assistantVehicleOwnerFilter">
+          <option value="">Owner / Rent</option>
+          <option value="Own">Own</option>
+          <option value="Rent">Rent</option>
+          <option value="ZIGO">ZIGO</option>
+        </select>
+        <select class="form-select" id="assistantVehicleStatusFilter">
+          <option value="">Status</option>
+          <option value="active">Active</option>
+          <option value="deactive">Deactive</option>
+        </select>
+        <button class="btn btn-primary" data-action="assistant-vehicle-picker-search" type="button">Search</button>
+      </div>
+      <div id="assistantVehiclePickerResults"></div>
+      <div class="form-actions">
+        <button class="btn btn-light" data-action="remove-assistant-vehicle-master" data-id="${assistant.id}" type="button">Remove Allotted Vehicle</button>
+      </div>
+    </div>`;
+  }
+  if (field === "documents") {
+    const missingFields = assistantMissingDocumentFields(assistant.documents || []);
+    return `${documentPreviewList(assistant.documents || [])}
+      <form class="master-form stack mt-3" data-form="assistant-master-document">
+        <input type="hidden" name="assistantId" value="${escapeHtml(assistant.id)}">
+        ${
+          missingFields.length
+            ? `<div class="assistant-master-doc-upload-grid">${assistantMasterDocumentUploadFieldsFor(assistant.documents || [])}</div>
+              <button class="btn btn-primary">Upload Pending Documents</button>`
+            : `<div class="empty-state">All required documents are uploaded.</div>`
+        }
+      </form>`;
+  }
+  return `<div class="stack">
+    <div>
+      <p class="helper-text mb-2">Existing damage / issue reports</p>
+      ${table(["Vehicle", "Issue / Reason", "Expense", "Paid By", "Proof Pictures", "Payment Proof"], damageReportRows(assistant.damageReports || []))}
+    </div>
+    <form class="master-form stack" data-form="assistant-damage">
+      <input type="hidden" name="assistantId" value="${escapeHtml(assistant.id)}">
+      <select class="form-select" name="vehicleMasterId"><option value="">Use allotted vehicle</option>${vehicleOptions}</select>
+      <textarea class="form-control" name="reason" rows="2" placeholder="Damage / issue reason" required></textarea>
+      <input type="hidden" id="damageProofPictureUrls" name="proofPictureUrls" value="[]">
+      ${uploadControl("damageProofImages")}
+      <div id="damageProofGallery" class="store-image-gallery"></div>
+      <input class="form-control" name="expense" type="number" min="0" step="0.01" placeholder="Expense">
+      <select class="form-select" name="paidBy" required>
+        <option value="self">Paid Self</option>
+        <option value="company">Paid Company</option>
+      </select>
+      <p class="helper-text mb-0">Proof of payment</p>
+      ${uploadControl("damagePaymentProof")}
+      <button class="btn btn-primary">Save Damage / Issue Report</button>
+    </form>
+  </div>`;
+}
+
+function openAssistantMasterEditModal(assistantId, field) {
+  const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+  if (!assistant) return;
+  const titleMap = {
+    basic: "Edit Assistant Detail",
+    status: "Edit Assistant Detail",
+    cluster: "Assign / Switch Cluster",
+    vehicle: "Assign / Switch Vehicle",
+    work: "Working Time / Pay Base",
+    documents: "Assistant Documents",
+    damage: "Damage Vehicle"
+  };
+  $("#assistantMasterEditModal").classList.toggle("assistant-vehicle-picker-open", field === "vehicle");
+  $("#assistantMasterEditModalTitle").textContent = titleMap[field] || "Edit Assistant";
+  setAssistantMasterEditModalAlert();
+  $("#assistantMasterEditModalBody").innerHTML = assistantMasterModalForm(assistant, field);
+  const body = $("#assistantMasterEditModalBody");
+  if (field === "cluster") initializeAssistantClusterCascade(assistant);
+  if (field === "vehicle") {
+    initializeAssistantVehiclePickerFilters(assistant);
+    renderAssistantVehiclePicker(assistant.id);
+  }
+  const vehicleSelect = body.querySelector('select[name="vehicleMasterId"]');
+  if (vehicleSelect) vehicleSelect.value = assistant.vehicleMasterId || "";
+  $("#assistantMasterEditModal").classList.remove("d-none");
+}
+
+function stateRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.countryName || "-")}</td>
+        <td>${status(item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-state" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/states" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function cityRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.stateName || "-")}</td>
+        <td>${status(item.isUsable === false ? "blocked" : item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-city" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/cities" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function zoneRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.cityName || "-")}</td>
+        <td>${status(item.isUsable === false ? "blocked" : item.isActive ? "active" : "inactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-zone" data-id="${item.id}" type="button">Edit</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/zones" data-id="${item.id}" type="button">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+function clusterRows(items) {
+  return items
+    .map(
+      (item) => `<tr>
+        <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.cityName || "-")}</td>
+        <td>${escapeHtml(item.zoneName || "-")}</td>
+        <td>${escapeHtml(item.description || "-")}</td>
+        <td>${escapeHtml(item.startTime || "-")} - ${escapeHtml(item.endTime || "-")}</td>
+        <td>${item.isPinned ? status(`pinned ${item.pinPriority || 0}`) : "-"}</td>
+        <td>${status(item.isUsable === false ? "blocked" : item.isBookingEnabled ? "active" : "deactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="view-polygon" data-id="${item.id}" type="button" ${item.polygonDescription ? "" : "disabled"}>View on Map</button>
+          <button class="btn btn-soft btn-xs" data-action="edit-cluster" data-id="${item.id}" type="button">Edit</button>
+          ${isSuperAdminUser() ? `<button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/clusters" data-id="${item.id}" type="button">Delete</button>` : ""}
+        </td>
+      </tr>`
+    )
+    .join("");
+}
+
+async function loadDashboard() {
+  const [dashboard, report, operations] = await Promise.all([
+    safeApi(BASE_PATH+"/admin/dashboard"),
+    safeApi(BASE_PATH+"/reports/launch"),
+    safeApi(BASE_PATH+"/operations/live")
+  ]);
+  const counts = dashboard.data || {};
+  const reportData = report.data || {};
+  const live = operations.data || [];
+  const paymentRows = (reportData.paymentTotals || [])
+    .map((row) => `<tr><td>${status(row.statusCode)}</td><td>${row.count}</td><td>${money(row.amountPaise)}</td></tr>`)
+    .join("");
+  const liveRows = live
+    .slice(0, 8)
+    .map(
+      (row) => `<tr>
+        <td><b>${escapeHtml(row.customerCode || row.id)}</b><div class="row-note">${escapeHtml(row.id)}</div></td>
+        <td>${status(row.statusCode)}</td>
+        <td>${escapeHtml(row.assistantCode || "-")}</td>
+        <td>${money(row.estimatedAmountPaise)}</td>
+        <td>${formatDate(row.createdAt)}</td>
+      </tr>`
+    )
+    .join("");
+
+  $("#dashboardSection").innerHTML =
+    pageTitleBlock("Dashboard", "Live health, booking status, payments, and launch summary") +
+    `<div class="metric-grid">
+      ${metric("Users", counts.users ?? "-")}
+      ${metric("Customers", counts.customers ?? "-")}
+      ${metric("Assistants", counts.assistants ?? "-")}
+      ${metric("Requests", counts.serviceRequests ?? "-")}
+      ${metric("Payments", counts.payments ?? "-")}
+      ${metric("Live Rows", live.length)}
+    </div>
+    <div class="master-grid">
+      ${panel("Live Operations", "Latest active booking/task rows", table(["Customer", "Status", "Assistant", "Amount", "Created"], liveRows))}
+      ${panel("Payment Totals", "Zaakpay transaction summary", table(["Status", "Count", "Amount"], paymentRows))}
+    </div>`;
+}
+
+async function loadOperations() {
+  const [livePayload, assistantsPayload] = await Promise.all([api(BASE_PATH+"/operations/live"), safeApi(BASE_PATH+"/verification/assistants")]);
+  cache.assistants = assistantsPayload.data || [];
+  const assistantOptions = `<option value="">Select assistant</option>${optionRows(cache.assistants, "assistantCode")}`;
+  const rows = livePayload.data
+    .map(
+      (row) => `<tr>
+        <td><b>${escapeHtml(row.customerCode || "Customer")}</b><div class="row-note">${escapeHtml(row.id)}</div></td>
+        <td>${status(row.statusCode)}<div class="row-note">${escapeHtml(row.assignmentStatus || "")}</div></td>
+        <td>${escapeHtml(row.assistantCode || "-")}</td>
+        <td>${money(row.estimatedAmountPaise)}</td>
+        <td>${formatDate(row.lastPingAt)}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="prefill-assign" data-id="${row.id}" type="button">Assign</button>
+          <button class="btn btn-soft btn-xs" data-action="prefill-reassign" data-id="${row.id}" type="button">Reassign</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="admin-cancel" data-id="${row.id}" type="button">Cancel</button>
+          <button class="btn btn-outline-primary btn-xs" data-action="force-close" data-id="${row.id}" type="button">Close</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+
+  $("#operationsSection").innerHTML =
+    pageTitleBlock("Live Operations", "Monitor paid bookings, assign assistants, cancel, or force-close with reasons") +
+    `<div class="module-layout">
+      <div class="module-form-card">
+        <div class="control-title"><div><p>Dispatch</p><h3>Assign Booking</h3></div><span>${livePayload.data.length} live</span></div>
+        <form class="module-form" data-form="operation-assign">
+          <label class="form-label">Booking ID <input class="form-control" name="serviceRequestId" required /></label>
+          <label class="form-label">Assistant <select class="form-select" name="assistantId" required>${assistantOptions}</select></label>
+          <label class="form-label">Reason <textarea class="form-control" name="reason" rows="3" required>Manual dispatch from admin panel</textarea></label>
+          <div class="form-actions">
+            <button class="btn btn-primary" name="mode" value="assign">Assign</button>
+            <button class="btn btn-outline-primary" name="mode" value="reassign">Reassign</button>
+          </div>
+        </form>
+      </div>
+      ${panel("Active Bookings", "Rows come from /operations/live", table(["Customer", "Status", "Assistant", "Amount", "Ping", ""], rows))}
+    </div>`;
+}
+
+function todayInputDate() {
+  const date = new Date();
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+  return date.toISOString().slice(0, 10);
+}
+
+function bookingFilterQuery(tab = bookingActiveTab) {
+  const params = new URLSearchParams();
+  params.set("tab", tab);
+  params.set("page", String(bookingPage));
+  params.set("pageSize", String(bookingPageSize));
+  params.set("datePreset", bookingDatePreset);
+  if (bookingSearchText.trim()) params.set("search", bookingSearchText.trim());
+  if (bookingDatePreset === "range") {
+    if (bookingStartDate) params.set("startDate", bookingStartDate);
+    if (bookingEndDate) params.set("endDate", bookingEndDate);
+  }
+  return params.toString();
+}
+
+function bookingFilterControls() {
+  return `<div class="booking-filter-bar">
+    <input id="bookingSearchInput" class="form-control form-control-sm booking-search-input" type="search" autocomplete="off" value="${escapeHtml(bookingSearchText)}" placeholder="Search booking, customer, phone, service, cluster, assistant">
+    <div class="booking-date-tabs">
+      <button class="btn ${bookingDatePreset === "today" ? "btn-primary" : "btn-soft"} btn-sm" data-action="booking-date-preset" data-preset="today" type="button">Today</button>
+      <button class="btn ${bookingDatePreset === "range" ? "btn-primary" : "btn-soft"} btn-sm" data-action="booking-date-preset" data-preset="range" type="button">Dates</button>
+      <button class="btn ${bookingDatePreset === "all" ? "btn-primary" : "btn-soft"} btn-sm" data-action="booking-date-preset" data-preset="all" type="button">All</button>
+    </div>
+    <div class="booking-date-range ${bookingDatePreset === "range" ? "" : "is-muted"}">
+      <label>Start <input id="bookingStartDateFilter" class="form-control form-control-sm" type="date" value="${escapeHtml(bookingStartDate || todayInputDate())}"></label>
+      <label>End <input id="bookingEndDateFilter" class="form-control form-control-sm" type="date" value="${escapeHtml(bookingEndDate || bookingStartDate || todayInputDate())}"></label>
+      <button class="btn btn-outline-primary btn-sm" data-action="booking-apply-filter" type="button">Apply</button>
+      ${isSuperAdminUser() ? `<button class="btn btn-primary btn-sm" data-action="open-booking-modal" type="button">New Booking</button>` : ""}
+    </div>
+  </div>`;
+}
+
+function bookingPaginationControls(pagination = {}) {
+  const totalRecords = Number(pagination.totalRecords || 0);
+  if (!totalRecords) return "";
+  const page = Number(pagination.page || bookingPage || 1);
+  const pageSize = Number(pagination.pageSize || bookingPageSize || 20);
+  const totalPages = Math.max(1, Number(pagination.totalPages || Math.ceil(totalRecords / pageSize)));
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(totalRecords, page * pageSize);
+  return `<div class="booking-pagination">
+    <span class="helper-text">Showing ${escapeHtml(start)}-${escapeHtml(end)} of ${escapeHtml(totalRecords)} bookings</span>
+    <div class="booking-pagination-controls">
+      <select id="bookingPageSizeSelect" class="form-select form-select-sm" aria-label="Booking page size">
+        ${[10, 20, 50, 100].map((size) => `<option value="${size}" ${pageSize === size ? "selected" : ""}>${size} / page</option>`).join("")}
+      </select>
+      <button class="btn btn-soft btn-sm" data-action="booking-page" data-page="${Math.max(1, page - 1)}" type="button" ${page <= 1 ? "disabled" : ""}>Previous</button>
+      <span class="helper-text">Page ${escapeHtml(page)} of ${escapeHtml(totalPages)}</span>
+      <button class="btn btn-soft btn-sm" data-action="booking-page" data-page="${Math.min(totalPages, page + 1)}" type="button" ${page >= totalPages ? "disabled" : ""}>Next</button>
+    </div>
+  </div>`;
+}
+
+function updateBookingBell() {
+  if (!bookingBellButton || !bookingBellCount) return;
+  if (bookingRealtimeSettings && !bookingRealtimeSettings.showBell) {
+    bookingBellButton.classList.add("d-none");
+    return;
+  }
+  bookingBellButton.classList.remove("d-none");
+  bookingBellButton.classList.toggle("has-new", bookingNewNotificationCount > 0);
+  bookingBellCount.textContent = String(bookingNewNotificationCount);
+  bookingBellCount.classList.toggle("d-none", bookingNewNotificationCount <= 0);
+}
+
+function ringBookingBell(count = 1) {
+  if (bookingRealtimeSettings?.showBell === false) return;
+  bookingNewNotificationCount += count;
+  updateBookingBell();
+  bookingBellButton?.classList.remove("ring");
+  void bookingBellButton?.offsetWidth;
+  bookingBellButton?.classList.add("ring");
+  if (bookingRealtimeSettings?.playSound === false) return;
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    const audio = new AudioContextClass();
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(1046, audio.currentTime);
+    oscillator.frequency.setValueAtTime(784, audio.currentTime + 0.12);
+    oscillator.frequency.setValueAtTime(1046, audio.currentTime + 0.22);
+    gain.gain.setValueAtTime(0.001, audio.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.12, audio.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.28);
+    oscillator.connect(gain);
+    gain.connect(audio.destination);
+    oscillator.start();
+    oscillator.stop(audio.currentTime + 0.38);
+    setTimeout(() => audio.close?.(), 520);
+  } catch {
+    // Browser may block sound until the first user gesture; the visual bell still rings.
+  }
+}
+
+function handleBookingNotificationRows(rows = [], notify = true) {
+  const rowIds = rows.map((booking) => booking.id).filter(Boolean);
+  if (!bookingNotificationSeeded) {
+    rowIds.forEach((id) => bookingNotificationKnownIds.add(id));
+    bookingNotificationSeeded = true;
+    return [];
+  }
+  const newRows = rows.filter((booking) => booking.id && !bookingNotificationKnownIds.has(booking.id));
+  rowIds.forEach((id) => bookingNotificationKnownIds.add(id));
+  if (notify && newRows.length) {
+    ringBookingBell(newRows.length);
+    const first = newRows[0];
+    if (bookingRealtimeSettings?.showToast !== false) showAlert(`${newRows.length} new booking${newRows.length === 1 ? "" : "s"} received${first?.requestNumber ? `: ${first.requestNumber}` : ""}.`, "warning");
+  }
+  return newRows;
+}
+
+function handleBookingRealtimeRows(rows = [], options = {}) {
+  const rowIds = rows.map((booking) => booking.id).filter(Boolean);
+  if (options.realtime) {
+    const newRows = rows.filter((booking) => booking.id && !bookingKnownIds.has(booking.id));
+    if (newRows.length) {
+      ringBookingBell(newRows.length);
+      const first = newRows[0];
+      if (bookingRealtimeSettings?.showToast !== false) showAlert(`${newRows.length} new booking${newRows.length === 1 ? "" : "s"} received${first?.requestNumber ? `: ${first.requestNumber}` : ""}.`, "warning");
+    }
+  }
+  rowIds.forEach((id) => bookingKnownIds.add(id));
+  handleBookingNotificationRows(rows, false);
+}
+
+async function loadBookings(tab = bookingActiveTab, options = {}) {
+  bookingActiveTab = tab || "pending_assign";
+  const payload = await api(`/operations/bookings?${bookingFilterQuery(bookingActiveTab)}`);
+  bookingRowsCache = payload.data || [];
+  handleBookingRealtimeRows(bookingRowsCache, options);
+  const pagination = payload.pagination || { page: bookingPage, pageSize: bookingPageSize, totalRecords: bookingRowsCache.length, totalPages: 1 };
+  bookingPage = Number(pagination.page || bookingPage);
+  bookingPageSize = Number(pagination.pageSize || bookingPageSize);
+  const tabs = [
+    ["pending_assign", "Pending Assign"],
+    ["assigned", "Assigned"],
+    ["working", "Working"],
+    ["success", "Success"],
+    ["rejected", "Rejected"],
+    ["cancelled", "Cancelled"],
+    ["hold", "Hold"]
+  ];
+  const rows = bookingRowsCache.map((booking) => bookingQueueRow(booking, bookingActiveTab)).join("");
+  $("#bookingsSection").innerHTML =
+    pageTitleBlock("Bookings", "Customer booking workflow grouped by status") +
+    panel(
+      "Bookings",
+      "Pending assignment, assigned, working, success, rejected, cancelled, and hold queues",
+      `${bookingFilterControls()}
+      <div class="booking-tabs">
+        ${tabs.map(([key, label]) => `<button class="btn ${key === bookingActiveTab ? "btn-primary" : "btn-soft"} btn-sm" data-action="booking-tab" data-tab="${key}" type="button">${label}</button>`).join("")}
+      </div>
+      <div class="booking-queue-scroll">
+        ${bookingQueueHeader(bookingActiveTab)}
+        <div class="booking-queue-list">${rows || `<div class="empty-state">No bookings found.</div>`}</div>
+      </div>
+      ${bookingPaginationControls(pagination)}`,
+      ""
+    );
+  updateBookingBell();
+  startBookingWorkingCountdown();
+}
+
+function defaultBookingRealtimeSettings() {
+  return {
+    isEnabled: true,
+    transport: "sse",
+    refreshOnEvent: true,
+    playSound: true,
+    showBell: true,
+    showToast: true,
+    fallbackPollingEnabled: false,
+    fallbackPollingSeconds: 60,
+    reconnectSeconds: 5
+  };
+}
+
+async function ensureBookingRealtimeSettings(force = false) {
+  if (bookingRealtimeSettings && !force) return bookingRealtimeSettings;
+  const payload = await safeApi(BASE_PATH+"/settings/booking-live-sync");
+  bookingRealtimeSettings = payload.data || defaultBookingRealtimeSettings();
+  updateBookingBell();
+  return bookingRealtimeSettings;
+}
+
+function stopBookingRealtimeSource() {
+  if (bookingRealtimeSource) bookingRealtimeSource.close();
+  bookingRealtimeSource = null;
+  if (bookingRealtimeReconnectTimer) clearTimeout(bookingRealtimeReconnectTimer);
+  bookingRealtimeReconnectTimer = null;
+}
+
+function startBookingRealtimeFallbackPolling(seconds = 60) {
+  if (bookingRealtimeSettings?.transport !== "polling") {
+    if (bookingRealtimeTimer) clearInterval(bookingRealtimeTimer);
+    bookingRealtimeTimer = null;
+    return;
+  }
+  updateBookingBell();
+  if (bookingRealtimeTimer) return;
+  bookingRealtimeTimer = setInterval(async () => {
+    if (bookingRealtimeSettings?.transport !== "polling") {
+      clearInterval(bookingRealtimeTimer);
+      bookingRealtimeTimer = null;
+      bookingRealtimeBusy = false;
+      return;
+    }
+    if (bookingRealtimeBusy) return;
+    bookingRealtimeBusy = true;
+    try {
+      if (state.section === "bookings") {
+        await loadBookings(bookingActiveTab, { realtime: true });
+      } else {
+        const payload = await api(BASE_PATH+"/operations/bookings?tab=pending_assign&page=1&pageSize=10&datePreset=today");
+        handleBookingNotificationRows(payload.data || [], true);
+      }
+    } catch {
+      // Keep live refresh quiet; manual refresh still reports errors.
+    } finally {
+      bookingRealtimeBusy = false;
+    }
+  }, Math.max(10, Number(seconds || 60)) * 1000);
+}
+
+function stopBookingRealtime() {
+  stopBookingRealtimeSource();
+  if (bookingRealtimeTimer) clearInterval(bookingRealtimeTimer);
+  bookingRealtimeTimer = null;
+  bookingRealtimeStatus = { ...bookingRealtimeStatus, mode: "stopped", message: "Live booking sync stopped." };
+  updateBookingBell();
+}
+
+function normalizeAssistantRealtimeRow(assistant = {}) {
+  return {
+    ...assistant,
+    onlineStartedAt: assistant.onlineStartedAt || (assistantIsOnline(assistant) ? assistant.availabilityUpdatedAt || new Date().toISOString() : null),
+    todayOnlineSyncedAt: new Date().toISOString()
+  };
+}
+
+function mergeAssistantRealtimePayload(event = {}) {
+  const assistant = event.payload?.assistant;
+  if (!assistant?.id) return false;
+  const next = normalizeAssistantRealtimeRow(assistant);
+  const index = cache.assistantMasters.findIndex((item) => item.id === next.id);
+  if (index >= 0) cache.assistantMasters[index] = { ...cache.assistantMasters[index], ...next };
+  else cache.assistantMasters.unshift(next);
+  return true;
+}
+
+function handleBookingRealtimeEvent(event = {}) {
+  const eventType = String(event.type || "");
+  const isAssistantEvent = eventType.startsWith("assistant.");
+  const assistantUpdated = isAssistantEvent ? mergeAssistantRealtimePayload(event) : false;
+  if (event.id) {
+    bookingRealtimeLastEventId = String(event.id);
+    localStorage.setItem("zigoBookingRealtimeLastEventId", bookingRealtimeLastEventId);
+  }
+  bookingRealtimeLastSeenAt = event.createdAt || new Date().toISOString();
+  bookingRealtimeStatus = {
+    ...bookingRealtimeStatus,
+    mode: "connected",
+    lastEventAt: new Date().toISOString(),
+    lastEventType: event.type || "booking_changed",
+    message: event.message || "Booking event received."
+  };
+  updateBookingRealtimePill();
+  if (!isAssistantEvent) {
+    ringBookingBell(1);
+    if (bookingRealtimeSettings?.showToast !== false) showAlert(event.message || "Booking updated.", "warning");
+  }
+  if (!isAssistantEvent && bookingRealtimeSettings?.refreshOnEvent !== false) {
+    if (state.section === "bookings") loadBookings(bookingActiveTab, { realtime: true }).catch(() => {});
+  }
+  if (assistantUpdated) {
+    if (state.section === "assistant") renderAssistantRecords();
+    if (state.section === "bookingMaster" && bookingMasterAssistantWidgetExpanded) renderBookingMasterAssistantWidget();
+    if ($("#assignedAssistantProfileModal") && !$("#assignedAssistantProfileModal").classList.contains("d-none")) {
+      const assistantId = event.assistantId || event.payload?.assistantId;
+      const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+      if (assistant) {
+        $("#assignedAssistantProfileModalTitle").textContent = assistant.displayName || "Assistant Details";
+        $("#assignedAssistantProfileModalBody").innerHTML = assistantProfileDetailHtml(assistant);
+      }
+    }
+  }
+  renderSystemControlStatus();
+}
+
+async function startBookingRealtime(force = false) {
+  const settings = await ensureBookingRealtimeSettings();
+  if (!settings.isEnabled || settings.transport === "off") {
+    stopBookingRealtime();
+    bookingRealtimeStatus = { ...bookingRealtimeStatus, mode: "disabled", message: "Live booking sync disabled from System Control." };
+    updateBookingRealtimePill();
+    updateBookingBell();
+    return;
+  }
+  if (settings.transport === "polling") {
+    if (bookingRealtimeTimer && !force) return;
+    stopBookingRealtime();
+    bookingRealtimeStatus = { ...bookingRealtimeStatus, mode: "polling", message: `Fallback polling every ${settings.fallbackPollingSeconds || 60}s.` };
+    updateBookingRealtimePill();
+    startBookingRealtimeFallbackPolling(settings.fallbackPollingSeconds || 60);
+    return;
+  }
+  if (bookingRealtimeSource && !force) {
+    updateBookingBell();
+    return;
+  }
+  stopBookingRealtime();
+  if (!window.EventSource || !state.token) {
+    bookingRealtimeStatus = { ...bookingRealtimeStatus, mode: "error", message: "SSE unavailable. No auto booking polling started." };
+    updateBookingRealtimePill();
+    renderSystemControlStatus();
+    return;
+  }
+  bookingRealtimeStatus = { ...bookingRealtimeStatus, mode: "connecting", message: "Connecting to booking event stream..." };
+  updateBookingRealtimePill();
+  const realtimeParams = new URLSearchParams({ access_token: state.token });
+  if (bookingRealtimeLastEventId) realtimeParams.set("lastEventId", bookingRealtimeLastEventId);
+  bookingRealtimeSource = new EventSource(withBasePath(`/operations/bookings/events?${realtimeParams.toString()}`));
+  bookingRealtimeSource.addEventListener("connected", (event) => {
+    const wasDisconnected = ["error", "disconnected"].includes(bookingRealtimeStatus.mode);
+    const previousSeenAt = bookingRealtimeLastSeenAt;
+    bookingRealtimeAuthRefreshAttempted = false;
+    if (bookingRealtimeTimer) clearInterval(bookingRealtimeTimer);
+    bookingRealtimeTimer = null;
+    bookingRealtimeStatus = { ...bookingRealtimeStatus, mode: "connected", connectedAt: new Date().toISOString(), message: "Booking event stream connected." };
+    try {
+      const data = JSON.parse(event.data || "{}");
+      bookingRealtimeLastSeenAt = data.connectedAt || new Date().toISOString();
+    } catch {
+      bookingRealtimeLastSeenAt = new Date().toISOString();
+    }
+    updateBookingRealtimePill();
+    renderSystemControlStatus();
+    if (wasDisconnected && previousSeenAt) {
+      bookingRealtimeLastSeenAt = previousSeenAt;
+      checkBookingRealtimeCatchup();
+    }
+  });
+  bookingRealtimeSource.addEventListener("booking_changed", (event) => {
+    try {
+      handleBookingRealtimeEvent(JSON.parse(event.data || "{}"));
+    } catch {
+      handleBookingRealtimeEvent({ type: "booking.changed", message: "Booking updated." });
+    }
+  });
+  bookingRealtimeSource.addEventListener("heartbeat", (event) => {
+    if (bookingRealtimeTimer) clearInterval(bookingRealtimeTimer);
+    bookingRealtimeTimer = null;
+    try {
+      const data = JSON.parse(event.data || "{}");
+      bookingRealtimeLastSeenAt = data.at || new Date().toISOString();
+    } catch {
+      bookingRealtimeLastSeenAt = new Date().toISOString();
+    }
+    bookingRealtimeStatus = { ...bookingRealtimeStatus, mode: "connected", message: "Heartbeat received." };
+    updateBookingRealtimePill();
+    renderSystemControlStatus();
+  });
+  bookingRealtimeSource.onerror = async () => {
+    bookingRealtimeStatus = { ...bookingRealtimeStatus, mode: "error", lastErrorAt: new Date().toISOString(), message: "Booking event stream disconnected." };
+    updateBookingRealtimePill();
+    renderSystemControlStatus();
+    if (bookingRealtimeAuthRefreshAttempted) return;
+    bookingRealtimeAuthRefreshAttempted = true;
+    try {
+      await refreshAdminSession();
+      bookingRealtimeStatus = { ...bookingRealtimeStatus, mode: "connecting", message: "Session refreshed. Reconnecting booking event stream..." };
+      updateBookingRealtimePill();
+      await startBookingRealtime(true);
+    } catch (error) {
+      clearAdminSession(error.message || "Session expired. Please login again.");
+    }
+  };
+  updateBookingBell();
+}
+
+async function openAssignBookingModal(serviceRequestId, label) {
+  await ensureAssistantMasterCache();
+  if (!cache.assistants.length) cache.assistants = (await safeApi(BASE_PATH+"/verification/assistants")).data || [];
+  const form = $("#assignBookingForm");
+  const booking = bookingRowsCache.find((item) => item.id === serviceRequestId) || {};
+  const pickerAssistants = bookingAssignableAssistants(booking);
+  form.reset();
+  form.elements.serviceRequestId.value = serviceRequestId;
+  form.elements.assistantId.value = "";
+  form.elements.reason.value = "Manual assignment from bookings page";
+  form.dataset.forceMultiTaskAssignment = "false";
+  $("#assignBookingAssistantList").innerHTML = bookingAssistantPickerHtml(pickerAssistants, booking);
+  $("#assignBookingModalAlert").classList.add("d-none");
+  $("#assignBookingModalAlert").textContent = "";
+  $("#assignBookingModal").classList.remove("d-none");
+}
+
+function legacyBookingQueueRow(booking, tab) {
+  if (tab === "assigned") return bookingAssignedQueueRow(booking);
+  const reference = bookingReference(booking);
+  const serviceInfo = bookingServiceInfo(booking);
+  const locations = bookingLocations(booking);
+  const paidText = booking.isPaid ? "Paid" : "Not Paid";
+  const paidClass = booking.isPaid ? "success" : "warning";
+  const showAssistant = tab !== "pending_assign";
+  return `<article class="booking-queue-row ${showAssistant ? "" : "without-assistant"}">
+    <div class="booking-queue-cell booking-reference-cell">
+      <button class="text-link strong" data-action="open-booking-detail" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(reference)}</button>
+      <span>${status(booking.statusCode)}</span>
+      ${bookingRiskBadge(booking)}
+    </div>
+    <div class="booking-queue-cell">
+      <b>${escapeHtml(bookingTypeLabel(booking))}</b>
+      <small>${escapeHtml(bookingStartAtText(booking))}</small>
+    </div>
+    <div class="booking-queue-cell">
+      <button class="text-link strong" data-action="open-booking-customer" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(booking.customerName || booking.customerCode || "-")}</button>
+      <small>${escapeHtml(booking.customerPhone || booking.customerEmail || "-")}</small>
+    </div>
+    <div class="booking-queue-cell">
+      ${bookingServiceInfoHtml(serviceInfo)}
+    </div>
+    <div class="booking-queue-cell">
+      <button class="btn btn-soft btn-xs" data-action="open-booking-locations" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(locations.length || 0)} location${locations.length === 1 ? "" : "s"}</button>
+      <small>${escapeHtml(bookingLocationSummary(locations))}</small>
+    </div>
+    <div class="booking-queue-cell booking-payment-cell">
+      <b>${money(booking.estimatedAmountPaise)}</b>
+      <small>${escapeHtml(booking.paymentType || "-")} · <span class="mini-badge ${paidClass}">${escapeHtml(paidText)}</span></small>
+    </div>
+    ${showAssistant ? `<div class="booking-queue-cell booking-assistant-cell">
+      ${bookingAssistantCard(booking)}
+    </div>` : ""}
+    <div class="booking-queue-cell booking-created-cell">
+      <b>${escapeHtml(formatDate(booking.createdAt))}</b>
+      ${["pending_assign", "assigned", "hold"].includes(tab) ? `<button class="btn btn-soft btn-xs" data-action="open-assign-booking" data-id="${escapeHtml(booking.id)}" data-label="${escapeHtml(booking.customerName || booking.customerCode || reference)}" type="button">Assign</button>` : ""}
+    </div>
+  </article>`;
+}
+
+function legacyBookingQueueHeader(tab) {
+  if (tab === "assigned") {
+    return `<div class="booking-queue-header assigned-row">
+      <span>Booking</span><span>Start</span><span>Customer</span><span>Service</span><span>Amount</span><span>Assistant</span><span>Assigned</span>
+    </div>`;
+  }
+  const showAssistant = tab !== "pending_assign";
+  return `<div class="booking-queue-header ${showAssistant ? "" : "without-assistant"}">
+    <span>Booking</span><span>Type</span><span>Customer</span><span>Service</span><span>Location</span><span>Amount</span>${showAssistant ? "<span>Assistant</span>" : ""}<span>Created</span>
+  </div>`;
+}
+
+function legacyBookingAssignedQueueRow(booking) {
+  const reference = bookingReference(booking);
+  const serviceInfo = bookingServiceInfo(booking);
+  const paidText = booking.isPaid ? "Paid" : "Not Paid";
+  const paidClass = booking.isPaid ? "success" : "warning";
+  return `<article class="booking-queue-row assigned-row">
+    <div class="booking-queue-cell booking-reference-cell">
+      <button class="text-link strong" data-action="open-booking-detail" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(reference)}</button>
+      <span>${status(booking.statusCode)}</span>
+      ${bookingRiskBadge(booking)}
+    </div>
+    <div class="booking-queue-cell">
+      <b>${escapeHtml(bookingStartAtText(booking))}</b>
+      <small>${escapeHtml(bookingTypeLabel(booking))}</small>
+    </div>
+    <div class="booking-queue-cell">
+      <button class="text-link strong" data-action="open-booking-customer" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(booking.customerName || booking.customerCode || "-")}</button>
+      <small>${escapeHtml(booking.customerPhone || booking.customerEmail || "-")}</small>
+    </div>
+    <div class="booking-queue-cell">
+      ${bookingServiceInfoHtml(serviceInfo)}
+    </div>
+    <div class="booking-queue-cell booking-payment-cell">
+      <b>${money(booking.estimatedAmountPaise)}</b>
+      <small>${escapeHtml(booking.paymentType || "-")} · <span class="mini-badge ${paidClass}">${escapeHtml(paidText)}</span></small>
+    </div>
+    <div class="booking-queue-cell booking-assistant-cell">
+      ${bookingAssignedAssistantMiniCard(booking)}
+    </div>
+    <div class="booking-queue-cell booking-created-cell">
+      <b>${escapeHtml(formatDate(booking.assignmentOfferedAt || booking.assignmentAssignedAt || booking.updatedAt || booking.createdAt))}</b>
+      <button class="btn btn-soft btn-xs" data-action="open-assign-booking" data-id="${escapeHtml(booking.id)}" data-label="${escapeHtml(booking.customerName || booking.customerCode || reference)}" type="button">Change</button>
+    </div>
+  </article>`;
+}
+
+function bookingQueueRow(booking, tab) {
+  return `<article class="booking-report-row ${bookingReportRowClass(tab)}">
+    ${bookingReportBookingCell(booking)}
+    ${bookingReportCustomerCell(booking)}
+    ${tab === "working" ? bookingReportWorkingCell(booking) : tab === "assigned" ? bookingReportAssistantCell(booking) : bookingReportServiceCell(booking)}
+    ${tab === "assigned" ? bookingReportServiceCell(booking) : tab === "working" ? bookingReportTaskStatusCell(booking) : bookingReportLocationsCell(booking)}
+    ${["pending_assign", "hold"].includes(tab) ? bookingReportUploadsNoteCell(booking) : tab === "assigned" ? bookingReportLocationsCell(booking) : bookingReportPaymentCell(booking)}
+    ${["pending_assign", "hold"].includes(tab) ? bookingReportPaymentCell(booking) : tab === "assigned" ? bookingReportPaymentCell(booking) : bookingReportAssistantCell(booking)}
+    ${bookingReportActionsCell(booking, tab)}
+  </article>`;
+}
+
+function bookingQueueHeader(tab) {
+  const headers = tab === "assigned"
+    ? ["Booking", "Customer", "Assistant", "Service(s)", "Locations", "Payment", "Action"]
+    : tab === "working"
+      ? ["Booking", "Customer", "Task Start", "Status", "Payment", "Assistant", "Action"]
+      : ["Booking", "Customer", "Service(s)", "Locations", "Uploads / Note", "Payment", "Action"];
+  return `<div class="booking-report-header ${bookingReportRowClass(tab)}">
+    ${headers.map((header) => `<span>${escapeHtml(header)}</span>`).join("")}
+  </div>`;
+}
+
+function bookingReportRowClass(tab) {
+  if (tab === "assigned") return "assigned-report-row";
+  if (tab === "working") return "working-report-row";
+  return "new-report-row";
+}
+
+function bookingReportBookingCell(booking = {}) {
+  const reference = bookingReference(booking);
+  const type = String(booking.bookingType || booking.metadata?.bookingType || "instant").toLowerCase();
+  const icon = type === "schedule" ? iconSvg("calendar") : iconSvg("zap");
+  return `<div class="booking-report-cell booking-report-booking">
+    <h3>${icon}<span>${escapeHtml(bookingTypeLabel(booking))}</span></h3>
+    <h4>${escapeHtml(bookingDurationAndStartText(booking))}</h4>
+    <span>${escapeHtml(bookingBookDayText(booking))}</span>
+    <span>Total completion ${escapeHtml(formatDurationMinutes(bookingTotalCompletionMinutes(booking)))}</span>
+    <button class="text-link" data-action="open-booking-detail" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(reference)}</button>
+    ${bookingRiskBadge(booking)}
+  </div>`;
+}
+
+function bookingReportCustomerCell(booking = {}) {
+  const name = booking.customerName || booking.customerCode || "Customer";
+  return `<div class="booking-report-cell booking-report-profile">
+    ${profileAvatar(booking.customerProfilePictureUrl, name)}
+    <div>
+      <button class="text-link strong" data-action="open-booking-customer" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(name)}</button>
+      <small>${escapeHtml(booking.customerPhone || booking.customerEmail || "-")}</small>
+    </div>
+  </div>`;
+}
+
+function bookingReportAssistantCell(booking = {}) {
+  if (!booking.assistantId) return `<div class="booking-report-cell"><span class="text-secondary">-</span></div>`;
+  return `<div class="booking-report-cell booking-report-assistant">${bookingAssignedAssistantMiniCard(booking)}</div>`;
+}
+
+function bookingReportServiceCell(booking = {}) {
+  return `<div class="booking-report-cell">${bookingServiceInfoHtml(bookingServiceInfo(booking))}</div>`;
+}
+
+function bookingReportLocationsCell(booking = {}) {
+  const locations = bookingLocations(booking);
+  return `<div class="booking-report-cell booking-report-locations">
+    <button class="btn btn-soft btn-xs" data-action="open-booking-locations" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(bookingLocationTitleSummary(locations))}</button>
+    <small>${escapeHtml(bookingLocationSummary(locations))}</small>
+  </div>`;
+}
+
+function bookingReportUploadsNoteCell(booking = {}) {
+  const uploads = bookingUploads(booking);
+  const note = booking.notes || booking.customerNotes || booking.metadata?.bookingDetailNote || "";
+  return `<div class="booking-report-cell booking-report-note">
+    <button class="btn btn-soft btn-xs" data-action="open-booking-uploads" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(uploads.length)} upload${uploads.length === 1 ? "" : "s"}</button>
+    ${note ? `<p>${escapeHtml(truncateText(note, 72))}${note.length > 72 ? ` <button class="text-link" data-action="open-booking-detail" data-id="${escapeHtml(booking.id)}" type="button">Read more</button>` : ""}</p>` : `<small>No note</small>`}
+  </div>`;
+}
+
+function bookingReportPaymentCell(booking = {}) {
+  const paidText = booking.isPaid ? "Paid" : "Due";
+  const paidClass = booking.isPaid ? "success" : "warning";
+  return `<div class="booking-report-cell booking-payment-cell">
+    <span class="mini-badge ${paidClass}">${escapeHtml(paidText)}</span>
+    <small>Mode: ${escapeHtml(booking.paymentType || "-")}</small>
+    <b>${money(booking.estimatedAmountPaise)}</b>
+  </div>`;
+}
+
+function bookingReportWorkingCell(booking = {}) {
+  const startAt = bookingTaskStartDate(booking);
+  const endAt = bookingTaskEndDate(booking);
+  return `<div class="booking-report-cell booking-working-cell">
+    <h4>${escapeHtml(startAt ? formatDate(startAt) : "-")}</h4>
+    <span class="booking-countdown" data-booking-countdown-end="${escapeHtml(endAt ? endAt.toISOString() : "")}">${escapeHtml(bookingTimeLeftText(endAt))}</span>
+  </div>`;
+}
+
+function bookingReportTaskStatusCell(booking = {}) {
+  return `<div class="booking-report-cell">
+    <span>${status("Working")}</span>
+    <small>${escapeHtml(bookingWorkingStatusSummary(booking))}</small>
+  </div>`;
+}
+
+function bookingReportActionsCell(booking = {}, tab = "pending_assign") {
+  const reference = bookingReference(booking);
+  const assignLabel = tab === "assigned" ? "Switch" : "Assign";
+  const showAssign = ["pending_assign", "assigned", "hold"].includes(tab);
+  const showShare = tab === "assigned";
+  return `<div class="booking-report-cell booking-action-cell">
+    ${["pending_assign", "assigned", "working", "hold"].includes(tab) ? `<button class="btn btn-outline-danger btn-xs" data-action="booking-cancel-confirm" data-id="${escapeHtml(booking.id)}" data-label="${escapeHtml(reference)}" type="button">Cancel</button>` : ""}
+    ${["pending_assign", "assigned"].includes(tab) ? `<button class="btn btn-soft btn-xs" data-action="booking-change-slot" data-id="${escapeHtml(booking.id)}" type="button">Change Slot</button>` : ""}
+    ${showAssign ? `<button class="btn btn-primary btn-xs" data-action="open-assign-booking" data-id="${escapeHtml(booking.id)}" data-label="${escapeHtml(booking.customerName || booking.customerCode || reference)}" type="button">${assignLabel}</button>` : ""}
+    ${showShare ? `<button class="btn btn-soft btn-xs" data-action="booking-share-link" data-id="${escapeHtml(booking.id)}" type="button">Share</button>` : ""}
+  </div>`;
+}
+
+function startBookingWorkingCountdown() {
+  if (bookingWorkingCountdownTimer) clearInterval(bookingWorkingCountdownTimer);
+  const tick = () => {
+    document.querySelectorAll("[data-booking-countdown-end]").forEach((element) => {
+      const endAt = element.dataset.bookingCountdownEnd ? new Date(element.dataset.bookingCountdownEnd) : null;
+      element.textContent = bookingTimeLeftText(endAt);
+    });
+  };
+  tick();
+  if (state.section === "bookings" && bookingActiveTab === "working") bookingWorkingCountdownTimer = setInterval(tick, 1000);
+}
+
+function bookingRiskBadge(booking = {}) {
+  const risk = String(booking.riskStatus || "").toLowerCase();
+  if (!risk || risk === "on_time") return "";
+  const labelMap = {
+    at_risk: "At Risk",
+    delayed: "Delayed",
+    needs_manual_action: "Needs Manual",
+    closed: "Closed"
+  };
+  const tone = risk === "delayed" || risk === "needs_manual_action" ? "danger" : "warning";
+  return `<span class="mini-badge ${tone}" title="Supply: ${escapeHtml(booking.supplyStatus || "-")}">${escapeHtml(labelMap[risk] || risk.replace(/_/g, " "))}</span>`;
+}
+
+function bookingAssignedAssistantMiniCard(booking) {
+  if (!booking.assistantId) return `<span class="text-secondary">-</span>`;
+  const assistant = bookingAssistantFromRow(booking);
+  const name = assistant.displayName || assistant.assistantCode || "Assistant";
+  const lifecycle = assistantProfileLifecycle(assistant);
+  return `<button class="booking-assistant-card compact" data-action="open-assigned-assistant-profile" data-id="${escapeHtml(assistant.id)}" type="button" title="View assistant details">
+    <div class="booking-assistant-photo-wrap">
+      ${profileAvatar(assistant.profilePictureUrl, name)}
+      <span class="assistant-status-capsule ${assistantStatusDotClass(lifecycle.verificationStatus)}">${escapeHtml(String(lifecycle.verificationStatus || "verifying").replace(/_/g, " "))}</span>
+    </div>
+    <div class="booking-assistant-main">
+      <b>${escapeHtml(name)}</b>
+      <span>${escapeHtml(assistant.phone || assistant.email || "-")}</span>
+      <small>${escapeHtml(assistant.assistantCode || "-")}</small>
+    </div>
+  </button>`;
+}
+
+function bookingAssistantCard(booking) {
+  if (!booking.assistantId) return `<span class="text-secondary">-</span>`;
+  const assistant = bookingAssistantFromRow(booking);
+  const name = assistant.displayName || assistant.assistantCode || "Assistant";
+  const lifecycle = assistantProfileLifecycle(assistant);
+  const clusterText = [assistant.currentClusterName, assistant.currentZoneName, assistant.currentCityName].filter(Boolean).join(" / ");
+  return `<button class="booking-assistant-card" data-action="open-assigned-assistant-profile" data-id="${escapeHtml(assistant.id)}" type="button" title="View assistant details">
+    <div class="booking-assistant-photo-wrap">
+      ${profileAvatar(assistant.profilePictureUrl, name)}
+      <span class="assistant-status-capsule ${assistantStatusDotClass(lifecycle.verificationStatus)}">${escapeHtml(String(lifecycle.verificationStatus || "verifying").replace(/_/g, " "))}</span>
+    </div>
+    <div class="booking-assistant-main">
+      <b>${escapeHtml(name)}</b>
+      <span>${escapeHtml(assistant.phone || assistant.email || "-")}</span>
+      <small>${escapeHtml(assistant.assistantCode || "-")}</small>
+      <small>${escapeHtml(clusterText || "-")}</small>
+      <span class="assistant-login-capsule ${assistantIsLoggedIn(assistant) ? "logged-in" : "logged-out"}">${assistantIsLoggedIn(assistant) ? "Logged-In" : "Logged-Out"}</span>
+    </div>
+    <div class="booking-assistant-status">
+      ${assistantStatusLabel(assistant)}
+      <small>${escapeHtml(assistantTodayOnlineLabel(assistant))}</small>
+      <small>Working ${escapeHtml(Number(booking.assistantWorkingTasks || 0))} task${Number(booking.assistantWorkingTasks || 0) === 1 ? "" : "s"}</small>
+    </div>
+  </button>`;
+}
+
+function bookingAssistantFromRow(booking) {
+  return {
+    id: booking.assistantId,
+    displayName: booking.assistantName,
+    phone: booking.assistantPhone,
+    email: booking.assistantEmail,
+    assistantCode: booking.assistantCode,
+    status: booking.assistantStatus,
+    availabilityStatus: booking.assistantAvailabilityStatus,
+    isLoggedIn: booking.assistantIsLoggedIn,
+    lastLoginAt: booking.assistantLastLoginAt,
+    todayOnlineSeconds: Number(booking.assistantTodayOnlineSeconds || 0),
+    todayOnlineSyncedAt: new Date().toISOString(),
+    currentClusterId: booking.assistantClusterId,
+    currentClusterName: booking.assistantClusterName,
+    currentZoneName: booking.assistantZoneName,
+    currentCityName: booking.assistantCityName,
+    profilePictureUrl: booking.assistantProfilePictureUrl,
+    taskStats: { working: Number(booking.assistantWorkingTasks || 0) },
+    documents: []
+  };
+}
+
+function bookingReference(booking = {}) {
+  return booking.requestNumber || booking.id || "Booking";
+}
+
+function bookingTypeLabel(booking = {}) {
+  const type = String(booking.bookingType || booking.metadata?.bookingType || "instant");
+  return type.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function bookingStartAtText(booking = {}) {
+  if (booking.scheduledAt) return formatDate(booking.scheduledAt);
+  const date = booking.scheduledDate || booking.metadata?.scheduledDate;
+  const time = booking.scheduledTime || booking.metadata?.scheduledTime;
+  if (date || time) return [date, bookingMasterFormatTime ? bookingMasterFormatTime(time) : time].filter(Boolean).join(" ");
+  return String(booking.bookingType || booking.metadata?.bookingType || "").toLowerCase() === "schedule" ? "Schedule pending" : "Instant";
+}
+
+function bookingReportStartDate(booking = {}) {
+  if (booking.scheduledAt) {
+    const scheduled = new Date(booking.scheduledAt);
+    if (!Number.isNaN(scheduled.getTime())) return scheduled;
+  }
+  const date = booking.scheduledDate || booking.metadata?.scheduledDate;
+  const time = booking.scheduledTime || booking.metadata?.scheduledTime;
+  if (date && time) {
+    const scheduled = new Date(`${date}T${String(time).slice(0, 5)}:00`);
+    if (!Number.isNaN(scheduled.getTime())) return scheduled;
+  }
+  const created = new Date(booking.createdAt || Date.now());
+  return Number.isNaN(created.getTime()) ? new Date() : created;
+}
+
+function bookingDurationAndStartText(booking = {}) {
+  const duration = formatDurationMinutes(bookingTotalCompletionMinutes(booking));
+  const type = String(booking.bookingType || booking.metadata?.bookingType || "").toLowerCase();
+  if (type === "schedule" || booking.scheduledAt || booking.scheduledDate || booking.metadata?.scheduledDate) {
+    return `${duration} / ${formatDate(bookingReportStartDate(booking))}`;
+  }
+  return `${duration} / Instant`;
+}
+
+function bookingBookDayText(booking = {}) {
+  const date = bookingReportStartDate(booking);
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  const key = (value) => value.toISOString().slice(0, 10);
+  if (key(date) === key(today)) return "Book - Today";
+  if (key(date) === key(tomorrow)) return "Book - Tomorrow";
+  return `Book - ${new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "long", year: "numeric" }).format(date)}`;
+}
+
+function bookingTotalCompletionMinutes(booking = {}) {
+  const cartItems = Array.isArray(booking.metadata?.cartItems) ? booking.metadata.cartItems : [];
+  const total = cartItems.reduce((sum, item) => sum + Number(item.durationMinutes || item.duration || 0), 0);
+  return Math.max(1, Math.round(Number(total || booking.durationMinutes || booking.metadata?.durationMinutes || 30)));
+}
+
+function formatDurationMinutes(minutes) {
+  const total = Math.max(0, Math.round(Number(minutes || 0)));
+  if (total < 60) return `${total} mins`;
+  const hours = Math.floor(total / 60);
+  const mins = total % 60;
+  return mins ? `${hours} hr ${mins} mins` : `${hours} hr${hours === 1 ? "" : "s"}`;
+}
+
+function truncateText(value, maxLength = 80) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 3))}...` : text;
+}
+
+function bookingTaskStartDate(booking = {}) {
+  const value = booking.assignmentAssignedAt || booking.metadata?.taskStartedAt || booking.updatedAt || bookingReportStartDate(booking);
+  const date = new Date(value || Date.now());
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function bookingTaskEndDate(booking = {}) {
+  const expected = booking.metadata?.expectedFreeAt || booking.assistantNextAvailableAt;
+  if (expected) {
+    const expectedDate = new Date(expected);
+    if (!Number.isNaN(expectedDate.getTime())) return expectedDate;
+  }
+  const start = bookingTaskStartDate(booking);
+  if (!start) return null;
+  return new Date(start.getTime() + bookingTotalCompletionMinutes(booking) * 60_000);
+}
+
+function bookingTimeLeftText(endAt) {
+  if (!endAt || Number.isNaN(endAt.getTime())) return "Time left -";
+  const seconds = Math.max(0, Math.floor((endAt.getTime() - Date.now()) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  if (hours) return `Time left ${hours}h ${minutes}m ${secs}s`;
+  if (minutes) return `Time left ${minutes}m ${secs}s`;
+  return `Time left ${secs}s`;
+}
+
+function bookingWorkingStatusSummary(booking = {}) {
+  const cartItems = Array.isArray(booking.metadata?.cartItems) ? booking.metadata.cartItems : [];
+  const total = Math.max(1, cartItems.length || Number(booking.metadata?.totalTasks || 1));
+  const finished = Number(booking.metadata?.finishedTasks || booking.metadata?.completedTasks || 0);
+  const working = Number(booking.metadata?.workingTasks || (booking.statusCode === "in_progress" ? 1 : 0));
+  const pending = Math.max(0, total - finished - working);
+  return `${total} Task${total === 1 ? "" : "s"} : ${finished} Finish - ${working} Working - ${pending} Pending`;
+}
+
+function bookingServiceCategoryText(booking = {}) {
+  const cartItems = Array.isArray(booking.metadata?.cartItems) ? booking.metadata.cartItems : [];
+  const labels = cartItems.map((item) => item.categoryName || item.serviceName || item.name).filter(Boolean);
+  if (labels.length) return [...new Set(labels)].join(", ");
+  return [booking.serviceName, booking.categoryName].filter(Boolean).join(" / ");
+}
+
+function bookingServiceInfo(booking = {}) {
+  const cartItems = Array.isArray(booking.metadata?.cartItems) ? booking.metadata.cartItems : [];
+  const serviceNames = new Set([booking.cartServiceNames, booking.serviceName, booking.metadata?.serviceName, ...cartItems.map((item) => item.serviceName)].filter(Boolean));
+  const categoryNames = new Set([
+    booking.cartCategoryNames,
+    booking.categoryName,
+    booking.metadata?.categoryName,
+    ...cartItems.map((item) => (item.categoryId ? item.categoryName || item.name : "")).filter(Boolean)
+  ].filter(Boolean));
+  const metadataStoreNames = Array.isArray(booking.cartStoreNames)
+    ? booking.cartStoreNames
+    : String(booking.cartStoreNames || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const storeNames = new Set([...metadataStoreNames, ...cartItems.map((item) => item.storeName || item.store?.name || item.storeLabel).filter(Boolean)]);
+  const selectedItems = new Set(cartItems.map((item) => {
+    if (item.storeId || item.categoryId) return "";
+    return item.selectedItemName || item.itemName || item.categoryName || item.name || (item.priceType === "time" ? "Time service" : "");
+  }).filter(Boolean));
+  return {
+    serviceName: [...serviceNames].join(", ") || "-",
+    categoryName: [...categoryNames].join(", ") || "",
+    selectedItemName: [...selectedItems].join(", ") || "",
+    stores: [...storeNames]
+  };
+}
+
+function bookingServiceInfoHtml(info = {}) {
+  const storesText = (info.stores || []).length ? info.stores.join(", ") : "";
+  const detailText = info.categoryName || (!storesText ? info.selectedItemName : "") || "-";
+  return `<div class="booking-service-info">
+    <b>${escapeHtml(info.serviceName || "-")}</b>
+    <small>${escapeHtml(detailText)}</small>
+    ${storesText ? `<small>${escapeHtml(storesText)}</small>` : ""}
+  </div>`;
+}
+
+function bookingLocations(booking = {}) {
+  if (Array.isArray(booking.locations) && booking.locations.length) return booking.locations;
+  const stops = booking.metadata?.bookingLocations?.stops;
+  if (Array.isArray(stops)) {
+    return stops.map((stop, index) => ({
+      sequence: index + 1,
+      name: stop.label || `Address ${index + 1}`,
+      address: stop.address,
+      latitude: stop.latitude,
+      longitude: stop.longitude,
+      metadata: stop
+    }));
+  }
+  return [];
+}
+
+function bookingLocationSummary(locations = []) {
+  const first = locations[0];
+  if (!first) return "-";
+  return first.address || first.name || "Selected location";
+}
+
+function bookingLocationTitleSummary(locations = []) {
+  if (!locations.length) return "No location";
+  return locations
+    .map((location, index) => `${location.sequence || index + 1} ${location.name || location.locationType || `Location ${index + 1}`}`)
+    .join(" - ");
+}
+
+function bookingLocationMapUrl(location = {}) {
+  if (location.latitude && location.longitude) return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${location.latitude},${location.longitude}`)}`;
+  if (location.address) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(location.address)}`;
+  return "";
+}
+
+function bookingUploads(booking = {}) {
+  const uploads = [];
+  const seen = new Set();
+  const addUpload = (item = {}) => {
+    const upload = normalizeBookingAttachment({
+      label: item.label || item.originalName || item.name || "Upload",
+      originalName: item.originalName || item.label || item.name || "Upload",
+      mimeType: item.mimeType,
+      type: item.type,
+      url: item.url || item.previewUrl,
+      previewUrl: item.previewUrl || item.url
+    });
+    const key = upload.url || upload.previewUrl;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    uploads.push(upload);
+  };
+  (Array.isArray(booking.uploads) ? booking.uploads : []).forEach(addUpload);
+  (Array.isArray(booking.metadata?.bookingAttachments) ? booking.metadata.bookingAttachments : []).forEach(addUpload);
+  if (booking.metadata?.bookingDetailImageUrl) addUpload({ label: "Booking image", url: booking.metadata.bookingDetailImageUrl, type: "image" });
+  if (Array.isArray(booking.metadata?.uploadedImageUrls)) {
+    booking.metadata.uploadedImageUrls.forEach((url, index) => addUpload({ label: `Image ${index + 1}`, url, type: "image" }));
+  }
+  if (Array.isArray(booking.metadata?.uploadedVideoUrls)) {
+    booking.metadata.uploadedVideoUrls.forEach((url, index) => addUpload({ label: `Video ${index + 1}`, url, type: "video" }));
+  }
+  if (Array.isArray(booking.metadata?.uploadedDocumentUrls)) {
+    booking.metadata.uploadedDocumentUrls.forEach((url, index) => addUpload({ label: `Document ${index + 1}`, url, type: bookingAttachmentType("", url) }));
+  }
+  return uploads;
+}
+
+function bookingUploadPreviewHtml(upload = {}) {
+  const item = normalizeBookingAttachment(upload);
+  const title = item.label || item.originalName || "Upload";
+  if (item.type === "image") {
+    return `<button class="image-thumb-button booking-upload-thumb" data-action="view-image" data-url="${escapeHtml(item.previewUrl)}" data-title="${escapeHtml(title)}" type="button"><img src="${escapeHtml(withBasePath(item.previewUrl))}" alt="${escapeHtml(title)}"></button>`;
+  }
+  return `<button class="booking-upload-thumb booking-file-thumb ${escapeHtml(item.type)}" data-action="preview-booking-upload" data-url="${escapeHtml(item.previewUrl)}" data-title="${escapeHtml(title)}" data-type="${escapeHtml(item.type)}" data-mime-type="${escapeHtml(item.mimeType || "")}" type="button">
+    <span>${escapeHtml(bookingAttachmentIcon(item.type))}</span>
+    <small>${escapeHtml(title)}</small>
+  </button>
+  <a class="btn btn-soft btn-xs" href="${escapeHtml(item.previewUrl)}" target="_blank" rel="noreferrer">Open ${item.type === "video" ? "Video" : "Document"}</a>`;
+}
+
+function bookingInfoModal(kind, title, body) {
+  $("#bookingInfoModalKind").textContent = kind;
+  $("#bookingInfoModalTitle").textContent = title;
+  $("#bookingInfoModalBody").innerHTML = body;
+  $("#bookingInfoModal").classList.remove("d-none");
+}
+
+function closeBookingInfoModal() {
+  $("#bookingInfoModal")?.classList.add("d-none");
+}
+
+function bookingById(id) {
+  return bookingRowsCache.find((booking) => booking.id === id) || null;
+}
+
+function legacyOpenBookingDetailModal(id) {
+  const booking = bookingById(id);
+  if (!booking) return;
+  const locations = bookingLocations(booking);
+  const uploads = bookingUploads(booking);
+  bookingInfoModal("Booking Detail", bookingReference(booking), `<div class="booking-info-grid">
+    ${bookingInfoItem("Status", status(booking.statusCode))}
+    ${bookingInfoItem("Booking Type", bookingTypeLabel(booking))}
+    ${bookingInfoItem("Start At", bookingStartAtText(booking))}
+    ${bookingInfoItem("Customer", `${escapeHtml(booking.customerName || "-")}<br><small>${escapeHtml(booking.customerPhone || booking.customerEmail || "-")}</small>`)}
+    ${bookingInfoItem("Service / Categories", escapeHtml(bookingServiceCategoryText(booking) || "-"))}
+    ${bookingInfoItem("Locations", `${locations.length} selected`)}
+    ${bookingInfoItem("Uploads", `${uploads.length}`)}
+    ${bookingInfoItem("Note", escapeHtml(booking.notes || booking.customerNotes || booking.metadata?.bookingDetailNote || "-"))}
+    ${bookingInfoItem("Total Amount", money(booking.estimatedAmountPaise))}
+    ${bookingInfoItem("Payment", `${escapeHtml(booking.paymentType || "-")} · ${booking.isPaid ? "Paid" : "Not Paid"}`)}
+    ${bookingInfoItem("Created", formatDate(booking.createdAt))}
+  </div>`);
+}
+
+function openBookingCustomerModal(id) {
+  const booking = bookingById(id);
+  if (!booking) return;
+  bookingInfoModal("Customer Detail", booking.customerName || booking.customerCode || "Customer", `<div class="booking-info-grid">
+    ${bookingInfoItem("Name", escapeHtml(booking.customerName || "-"))}
+    ${bookingInfoItem("Mobile Number", escapeHtml(booking.customerPhone || "-"))}
+    ${bookingInfoItem("Email", escapeHtml(booking.customerEmail || "-"))}
+    ${bookingInfoItem("Customer Code", escapeHtml(booking.customerCode || "-"))}
+    ${bookingInfoItem("Customer ID", escapeHtml(booking.customerId || "-"))}
+  </div>`);
+}
+
+function legacyOpenBookingLocationsModal(id) {
+  const booking = bookingById(id);
+  if (!booking) return;
+  const rows = bookingLocations(booking).map((location, index) => `<article class="booking-location-card">
+    <b>Address ${escapeHtml(location.sequence || index + 1)}</b>
+    <span>${escapeHtml(location.name || location.locationType || "Location")}</span>
+    <p>${escapeHtml(location.address || "-")}</p>
+    <small>${[location.latitude, location.longitude].filter(Boolean).map(escapeHtml).join(", ")}</small>
+  </article>`).join("");
+  bookingInfoModal("Locations", bookingReference(booking), rows || `<div class="empty-state">No locations found.</div>`);
+}
+
+function openBookingUploadsModal(id) {
+  const booking = bookingById(id);
+  if (!booking) return;
+  const rows = bookingUploads(booking).map((upload) => `<article class="booking-upload-card">
+    <b>${escapeHtml(upload.label || "Upload")}</b>
+    ${bookingUploadPreviewHtml(upload)}
+  </article>`).join("");
+  bookingInfoModal("Uploads", bookingReference(booking), `<div class="booking-upload-grid">${rows || `<div class="empty-state">No uploads found.</div>`}</div>`);
+}
+
+function openBookingDetailModal(id) {
+  const booking = bookingById(id);
+  if (!booking) return;
+  const locations = bookingLocations(booking);
+  const uploads = bookingUploads(booking);
+  bookingInfoModal("Booking Detail", bookingReference(booking), `<div class="booking-info-grid">
+    ${bookingInfoItem("Booking ID", escapeHtml(bookingReference(booking)))}
+    ${bookingInfoItem("Booking Created At", formatDate(booking.createdAt))}
+    ${bookingInfoItem("Booking Type", bookingTypeLabel(booking))}
+    ${bookingInfoItem("Booking Time / Slot", escapeHtml(bookingStartAtText(booking)))}
+    ${bookingInfoItem("Total Completion Time", escapeHtml(formatDurationMinutes(bookingTotalCompletionMinutes(booking))))}
+    ${bookingInfoItem("Status", status(booking.statusCode))}
+    ${bookingInfoItem("Customer", `${escapeHtml(booking.customerName || "-")}<br><small>${escapeHtml(booking.customerPhone || booking.customerEmail || "-")}</small>`)}
+    ${bookingInfoItem("Services / Categories", bookingServiceInfoHtml(bookingServiceInfo(booking)))}
+    ${bookingInfoItem("Locations", `${escapeHtml(bookingLocationTitleSummary(locations))}<br><button class="btn btn-soft btn-xs mt-1" data-action="open-booking-locations" data-id="${escapeHtml(booking.id)}" type="button">View locations</button>`)}
+    ${bookingInfoItem("Uploads", `${uploads.length}<br><button class="btn btn-soft btn-xs mt-1" data-action="open-booking-uploads" data-id="${escapeHtml(booking.id)}" type="button">View uploads</button>`)}
+    ${bookingInfoItem("Note", escapeHtml(booking.notes || booking.customerNotes || booking.metadata?.bookingDetailNote || "-"))}
+    ${bookingInfoItem("Payment Detail", `${booking.isPaid ? "Paid" : "Due"}<br><small>Mode: ${escapeHtml(booking.paymentType || "-")}</small><br><b>${money(booking.estimatedAmountPaise)}</b>`)}
+  </div>`);
+}
+
+function openBookingLocationsModal(id) {
+  const booking = bookingById(id);
+  if (!booking) return;
+  const rows = bookingLocations(booking).map((location, index) => `<article class="booking-location-card">
+    <b>${escapeHtml(location.sequence || index + 1)} ${escapeHtml(location.name || location.locationType || "Location")}</b>
+    <p>${escapeHtml(location.address || "-")}</p>
+    <small>${[location.latitude, location.longitude].filter(Boolean).map(escapeHtml).join(", ")}</small>
+    ${bookingLocationMapUrl(location) ? `<a class="btn btn-primary btn-xs" href="${escapeHtml(bookingLocationMapUrl(location))}" target="_blank" rel="noreferrer">View Map</a>` : ""}
+  </article>`).join("");
+  bookingInfoModal("Locations", bookingReference(booking), rows || `<div class="empty-state">No locations found.</div>`);
+}
+
+function openBookingCancelConfirmModal(id, label) {
+  const booking = bookingById(id);
+  if (!booking) return;
+  bookingInfoModal("Cancel Booking", `Cancel ${label || bookingReference(booking)}?`, `<div class="booking-cancel-confirm">
+    <p>Are you sure you want to cancel this booking? This action will move the booking to Cancelled and release any held assistant capacity.</p>
+    <label class="field-label">Cancellation reason</label>
+    <textarea id="bookingCancelReasonInput" class="form-control" rows="4" placeholder="Enter cancellation reason"></textarea>
+    <div class="booking-confirm-actions">
+      <button class="btn btn-outline-danger" data-action="execute-booking-cancel" data-id="${escapeHtml(id)}" type="button">Yes, Cancel</button>
+      <button class="btn btn-soft" data-action="close-booking-info-modal" type="button">No</button>
+    </div>
+  </div>`);
+}
+
+async function executeBookingCancel(id) {
+  const reason = $("#bookingCancelReasonInput")?.value?.trim();
+  if (!reason || reason.length < 3) {
+    showAlert("Enter cancellation reason.", "warning");
+    return;
+  }
+  await api(`/operations/bookings/${id}/cancel`, { method: "POST", body: JSON.stringify({ reason }) });
+  closeBookingInfoModal();
+  showAlert("Booking cancelled successfully.", "success");
+  await loadBookings(bookingActiveTab);
+}
+
+async function shareBookingTaskLink(id) {
+  const booking = bookingById(id);
+  if (!booking) return;
+  const origin = window.location.origin;
+  const customerLink = `${origin}${BASE_PATH}/customer?booking=${encodeURIComponent(id)}`;
+  const assistantLink = `${origin}${BASE_PATH}/assistant?booking=${encodeURIComponent(id)}`;
+  const message = `ZIGO task ${bookingReference(booking)}\nCustomer tracking: ${customerLink}\nAssistant task: ${assistantLink}`;
+  try {
+    await navigator.clipboard?.writeText(message);
+    showAlert("Task links copied. Share on WhatsApp with customer or assistant.", "success");
+  } catch {
+    bookingInfoModal("Share Task Link", bookingReference(booking), `<div class="booking-info-grid">
+      ${bookingInfoItem("Customer Track Link", `<a href="${escapeHtml(customerLink)}" target="_blank" rel="noreferrer">${escapeHtml(customerLink)}</a>`)}
+      ${bookingInfoItem("Assistant Task Link", `<a href="${escapeHtml(assistantLink)}" target="_blank" rel="noreferrer">${escapeHtml(assistantLink)}</a>`)}
+    </div>`);
+  }
+}
+
+function bookingInfoItem(label, value) {
+  return `<div class="booking-info-item"><label>${escapeHtml(label)}</label><div>${value}</div></div>`;
+}
+
+function bookingAssignableAssistants(booking = {}) {
+  const clusterId = booking.clusterId || "";
+  return (cache.assistantMasters || [])
+    .filter((assistant) => {
+      const assistantClusters = [
+        assistant.currentClusterId,
+        ...(assistant.clusters || []).filter((cluster) => cluster.isActive !== false).map((cluster) => cluster.id || cluster.clusterId)
+      ].filter(Boolean);
+      const clusterMatches = !clusterId || assistantClusters.includes(clusterId);
+      const lifecycle = assistantProfileLifecycle(assistant);
+      return clusterMatches && lifecycle.isActive !== false && assistantIsLoggedIn(assistant) && (assistantIsOnline(assistant) || assistantIsWorking(assistant));
+    })
+    .sort((left, right) => bookingAssistantPickerRank(left, booking) - bookingAssistantPickerRank(right, booking) || bookingAssistantSortName(left).localeCompare(bookingAssistantSortName(right)));
+}
+
+function bookingAssistantPickerHtml(assistants = [], booking = {}) {
+  if (!assistants.length) {
+    return `<div class="alert alert-warning">No online or working assistant found for ${escapeHtml(booking.clusterName || "selected cluster")}.</div>`;
+  }
+  return `<div class="booking-assistant-picker-title">Online / Working Assistants at ${escapeHtml(booking.clusterName || "selected cluster")}</div>
+    ${assistants.map((assistant) => {
+      const name = assistant.displayName || assistant.assistantCode || "Assistant";
+      const clusterText = [assistant.currentClusterName, assistant.currentZoneName, assistant.currentCityName].filter(Boolean).join(" / ");
+      const windowStatus = bookingAssistantWindowStatus(assistant, booking);
+      const isActuallyWorking = assistantIsWorking(assistant);
+      const todayStats = assistantTodayTaskStats(assistant);
+      const taskStartText = bookingAssistantTaskStartText(windowStatus.firstBookingStartAt);
+      const conflictMessage = `This assistant already has ${windowStatus.overlapCount || 1} task${windowStatus.overlapCount === 1 ? "" : "s"} during this booking time. ${taskStartText}. Do you still want to assign as a multi-task at the same time?`;
+      return `<button class="booking-assistant-picker-card ${isActuallyWorking ? "busy" : ""}" data-action="assign-booking-assistant-card" data-id="${escapeHtml(assistant.id)}" data-busy="${windowStatus.busy ? "true" : "false"}" data-conflict-message="${escapeHtml(conflictMessage)}" type="button">
+        <div class="booking-assistant-photo-wrap">
+          ${profileAvatar(assistant.profilePictureUrl, name)}
+          <span class="assistant-status-capsule ${assistantStatusDotClass(assistantProfileLifecycle(assistant).verificationStatus)}">${escapeHtml(String(assistantProfileLifecycle(assistant).verificationStatus || "verified").replace(/_/g, " "))}</span>
+        </div>
+        <div>
+          <b>${escapeHtml(name)}</b>
+          <span>${escapeHtml(assistant.phone || "-")}</span>
+          <small>${escapeHtml(assistant.assistantCode || "-")}</small>
+          <small>${escapeHtml(clusterText || "-")}</small>
+        </div>
+        <div class="booking-assistant-picker-status">
+          ${assistantStatusLabel(assistant)}
+          <small>${escapeHtml(assistantTodayOnlineLabel(assistant))}</small>
+          ${windowStatus.firstBookingStartAt ? `<small class="booking-next-available">${escapeHtml(taskStartText)}</small>` : ""}
+          <span class="btn ${isActuallyWorking ? "btn-warning" : "btn-primary"} btn-xs booking-card-assign-btn">${windowStatus.busy ? "Assign Anyway" : "Assign"}</span>
+        </div>
+        <div class="booking-assistant-task-metrics" aria-label="Today task counts">
+          <span><small>Today Assigned</small><b>${escapeHtml(todayStats.assigned)}</b></span>
+          <span><small>Today Pending</small><b>${escapeHtml(todayStats.pending)}</b></span>
+          <span><small>Today Completed</small><b>${escapeHtml(todayStats.completed)}</b></span>
+          <span><small>Today Cancelled</small><b>${escapeHtml(todayStats.cancelled)}</b></span>
+        </div>
+      </button>`;
+    }).join("")}`;
+}
+
+function bookingAssistantTaskStartText(value) {
+  const start = value ? new Date(value) : null;
+  if (!start || Number.isNaN(start.getTime())) return "Task start time not available";
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startDay = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+  const dayDiff = Math.round((startDay - today) / 86_400_000);
+  const timeText = new Intl.DateTimeFormat("en-IN", { hour: "numeric", minute: "2-digit", hour12: true }).format(start);
+  if (dayDiff <= 0) return `Task start in ${timeText}`;
+  if (dayDiff === 1) return `Task start in Tomorrow, ${timeText}`;
+  return `Task start in ${dayDiff} days, ${timeText}`;
+}
+
+function bookingWindowForAssignment(booking = {}) {
+  const durationMinutes = Math.max(1, Number(booking.durationMinutes || booking.metadata?.durationMinutes || 30));
+  const isSchedule = String(booking.bookingType || booking.metadata?.bookingType || "").toLowerCase() === "schedule";
+  let start = null;
+  if (isSchedule) {
+    const date = booking.scheduledDate || booking.metadata?.scheduledDate;
+    const time = booking.scheduledTime || booking.metadata?.scheduledTime;
+    if (date && time) start = new Date(`${date}T${time}:00`);
+  }
+  if (!start || Number.isNaN(start.getTime())) start = new Date(booking.createdAt || Date.now());
+  const expectedFreeAt = booking.metadata?.expectedFreeAt ? new Date(booking.metadata.expectedFreeAt) : null;
+  const end = expectedFreeAt && !Number.isNaN(expectedFreeAt.getTime())
+    ? expectedFreeAt
+    : new Date(start.getTime() + durationMinutes * 60_000);
+  return { start, end };
+}
+
+function bookingAssistantWindowStatus(assistant = {}, booking = {}) {
+  const bookingWindow = bookingWindowForAssignment(booking);
+  const windows = Array.isArray(assistant.activeBookingWindows) ? assistant.activeBookingWindows : [];
+  let nextAvailableAt = assistant.nextAvailableAt ? new Date(assistant.nextAvailableAt) : null;
+  let firstBookingStartAt = null;
+  let busy = false;
+  let overlapCount = 0;
+  for (const windowItem of windows) {
+    if (windowItem.serviceRequestId && windowItem.serviceRequestId === booking.id) continue;
+    const start = windowItem.startAt ? new Date(windowItem.startAt) : null;
+    const end = windowItem.expectedFreeAt ? new Date(windowItem.expectedFreeAt) : null;
+    if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) continue;
+    if (!firstBookingStartAt || start.getTime() < firstBookingStartAt.getTime()) firstBookingStartAt = start;
+    if (bookingWindow.start < end && bookingWindow.end > start) {
+      busy = true;
+      overlapCount += 1;
+      nextAvailableAt = !nextAvailableAt || end.getTime() > nextAvailableAt.getTime() ? end : nextAvailableAt;
+    }
+  }
+  const validNextAvailableAt = nextAvailableAt && !Number.isNaN(nextAvailableAt.getTime()) ? nextAvailableAt : new Date();
+  if (!busy && validNextAvailableAt > bookingWindow.start) {
+    busy = true;
+    overlapCount = Math.max(overlapCount, 1);
+  }
+  return { busy, overlapCount, nextAvailableAt: validNextAvailableAt, firstBookingStartAt, bookingWindow };
+}
+
+function bookingAssistantPickerRank(assistant = {}, booking = {}) {
+  const status = bookingAssistantWindowStatus(assistant, booking);
+  if (status.busy) return 1_000_000_000_000 + status.nextAvailableAt.getTime();
+  return bookingAssistantFirstOnlineTime(assistant).getTime();
+}
+
+function bookingAssistantFirstOnlineTime(assistant = {}) {
+  const values = [assistant.onlineStartedAt, assistant.availabilityUpdatedAt, assistant.lastLoginAt, assistant.createdAt]
+    .map((value) => value ? new Date(value) : null)
+    .filter((value) => value && !Number.isNaN(value.getTime()));
+  return values[0] || new Date(8640000000000000);
+}
+
+function bookingAssistantSortName(assistant = {}) {
+  return String(assistant.displayName || assistant.assistantCode || assistant.phone || assistant.id || "");
+}
+
+const bookingMasterAssistantWidgetStorageKey = "zigoBookingMasterAssistantWidgetPosition";
+
+function bookingMasterAssistantWidgetPosition() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(bookingMasterAssistantWidgetStorageKey) || "null");
+    if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) return saved;
+  } catch (error) {
+    // Ignore a bad stored position and use the default.
+  }
+  return { left: Math.max(24, window.innerWidth - 430), top: 132 };
+}
+
+function setBookingMasterAssistantWidgetPosition(left, top) {
+  const widget = $("#bookingMasterAssistantWidget");
+  if (!widget) return;
+  const width = widget.offsetWidth || 360;
+  const height = widget.offsetHeight || 54;
+  const next = {
+    left: Math.max(10, Math.min(window.innerWidth - Math.min(width, window.innerWidth) - 10, Math.round(left))),
+    top: Math.max(10, Math.min(window.innerHeight - Math.min(height, window.innerHeight) - 10, Math.round(top)))
+  };
+  widget.style.left = `${next.left}px`;
+  widget.style.top = `${next.top}px`;
+  widget.style.right = "auto";
+  localStorage.setItem(bookingMasterAssistantWidgetStorageKey, JSON.stringify(next));
+}
+
+function bookingMasterAssistantClusterId() {
+  return bookingMasterServiceability?.cluster?.clusterId || bookingMasterSelectedLocation?.clusterId || "";
+}
+
+function bookingMasterAssistantClusterName() {
+  if (bookingMasterAssistantWidgetClusterIds.includes("all")) return "All Clusters";
+  const names = bookingMasterAssistantWidgetClusterIds
+    .map((id) => cache.clusters.find((cluster) => cluster.id === id)?.name || cache.assistantMasters.find((assistant) => assistant.currentClusterId === id)?.currentClusterName)
+    .filter(Boolean);
+  if (names.length === 1) return names[0];
+  if (names.length > 1) return `${names.length} clusters`;
+  return bookingMasterServiceability?.cluster?.name || bookingMasterSelectedLocation?.clusterName || "All Clusters";
+}
+
+function bookingMasterAccessibleAssistantClusters() {
+  const clusterMap = new Map();
+  for (const cluster of cache.clusters || []) {
+    if (cluster?.id) clusterMap.set(cluster.id, cluster.name || cluster.code || cluster.id);
+  }
+  for (const assistant of cache.assistantMasters || []) {
+    if (assistant.currentClusterId) clusterMap.set(assistant.currentClusterId, assistant.currentClusterName || clusterMap.get(assistant.currentClusterId) || assistant.currentClusterId);
+    for (const cluster of assistant.clusters || []) {
+      const id = cluster.id || cluster.clusterId;
+      if (id) clusterMap.set(id, cluster.clusterName || cluster.name || clusterMap.get(id) || id);
+    }
+  }
+  return [...clusterMap.entries()]
+    .map(([id, name]) => ({ id, name }))
+    .sort((left, right) => String(left.name).localeCompare(String(right.name)));
+}
+
+function bookingMasterAssistantClusterMatches(assistant = {}) {
+  const selectedClusters = bookingMasterAssistantWidgetClusterIds.includes("all")
+    ? []
+    : bookingMasterAssistantWidgetClusterIds.filter(Boolean);
+  if (!selectedClusters.length) return true;
+  const assistantClusters = [
+    assistant.currentClusterId,
+    ...(assistant.clusters || []).filter((cluster) => cluster.isActive !== false).map((cluster) => cluster.id || cluster.clusterId)
+  ].filter(Boolean);
+  return selectedClusters.some((clusterId) => assistantClusters.includes(clusterId));
+}
+
+function bookingMasterAssistantWidgetClusterDropdownHtml() {
+  const clusters = bookingMasterAccessibleAssistantClusters();
+  const selected = new Set(bookingMasterAssistantWidgetClusterIds.length ? bookingMasterAssistantWidgetClusterIds : ["all"]);
+  const selectedText = selected.has("all") ? "All Clusters" : bookingMasterAssistantClusterName();
+  const optionHtml = [
+    { id: "all", name: "All Clusters" },
+    ...clusters
+  ].map((cluster) => {
+    const checked = selected.has("all") ? cluster.id === "all" : selected.has(cluster.id);
+    return `<button class="booking-master-assistant-cluster-option ${checked ? "selected" : ""}" data-action="booking-master-assistant-cluster-option" data-cluster-id="${escapeHtml(cluster.id)}" type="button">
+      <span class="booking-master-assistant-cluster-check">${checked ? "Y" : ""}</span>
+      <span>${escapeHtml(cluster.name)}</span>
+    </button>`;
+  }).join("");
+  return `<div class="booking-master-assistant-cluster-dropdown">
+    <button class="booking-master-assistant-cluster-button" data-action="booking-master-assistant-cluster-toggle" type="button" aria-expanded="${bookingMasterAssistantWidgetClusterDropdownOpen ? "true" : "false"}">
+      <span>${escapeHtml(selectedText)}</span>
+      ${iconSvg("chevron-down")}
+    </button>
+    ${bookingMasterAssistantWidgetClusterDropdownOpen ? `<div class="booking-master-assistant-cluster-menu">${optionHtml}</div>` : ""}
+  </div>`;
+}
+
+function bookingMasterAssistantWidgetRows() {
+  const assistants = (cache.assistantMasters || []).filter(bookingMasterAssistantClusterMatches);
+  const countFor = (tab) => assistants.filter((assistant) => bookingMasterAssistantWidgetTabMatches(assistant, tab)).length;
+  const filtered = assistants
+    .filter((assistant) => bookingMasterAssistantWidgetTabMatches(assistant, bookingMasterAssistantWidgetTab))
+    .sort((left, right) => bookingMasterAssistantWidgetRank(left) - bookingMasterAssistantWidgetRank(right) || bookingAssistantSortName(left).localeCompare(bookingAssistantSortName(right)));
+  return { assistants, filtered, countFor };
+}
+
+function bookingMasterAssistantWidgetRank(assistant = {}) {
+  if (assistantIsOnline(assistant) && !assistantIsWorking(assistant)) return bookingAssistantFirstOnlineTime(assistant).getTime();
+  if (assistantIsWorking(assistant)) {
+    const next = assistant.nextAvailableAt ? new Date(assistant.nextAvailableAt) : null;
+    return 1_000_000_000_000 + (next && Number.isFinite(next.getTime()) ? next.getTime() : 0);
+  }
+  if (assistantIsLoggedIn(assistant)) return 2_000_000_000_000 + bookingAssistantFirstOnlineTime(assistant).getTime();
+  return 3_000_000_000_000 + bookingAssistantFirstOnlineTime(assistant).getTime();
+}
+
+function bookingMasterAssistantWidgetTabMatches(assistant = {}, tab = "all") {
+  if (tab === "online") return assistantIsLoggedIn(assistant) && assistantIsOnline(assistant) && !assistantIsWorking(assistant);
+  if (tab === "working") return assistantIsWorking(assistant);
+  if (tab === "offline") return assistantIsLoggedIn(assistant) && !assistantIsOnline(assistant) && !assistantIsWorking(assistant);
+  if (tab === "logged-out") return !assistantIsLoggedIn(assistant);
+  return true;
+}
+
+function bookingMasterAssistantFreeText(assistant = {}) {
+  const stats = assistantTaskStats(assistant);
+  if (assistantIsWorking(assistant)) {
+    const next = assistant.nextAvailableAt ? new Date(assistant.nextAvailableAt) : null;
+    if (next && Number.isFinite(next.getTime())) return `Free ${formatDate(next)}`;
+    return `Working ${stats.working} task${stats.working === 1 ? "" : "s"}`;
+  }
+  if (assistantIsOnline(assistant)) return "Free now";
+  return assistantIsLoggedIn(assistant) ? "Offline" : "Logged-Out";
+}
+
+function bookingMasterAssistantWidgetRowHtml(assistant = {}) {
+  const name = assistant.displayName || assistant.assistantCode || "Assistant";
+  const clusterText = [assistant.currentClusterName, assistant.currentZoneName, assistant.currentCityName].filter(Boolean).join(" / ");
+  const stats = assistantTaskStats(assistant);
+  return `<button class="booking-master-assistant-widget-row" data-action="booking-master-assistant-profile" data-id="${escapeHtml(assistant.id || "")}" type="button">
+    <div class="booking-master-assistant-widget-photo">
+      ${profileAvatar(assistant.profilePictureUrl, name)}
+      <span class="assistant-status-capsule ${assistantStatusDotClass(assistantProfileLifecycle(assistant).verificationStatus)}">${escapeHtml(String(assistantProfileLifecycle(assistant).verificationStatus || "verifying").replace(/_/g, " "))}</span>
+    </div>
+    <div class="booking-master-assistant-widget-main">
+      <b>${escapeHtml(name)}</b>
+      <span>${escapeHtml(assistant.phone || assistant.email || "-")}</span>
+      <small>${escapeHtml(assistant.assistantCode || "-")}</small>
+      <em>${escapeHtml(assistantIsLoggedIn(assistant) ? "Logged-In" : "Logged-Out")}</em>
+    </div>
+    <div class="booking-master-assistant-widget-status">
+      ${assistantStatusLabel(assistant)}
+      <small>${escapeHtml(assistantTodayOnlineLabel(assistant))}</small>
+      <small>Working ${escapeHtml(stats.working)} task${stats.working === 1 ? "" : "s"}</small>
+      <em>${escapeHtml(clusterText || bookingMasterAssistantFreeText(assistant))}</em>
+    </div>
+  </button>`;
+}
+
+function bookingMasterAssistantWidgetHtml() {
+  const { filtered, countFor } = bookingMasterAssistantWidgetRows();
+  const total = countFor("all");
+  const tabs = [["all", "All"], ["online", "Online"], ["working", "Working"], ["offline", "Offline"], ["logged-out", "Logged-Out"]];
+  return `<div class="booking-master-assistant-widget-shell">
+    ${bookingMasterAssistantWidgetExpanded ? `<div class="booking-master-assistant-widget-panel">
+      <div class="booking-master-assistant-widget-panel-head">
+        <div><span>Assistant Status</span><b>${escapeHtml(bookingMasterAssistantClusterName())}</b></div>
+        ${bookingMasterAssistantWidgetClusterDropdownHtml()}
+        <button class="booking-master-assistant-widget-close" data-action="booking-master-assistant-collapse" type="button" aria-label="Close Assistant panel">x</button>
+      </div>
+      <div class="booking-master-assistant-widget-tabs">
+        ${tabs.map(([value, label]) => `<button class="${bookingMasterAssistantWidgetTab === value ? "active" : ""}" data-action="booking-master-assistant-tab" data-tab="${escapeHtml(value)}" type="button">${escapeHtml(label)} <span>${escapeHtml(countFor(value))}</span></button>`).join("")}
+      </div>
+      <div class="booking-master-assistant-widget-list">
+        ${filtered.map(bookingMasterAssistantWidgetRowHtml).join("") || `<div class="empty-state">No assistants found for this tab.</div>`}
+      </div>
+    </div>` : ""}
+    <button class="booking-master-assistant-widget-launcher ${bookingMasterAssistantWidgetExpanded ? "open" : ""}" data-action="booking-master-assistant-toggle" type="button" aria-label="${bookingMasterAssistantWidgetExpanded ? "Close assistants" : "Open assistants"}">
+      ${bookingMasterAssistantWidgetExpanded ? `<span class="booking-master-assistant-widget-cross">x</span>` : `${iconSvg("user")}<span class="booking-master-assistant-widget-count">${escapeHtml(total)}</span>`}
+    </button>
+  </div>`;
+}
+
+async function refreshBookingMasterAssistantWidgetData() {
+  if (bookingMasterAssistantWidgetRefreshing) return;
+  bookingMasterAssistantWidgetRefreshing = true;
+  try {
+    const [assistantsPayload, clustersPayload] = await Promise.all([
+      safeApi(BASE_PATH+"/assistant-master"),
+      cache.clusters.length ? Promise.resolve({ data: cache.clusters }) : safeApi(BASE_PATH+"/masters/clusters")
+    ]);
+    cache.assistantMasters = (assistantsPayload.data || []).map(normalizeAssistantRealtimeRow);
+    cache.clusters = clustersPayload.data || [];
+  } finally {
+    bookingMasterAssistantWidgetRefreshing = false;
+  }
+}
+
+async function ensureBookingMasterAssistantWidget() {
+  await refreshBookingMasterAssistantWidgetData();
+  let widget = $("#bookingMasterAssistantWidget");
+  if (!widget) {
+    const position = bookingMasterAssistantWidgetPosition();
+    document.body.insertAdjacentHTML("beforeend", `<div id="bookingMasterAssistantWidget" class="booking-master-assistant-widget" style="left:${position.left}px;top:${position.top}px"></div>`);
+    widget = $("#bookingMasterAssistantWidget");
+    bindBookingMasterAssistantWidgetDrag(widget);
+  }
+  widget.classList.toggle("d-none", state.section !== "bookingMaster");
+  renderBookingMasterAssistantWidget();
+}
+
+function renderBookingMasterAssistantWidget() {
+  const widget = $("#bookingMasterAssistantWidget");
+  if (!widget) return;
+  widget.classList.toggle("expanded", bookingMasterAssistantWidgetExpanded);
+  widget.innerHTML = bookingMasterAssistantWidgetHtml();
+  bindBookingMasterAssistantWidgetContent(widget);
+  const rect = widget.getBoundingClientRect();
+  setBookingMasterAssistantWidgetPosition(rect.left, rect.top);
+}
+
+function bindBookingMasterAssistantWidgetContent(widget) {
+  widget.querySelector("[data-action='booking-master-assistant-toggle']")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (bookingMasterAssistantWidgetClickSuppressed || bookingMasterAssistantWidgetDrag?.moved) return;
+    bookingMasterAssistantWidgetExpanded = !bookingMasterAssistantWidgetExpanded;
+    bookingMasterAssistantWidgetClusterDropdownOpen = false;
+    renderBookingMasterAssistantWidget();
+    if (bookingMasterAssistantWidgetExpanded) {
+      refreshBookingMasterAssistantWidgetData().then(renderBookingMasterAssistantWidget).catch(() => {});
+    }
+  });
+  widget.querySelector("[data-action='booking-master-assistant-collapse']")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    bookingMasterAssistantWidgetExpanded = false;
+    bookingMasterAssistantWidgetClusterDropdownOpen = false;
+    renderBookingMasterAssistantWidget();
+  });
+  widget.querySelector("[data-action='booking-master-assistant-cluster-toggle']")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    bookingMasterAssistantWidgetClusterDropdownOpen = !bookingMasterAssistantWidgetClusterDropdownOpen;
+    renderBookingMasterAssistantWidget();
+  });
+  widget.querySelectorAll("[data-action='booking-master-assistant-cluster-option']").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const clusterId = button.dataset.clusterId || "all";
+      if (clusterId === "all") {
+        bookingMasterAssistantWidgetClusterIds = ["all"];
+      } else {
+        const selected = new Set((bookingMasterAssistantWidgetClusterIds || []).filter((id) => id && id !== "all"));
+        if (selected.has(clusterId)) selected.delete(clusterId);
+        else selected.add(clusterId);
+        bookingMasterAssistantWidgetClusterIds = selected.size ? [...selected] : ["all"];
+      }
+      renderBookingMasterAssistantWidget();
+    });
+  });
+  widget.querySelectorAll("[data-action='booking-master-assistant-tab']").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      bookingMasterAssistantWidgetTab = button.dataset.tab || "all";
+      bookingMasterAssistantWidgetClusterDropdownOpen = false;
+      renderBookingMasterAssistantWidget();
+    });
+  });
+  widget.querySelectorAll("[data-action='booking-master-assistant-profile']").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openAssignedAssistantProfileModal(button.dataset.id || "").catch((error) => showAlert(error.message));
+    });
+  });
+}
+
+function bindBookingMasterAssistantWidgetDrag(widget) {
+  if (!widget) return;
+  widget.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest(".booking-master-assistant-widget-launcher")) return;
+    event.preventDefault();
+    const rect = widget.getBoundingClientRect();
+    bookingMasterAssistantWidgetDrag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      moved: false
+    };
+    widget.setPointerCapture?.(event.pointerId);
+  });
+  widget.addEventListener("pointermove", (event) => {
+    if (!bookingMasterAssistantWidgetDrag || bookingMasterAssistantWidgetDrag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const dx = event.clientX - bookingMasterAssistantWidgetDrag.startX;
+    const dy = event.clientY - bookingMasterAssistantWidgetDrag.startY;
+    if (Math.abs(dx) + Math.abs(dy) > 4) bookingMasterAssistantWidgetDrag.moved = true;
+    setBookingMasterAssistantWidgetPosition(bookingMasterAssistantWidgetDrag.left + dx, bookingMasterAssistantWidgetDrag.top + dy);
+  });
+  const endDrag = (event) => {
+    if (!bookingMasterAssistantWidgetDrag || bookingMasterAssistantWidgetDrag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const moved = bookingMasterAssistantWidgetDrag.moved;
+    bookingMasterAssistantWidgetClickSuppressed = true;
+    widget.releasePointerCapture?.(event.pointerId);
+    if (!moved) {
+      bookingMasterAssistantWidgetExpanded = !bookingMasterAssistantWidgetExpanded;
+      bookingMasterAssistantWidgetClusterDropdownOpen = false;
+      renderBookingMasterAssistantWidget();
+      if (bookingMasterAssistantWidgetExpanded) {
+        refreshBookingMasterAssistantWidgetData().then(renderBookingMasterAssistantWidget).catch(() => {});
+      }
+    }
+    window.setTimeout(() => {
+      bookingMasterAssistantWidgetDrag = null;
+      bookingMasterAssistantWidgetClickSuppressed = false;
+    }, moved ? 220 : 0);
+  };
+  widget.addEventListener("pointerup", endDrag);
+  widget.addEventListener("pointercancel", endDrag);
+}
+
+window.addEventListener("resize", () => {
+  const widget = $("#bookingMasterAssistantWidget");
+  if (!widget || widget.classList.contains("d-none")) return;
+  const rect = widget.getBoundingClientRect();
+  setBookingMasterAssistantWidgetPosition(rect.left, rect.top);
+});
+
+async function openBookingModal() {
+  if (!isSuperAdminUser()) {
+    showAlert("Only Super Admin can create bookings on behalf of customers.");
+    return;
+  }
+  if (!cache.clusters.length) cache.clusters = (await safeApi(BASE_PATH+"/masters/clusters")).data || [];
+  if (!cache.categories.length) cache.categories = (await safeApi(BASE_PATH+"/masters/service-categories")).data || [];
+  const form = $("#adminBookingForm");
+  form.reset();
+  form.elements.customerId.value = "";
+  form.elements.clusterId.innerHTML = `<option value="">Select Cluster</option>${optionRows(activeItems(cache.clusters))}`;
+  form.elements.categoryId.innerHTML = `<option value="">Select Category</option>${optionRows(activeItems(cache.categories))}`;
+  $("#adminBookingPriceBreakdown").classList.add("d-none");
+  $("#adminBookingPriceBreakdown").innerHTML = "";
+  $("#bookingCustomerResults").innerHTML = "";
+  $("#bookingModalAlert").classList.add("d-none");
+  $("#bookingModalAlert").textContent = "";
+  $("#bookingModal").classList.remove("d-none");
+}
+
+async function refreshAdminBookingPriceQuote() {
+  const form = $("#adminBookingForm");
+  const target = $("#adminBookingPriceBreakdown");
+  if (!form || !target || !form.elements.clusterId.value || !form.elements.categoryId.value) {
+    if (target) target.classList.add("d-none");
+    return;
+  }
+  const quote = await api(BASE_PATH+"/operations/bookings/quote", {
+    method: "POST",
+    body: JSON.stringify({ clusterId: form.elements.clusterId.value, categoryId: form.elements.categoryId.value })
+  });
+  const data = quote.data || {};
+  form.elements.estimatedAmountPaise.value = data.finalTotalAmountPaise ?? 0;
+  target.innerHTML = priceBreakdownHtml(data);
+  target.classList.remove("d-none");
+}
+
+function priceBreakdownHtml(data = {}) {
+  return `<div><span>Base Amount</span><b>${moneyFromRupees(data.baseAmount)}</b></div>
+    <div><span>Additional Charges</span><b>${moneyFromRupees(data.additionalCharges)}</b></div>
+    <div><span>Surge Amount</span><b>${moneyFromRupees(data.surgeAmount)}</b></div>
+    <div><span>Final Total Amount</span><b>${moneyFromRupees(data.finalTotalAmount)}</b></div>`;
+}
+
+function moneyFromRupees(value) {
+  return `₹${moneyNumber(value).toFixed(2)}`;
+}
+
+async function searchBookingCustomers() {
+  const query = $("#bookingCustomerSearchInput").value.trim();
+  const alertEl = $("#bookingModalAlert");
+  alertEl.classList.add("d-none");
+  if (query.length < 2) {
+    alertEl.textContent = "Enter at least 2 characters to search customer.";
+    alertEl.classList.remove("d-none");
+    return;
+  }
+  const payload = await api(`/operations/customers/search?q=${encodeURIComponent(query)}`);
+  const rows = payload.data
+    .map(
+      (customer) => `<tr>
+        <td><b>${escapeHtml(customer.customerName || "-")}</b><div class="row-note">${escapeHtml(customer.customerCode || customer.customerId)}</div></td>
+        <td>${escapeHtml(customer.phone || "-")}</td>
+        <td>${escapeHtml(customer.email || "-")}</td>
+        <td>${escapeHtml(customer.address || "-")}</td>
+        <td>${status(customer.status)}</td>
+        <td>${escapeHtml(customer.longitude ?? "-")}, ${escapeHtml(customer.latitude ?? "-")}</td>
+        <td class="text-end"><button class="btn btn-soft btn-xs" data-action="select-booking-customer" data-customer='${escapeHtml(JSON.stringify(customer))}' type="button">Select</button></td>
+      </tr>`
+    )
+    .join("");
+  $("#bookingCustomerResults").innerHTML = table(["Name", "Number", "Email", "Address", "Active", "Longitude, Latitude", ""], rows);
+}
+
+function bookingMasterCustomerIsActive(customer) {
+  return String(customer?.status || "").toLowerCase() === "active";
+}
+
+function bookingMasterCustomerFromAdminCustomer(customer = {}) {
+  return {
+    customerId: customer.customerId || customer.id,
+    customerCode: customer.customerCode,
+    customerName: customer.customerName || customer.displayName,
+    profilePictureUrl: customer.profilePictureUrl || "",
+    phone: customer.phone,
+    email: customer.email,
+    status: customer.status,
+    addressId: customer.addressId || null,
+    address: customer.address || null,
+    latitude: customer.latitude ?? null,
+    longitude: customer.longitude ?? null,
+    clusterId: customer.clusterId || null,
+    clusterName: customer.clusterName || null,
+    zoneName: customer.zoneName || null,
+    cityName: customer.cityName || null,
+    isDefault: customer.isDefault || customer.isDefaultAddress || false
+  };
+}
+
+function mergeBookingMasterCustomerAddress(address = {}) {
+  if (!bookingMasterSelectedCustomer || !address) return;
+  bookingMasterSelectedCustomer = {
+    ...bookingMasterSelectedCustomer,
+    addressId: address.addressId || bookingMasterSelectedCustomer.addressId || null,
+    address: address.address || bookingMasterSelectedCustomer.address || null,
+    latitude: address.latitude ?? bookingMasterSelectedCustomer.latitude ?? null,
+    longitude: address.longitude ?? bookingMasterSelectedCustomer.longitude ?? null,
+    clusterId: address.clusterId || bookingMasterSelectedCustomer.clusterId || null,
+    clusterName: address.clusterName || bookingMasterSelectedCustomer.clusterName || null,
+    zoneName: address.zoneName || bookingMasterSelectedCustomer.zoneName || null,
+    cityName: address.cityName || bookingMasterSelectedCustomer.cityName || null,
+    isDefault: address.isDefault ?? bookingMasterSelectedCustomer.isDefault ?? false
+  };
+}
+
+function bookingMasterCustomerResultRows(customers = []) {
+  return customers
+    .map((customer) => {
+      const isActive = bookingMasterCustomerIsActive(customer);
+      const selectAction = isActive
+        ? `<button class="btn btn-soft btn-xs" data-action="select-booking-master-customer" data-customer-id="${escapeHtml(customer.customerId)}" type="button">Select</button>`
+        : `<button class="btn btn-light btn-xs" type="button" disabled>Inactive</button>`;
+      return `<tr>
+        <td><b>${escapeHtml(customer.customerName || "-")}</b><div class="row-note">${escapeHtml(customer.customerCode || customer.customerId || "-")}</div></td>
+        <td>${escapeHtml(customer.phone || "-")}</td>
+        <td>${escapeHtml(customer.email || "-")}</td>
+        <td>${status(customer.status)}</td>
+        <td><span class="booking-master-address">${escapeHtml(customer.address || "-")}</span><div class="row-note">${customer.isDefault ? "Default address" : ""}</div></td>
+        <td>${escapeHtml(customer.clusterName || "-")}<div class="row-note">${escapeHtml(customer.clusterId || "")}</div></td>
+        <td>${escapeHtml(customer.latitude ?? "-")}, ${escapeHtml(customer.longitude ?? "-")}</td>
+        <td class="text-end">${selectAction}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function renderBookingMasterSelectedCustomer() {
+  const target = $("#bookingMasterSelectedCustomer");
+  const form = $("#bookingMasterCustomerForm");
+  if (!target || !form) return;
+  const customer = bookingMasterSelectedCustomer;
+  if (!customer) {
+    form.elements.customerId.value = "";
+    clearBookingMasterFormLocation();
+    target.innerHTML = `<div class="empty-state">No customer selected.</div>`;
+    renderBookingMasterLocationPhase();
+    return;
+  }
+  form.elements.customerId.value = customer.customerId || "";
+  target.innerHTML = `<div class="booking-master-selected-card">
+    <div class="booking-master-selected-person">
+      ${profileAvatar(customer.profilePictureUrl, customer.customerName)}
+      <div>
+        <h3>${escapeHtml(customer.customerName || "-")}</h3>
+        <p>${escapeHtml(customer.phone || "-")}</p>
+      </div>
+      <button class="btn btn-primary btn-xs" data-action="change-booking-master-customer" type="button">Change</button>
+    </div>
+    <div class="booking-master-address-summary">
+      <span class="booking-master-address-pin" aria-hidden="true"></span>
+      <div>
+        <b>${escapeHtml(customer.isDefault ? "Home" : "Address")}</b>
+        <p>${escapeHtml(customer.address || "-")}</p>
+        <small>${escapeHtml([customer.clusterName, customer.zoneName, customer.cityName].filter(Boolean).join(", ") || "-")}</small>
+      </div>
+      <button class="btn btn-primary btn-xs" data-action="change-booking-master-address" type="button">Change</button>
+    </div>
+  </div>`;
+  renderBookingMasterLocationPhase();
+}
+
+function renderBookingMasterEmptyState(message) {
+  const target = $("#bookingMasterCustomerResults");
+  if (target) target.innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
+}
+
+async function searchBookingMasterCustomers() {
+  const query = $("#bookingMasterCustomerSearchInput").value.trim();
+  if (query.length < 2) {
+    renderBookingMasterEmptyState("Enter at least 2 characters to search by name, phone, email, mobile number, or customer code.");
+    return;
+  }
+  renderBookingMasterEmptyState("Searching customers...");
+  const payload = await api(`/operations/customers/search?q=${encodeURIComponent(query)}`);
+  const customers = payload.data || [];
+  bookingMasterCustomerResults = customers;
+  if (!customers.length) {
+    renderBookingMasterEmptyState("No customers found for this search.");
+    return;
+  }
+  $("#bookingMasterCustomerResults").innerHTML = table(
+    ["Name", "Phone", "Email", "Status", "Default Address", "Cluster", "Lat, Lng", ""],
+    bookingMasterCustomerResultRows(customers)
+  );
+}
+
+function scheduleBookingMasterCustomerSearch() {
+  if (bookingMasterSearchTimer) clearTimeout(bookingMasterSearchTimer);
+  bookingMasterSearchTimer = setTimeout(() => {
+    searchBookingMasterCustomers().catch((error) => renderBookingMasterEmptyState(error.message));
+  }, 300);
+}
+
+function scheduleBookingMasterLocationSearchSuggestions() {
+  if (bookingMasterLocationSearchTimer) clearTimeout(bookingMasterLocationSearchTimer);
+  const query = bookingMasterLocationSearchText.trim();
+  bookingMasterLocationSearchError = "";
+  if (!query || query.length < 3) {
+    bookingMasterLocationSearchResults = [];
+    bookingMasterLocationSearchLoading = false;
+    renderBookingMasterLocationSearchResults();
+    return;
+  }
+  bookingMasterLocationSearchLoading = true;
+  renderBookingMasterLocationSearchResults();
+  bookingMasterLocationSearchTimer = setTimeout(() => {
+    searchBookingMasterLocations({ silent: true }).catch((error) => {
+      bookingMasterLocationSearchLoading = false;
+      bookingMasterLocationSearchError = error.message;
+      bookingMasterLocationSearchResults = [];
+      renderBookingMasterLocationSearchResults();
+    });
+  }, 350);
+}
+
+function resetBookingMasterLocationState() {
+  bookingMasterAddresses = [];
+  bookingMasterSelectedLocation = null;
+  bookingMasterServiceability = null;
+  bookingMasterManualLatLngText = "";
+  bookingMasterWhatsappLocationText = "";
+  bookingMasterLocationSearchText = "";
+  bookingMasterLocationSearchResults = [];
+  bookingMasterLocationSearchLoading = false;
+  bookingMasterLocationSearchError = "";
+  bookingMasterPhase = "location";
+  bookingMasterClusterServices = [];
+  bookingMasterClusterCategories = [];
+  bookingMasterPriceRules = [];
+  bookingMasterSelectedServiceId = "";
+  bookingMasterSelectedCategoryId = "";
+  bookingMasterCategorySearchText = "";
+  bookingMasterStoreSearchText = "";
+  bookingMasterStores = [];
+  bookingMasterStoreCategories = [];
+  bookingMasterStoreKeywords = [];
+  bookingMasterCartItems = [];
+  bookingMasterQuote = null;
+  bookingMasterQuoteLoading = false;
+  bookingMasterQuoteError = "";
+  bookingMasterQuoteRequestId = 0;
+  bookingMasterLocationStops = [];
+  bookingMasterAddressPickerMode = "primary";
+  bookingMasterDetailImageUrl = "";
+  bookingMasterAttachments = [];
+  bookingMasterDetailNote = "";
+  bookingMasterAvailabilityDecision = null;
+  bookingMasterAvailabilityRequestId = 0;
+  bookingMasterStoresLoading = false;
+  bookingMasterStoresError = "";
+  bookingMasterNextPhaseLoading = false;
+  bookingMasterNextPhaseError = "";
+  if (bookingMasterStoreSearchTimer) clearTimeout(bookingMasterStoreSearchTimer);
+  bookingMasterStoreSearchTimer = null;
+  if (bookingMasterLocationSearchTimer) clearTimeout(bookingMasterLocationSearchTimer);
+  bookingMasterLocationSearchTimer = null;
+  if (bookingMasterManualMapSyncTimer) clearTimeout(bookingMasterManualMapSyncTimer);
+  bookingMasterManualMapSyncTimer = null;
+  cleanupBookingMasterMap();
+}
+
+function cleanupBookingMasterMap() {
+  if (bookingMasterMapPinSyncTimer) clearInterval(bookingMasterMapPinSyncTimer);
+  bookingMasterMapPinSyncTimer = null;
+  if (bookingMasterMapPinFrame) cancelAnimationFrame(bookingMasterMapPinFrame);
+  bookingMasterMapPinFrame = null;
+  if (!bookingMasterMapInstance) return;
+  try {
+    if (bookingMasterMapInstance.remove) bookingMasterMapInstance.remove();
+    else if (bookingMasterMapInstance.destroy) bookingMasterMapInstance.destroy();
+  } catch (_error) {
+    // Ola/MapLibre can throw during teardown if the container was already re-rendered.
+  }
+  bookingMasterMapInstance = null;
+  bookingMasterMapSelectionFitDone = false;
+}
+
+function resetBookingMasterCustomerState() {
+  bookingMasterSelectedCustomer = null;
+  bookingMasterCustomerResults = [];
+  resetBookingMasterLocationState();
+}
+
+function bookingMasterDefaultLocation() {
+  const customer = bookingMasterSelectedCustomer;
+  if (!customer?.address && (customer?.latitude == null || customer?.longitude == null)) return null;
+  return {
+    addressId: customer.addressId || null,
+    label: "Default location",
+    address: customer.address || "",
+    latitude: customer.latitude,
+    longitude: customer.longitude,
+    clusterId: customer.clusterId || null,
+    clusterName: customer.clusterName || null,
+    isDefault: true,
+    source: "default"
+  };
+}
+
+function locationHasCoordinates(location) {
+  return Number.isFinite(Number(location?.latitude)) && Number.isFinite(Number(location?.longitude));
+}
+
+function customerAddressSelectedCoordinates() {
+  const candidates = [
+    customerAddressSelectedLocation,
+    customerAddressLivePinLocation,
+    customerAddressSimpleMap
+  ];
+  for (const candidate of candidates) {
+    const latitude = Number(candidate?.latitude);
+    const longitude = Number(candidate?.longitude);
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) return { latitude, longitude };
+  }
+  return { latitude: NaN, longitude: NaN };
+}
+
+function formatLatLngText(latitude, longitude) {
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return "";
+  return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+}
+
+function normalizeBookingMasterLocationSource(source) {
+  return ["default", "saved", "whatsapp", "manual", "map", "search", "reverse", "coordinates"].includes(source) ? source : "manual";
+}
+
+function syncBookingMasterSelectedLocationFields(location = bookingMasterSelectedLocation) {
+  if (!locationHasCoordinates(location)) return;
+  const text = formatLatLngText(location.latitude, location.longitude);
+  bookingMasterManualLatLngText = text;
+  const manualInput = $("#bookingMasterManualLatLngInput");
+  if (manualInput) manualInput.value = text;
+}
+
+function clearBookingMasterFormLocation() {
+  const form = $("#bookingMasterCustomerForm");
+  if (!form) return;
+  form.elements.address.value = "";
+  form.elements.latitude.value = "";
+  form.elements.longitude.value = "";
+  form.elements.clusterId.value = "";
+}
+
+function resetBookingMasterNextPhaseState() {
+  bookingMasterPhase = "location";
+  bookingMasterClusterServices = [];
+  bookingMasterClusterCategories = [];
+  bookingMasterPriceRules = [];
+  bookingMasterSelectedServiceId = "";
+  bookingMasterSelectedCategoryId = "";
+  bookingMasterCategorySearchText = "";
+  bookingMasterStoreSearchText = "";
+  bookingMasterStores = [];
+  bookingMasterStoreCategories = [];
+  bookingMasterStoreKeywords = [];
+  bookingMasterCartItems = [];
+  bookingMasterQuote = null;
+  bookingMasterQuoteLoading = false;
+  bookingMasterQuoteError = "";
+  bookingMasterQuoteRequestId = 0;
+  bookingMasterLocationStops = [];
+  bookingMasterDetailImageUrl = "";
+  bookingMasterAttachments = [];
+  bookingMasterDetailNote = "";
+  bookingMasterStoresLoading = false;
+  bookingMasterStoresError = "";
+  bookingMasterNextPhaseLoading = false;
+  bookingMasterNextPhaseError = "";
+}
+
+function readMapLngLat(value) {
+  if (!value) return { latitude: NaN, longitude: NaN };
+  if (Array.isArray(value)) return { longitude: Number(value[0]), latitude: Number(value[1]) };
+  if (typeof value.toArray === "function") {
+    const coordinates = value.toArray();
+    return { longitude: Number(coordinates?.[0]), latitude: Number(coordinates?.[1]) };
+  }
+  return {
+    longitude: Number(value.lng ?? value.lon ?? value.longitude ?? value._lng ?? value[0]),
+    latitude: Number(value.lat ?? value.latitude ?? value._lat ?? value[1])
+  };
+}
+
+function updateBookingMasterManualLatLngText(latitude, longitude) {
+  bookingMasterManualLatLngText = formatLatLngText(latitude, longitude);
+  const input = document.getElementById("bookingMasterManualLatLngInput");
+  if (input) input.value = bookingMasterManualLatLngText;
+}
+
+function bookingMasterPinDropLatLng() {
+  return readMapLngLat(bookingMasterMapInstance?.getCenter?.());
+}
+
+function setBookingMasterDraftLocation(location, options = {}) {
+  if (!locationHasCoordinates(location)) return;
+  const previous = bookingMasterSelectedLocation;
+  const coordinatesChanged =
+    !locationHasCoordinates(previous) ||
+    Math.abs(Number(previous.latitude) - Number(location.latitude)) > 0.000001 ||
+    Math.abs(Number(previous.longitude) - Number(location.longitude)) > 0.000001;
+  const next = {
+    ...(bookingMasterSelectedLocation || {}),
+    ...location,
+    latitude: Number(location.latitude),
+    longitude: Number(location.longitude),
+    source: normalizeBookingMasterLocationSource(location.source)
+  };
+  bookingMasterSelectedLocation = next;
+  if (options.resetServiceability !== false && coordinatesChanged) {
+    bookingMasterServiceability = null;
+    resetBookingMasterNextPhaseState();
+  }
+  clearBookingMasterFormLocation();
+  updateBookingMasterManualLatLngText(next.latitude, next.longitude);
+  const preview = $("#bookingMasterLocationPreview");
+  if (preview) preview.innerHTML = bookingMasterSelectedLocationHtml();
+  const serviceability = $("#bookingMasterServiceabilityResult");
+  if (serviceability) serviceability.innerHTML = bookingMasterServiceabilityHtml();
+}
+
+function moveBookingMasterPinDrop(location, options = {}) {
+  if (!locationHasCoordinates(location)) return;
+  const latitude = Number(location.latitude);
+  const longitude = Number(location.longitude);
+  if (options.fly !== false) {
+    const centerTo = { center: [longitude, latitude], zoom: Math.max(Number(bookingMasterMapInstance?.getZoom?.() ?? 16), 13), duration: 250 };
+    if (bookingMasterMapInstance?.easeTo) bookingMasterMapInstance.easeTo(centerTo);
+    else if (bookingMasterMapInstance?.flyTo) bookingMasterMapInstance.flyTo(centerTo);
+    else bookingMasterMapInstance?.setCenter?.([longitude, latitude]);
+  }
+  if (options.sync !== false) setBookingMasterDraftLocation({ ...location, latitude, longitude });
+}
+
+function bookingMasterPolygonCoordinates(result = bookingMasterServiceability) {
+  const coordinates = result?.cluster?.polygonCoordinates;
+  if (!Array.isArray(coordinates)) return [];
+  return coordinates
+    .map((point) => [Number(point.longitude), Number(point.latitude)])
+    .filter(([longitude, latitude]) => Number.isFinite(longitude) && Number.isFinite(latitude));
+}
+
+function bookingMasterSelectedPointGeojson() {
+  const location = bookingMasterSelectedLocation;
+  if (!locationHasCoordinates(location)) return null;
+  return {
+    type: "Feature",
+    geometry: { type: "Point", coordinates: [Number(location.longitude), Number(location.latitude)] },
+    properties: { name: location.address || location.label || "Selected location" }
+  };
+}
+
+function bookingMasterMapCenterLocation() {
+  if (locationHasCoordinates(bookingMasterSelectedLocation)) return bookingMasterSelectedLocation;
+  const defaultLocation = bookingMasterDefaultLocation();
+  if (locationHasCoordinates(defaultLocation)) return defaultLocation;
+  return { latitude: 28.6139, longitude: 77.209 };
+}
+
+function bookingMasterClusterPolygonGeojson() {
+  const coordinates = bookingMasterPolygonCoordinates();
+  if (coordinates.length < 4) return null;
+  return {
+    type: "Feature",
+    geometry: { type: "Polygon", coordinates: [coordinates] },
+    properties: { name: bookingMasterServiceability?.cluster?.name || "Serviceable cluster" }
+  };
+}
+
+function setBookingMasterGeojsonSource(sourceId, data) {
+  if (!bookingMasterMapInstance?.getSource || !bookingMasterMapInstance?.addSource) return false;
+  const source = bookingMasterMapInstance.getSource(sourceId);
+  if (source?.setData) {
+    source.setData(data);
+    return true;
+  }
+  bookingMasterMapInstance.addSource(sourceId, { type: "geojson", data });
+  return true;
+}
+
+function addBookingMasterLayerOnce(layer) {
+  if (!bookingMasterMapInstance?.getLayer || !bookingMasterMapInstance?.addLayer) return;
+  if (!bookingMasterMapInstance.getLayer(layer.id)) bookingMasterMapInstance.addLayer(layer);
+}
+
+function drawBookingMasterMapSelection() {
+  const map = bookingMasterMapInstance;
+  if (!map?.getSource || !map?.addSource) return;
+  const pointGeojson = bookingMasterSelectedPointGeojson();
+  const polygonGeojson = bookingMasterServiceability?.isServiceable ? bookingMasterClusterPolygonGeojson() : null;
+  if (polygonGeojson && setBookingMasterGeojsonSource("booking-master-cluster-source", polygonGeojson)) {
+    addBookingMasterLayerOnce({
+      id: "booking-master-cluster-fill",
+      type: "fill",
+      source: "booking-master-cluster-source",
+      paint: { "fill-color": "#00a86b", "fill-opacity": 0.24 }
+    });
+    addBookingMasterLayerOnce({
+      id: "booking-master-cluster-line",
+      type: "line",
+      source: "booking-master-cluster-source",
+      paint: { "line-color": "#008f5a", "line-width": 5, "line-opacity": 0.95 }
+    });
+  }
+  if (pointGeojson && setBookingMasterGeojsonSource("booking-master-location-source", pointGeojson)) {
+    addBookingMasterLayerOnce({
+      id: "booking-master-location-point",
+      type: "circle",
+      source: "booking-master-location-source",
+      paint: {
+        "circle-color": "#003880",
+        "circle-radius": 7,
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": 3
+      }
+    });
+  }
+  if (bookingMasterMapSelectionFitDone || !pointGeojson) return;
+  bookingMasterMapSelectionFitDone = true;
+  map.flyTo?.({ center: pointGeojson.geometry.coordinates, zoom: 16, duration: 500 });
+}
+
+function bookingMasterLocationCard(location, actionLabel = "Use") {
+  const hasCoordinates = locationHasCoordinates(location);
+  const meta = [
+    location.provider === "ola_maps" ? "Ola Maps" : "",
+    location.source === "coordinates" ? "Coordinates" : location.source === "reverse" ? "Reverse geocoded" : "",
+    location.clusterName || ""
+  ].filter(Boolean);
+  return `<div class="booking-location-card">
+    <div>
+      <b>${escapeHtml(location.label || "Saved location")}</b>
+      <p>${escapeHtml(location.address || "-")}</p>
+      <span>${escapeHtml(location.latitude ?? "-")}, ${escapeHtml(location.longitude ?? "-")}</span>
+      ${meta.length ? `<span>${escapeHtml(meta.join(" | "))}</span>` : ""}
+    </div>
+    <button class="btn btn-soft btn-sm" data-action="select-booking-master-location" data-location='${escapeHtml(JSON.stringify(location))}' type="button" ${hasCoordinates ? "" : "disabled"}>${actionLabel}</button>
+  </div>`;
+}
+
+function customerAddressLocationCard(location, actionLabel = "Choose") {
+  const hasCoordinates = locationHasCoordinates(location);
+  return `<div class="booking-location-card">
+    <div>
+      <b>${escapeHtml(location.label || "Location")}</b>
+      <p>${escapeHtml(location.address || "-")}</p>
+      <span>${escapeHtml(formatLatLngText(location.latitude, location.longitude) || "-")}</span>
+      ${location.provider ? `<span>${escapeHtml(location.provider === "ola_maps" ? "Ola Maps" : location.provider)}</span>` : ""}
+    </div>
+    <button class="btn btn-soft btn-sm" data-action="select-customer-address-location" data-location='${escapeHtml(JSON.stringify(location))}' type="button" ${hasCoordinates ? "" : "disabled"}>${escapeHtml(actionLabel)}</button>
+  </div>`;
+}
+
+function bookingMasterAddressAlreadyChosen(address = {}) {
+  if (!bookingMasterAddressPickerActive || !locationHasCoordinates(address)) return false;
+  return bookingMasterLocationStopsForPayload().some((stop) => bookingMasterStopKey(stop) === bookingMasterStopKey(address));
+}
+
+function customerAddressSavedRows() {
+  if (!customerAddressRows.length) return `<div class="empty-state">No saved addresses for this customer.</div>`;
+  return `<div class="booking-location-list">${customerAddressRows.map((address) => {
+    const alreadyChosen = bookingMasterAddressAlreadyChosen(address);
+    return `<div class="booking-location-card">
+    <div>
+      <b>${escapeHtml(address.label || "Saved Address")} ${address.isDefault ? `<span class="badge bg-success-subtle text-success">Default</span>` : ""}</b>
+      <p>${escapeHtml(address.address || "-")}</p>
+      <span>${escapeHtml(formatLatLngText(address.latitude, address.longitude) || "-")}</span>
+      <span>${escapeHtml([address.metadata?.flatNo, address.metadata?.buildingName, address.metadata?.additionalDetail, address.metadata?.personName, address.metadata?.contactNumber].filter(Boolean).join(", ") || address.clusterName || "")}</span>
+    </div>
+    <div class="actions">
+      ${bookingMasterAddressPickerActive ? `<button class="btn btn-primary btn-sm" data-action="choose-booking-master-address" data-id="${escapeHtml(address.addressId)}" type="button" ${alreadyChosen ? "disabled" : ""}>${alreadyChosen ? "Chosen" : "Choose"}</button>` : ""}
+      <button class="btn btn-soft btn-sm" data-action="edit-customer-address" data-id="${escapeHtml(address.addressId)}" type="button">Edit</button>
+      <button class="btn btn-outline-danger btn-sm" data-action="delete-customer-address" data-id="${escapeHtml(address.addressId)}" type="button">Delete</button>
+    </div>
+  </div>`;
+  }).join("")}</div>`;
+}
+
+function customerPreviousUsedLocationRowsHtml() {
+  if (!customerPreviousUsedLocationRows.length) return `<div class="empty-state">No previous used locations yet.</div>`;
+  return `<div class="booking-location-list">${customerPreviousUsedLocationRows.map((address) => {
+    const alreadyChosen = bookingMasterAddressAlreadyChosen(address);
+    return `<div class="booking-location-card">
+    <div>
+      <b>${escapeHtml(address.label || "Previous used")}</b>
+      <p>${escapeHtml(address.address || "-")}</p>
+      <span>${escapeHtml(formatLatLngText(address.latitude, address.longitude) || "-")}</span>
+      <span>${escapeHtml([address.metadata?.flatNo, address.metadata?.buildingName, address.metadata?.additionalDetail, address.clusterName].filter(Boolean).join(", ") || "")}</span>
+    </div>
+    <div class="actions">
+      ${bookingMasterAddressPickerActive ? `<button class="btn btn-primary btn-sm" data-action="choose-booking-master-previous-location" data-id="${escapeHtml(address.addressId)}" type="button" ${alreadyChosen ? "disabled" : ""}>${alreadyChosen ? "Chosen" : "Choose"}</button>` : ""}
+      <button class="btn btn-soft btn-sm" data-action="save-previous-used-location-as-address" data-id="${escapeHtml(address.addressId)}" type="button">Save As</button>
+    </div>
+  </div>`;
+  }).join("")}</div>`;
+}
+
+function customerAddressListPanelHtml() {
+  return `<div class="customer-address-list-tools">
+    <button class="btn btn-primary" data-action="add-customer-address" type="button">Add Address</button>
+  </div>
+  <div class="booking-location-title">Saved Addresses</div>
+  <div id="customerAddressSavedRows">${customerAddressSavedRows()}</div>
+  <div class="booking-location-title">Previous Used Locations</div>
+  <div id="customerPreviousUsedLocationRows">${customerPreviousUsedLocationRowsHtml()}</div>`;
+}
+
+function customerAddressSavedLabelSet(excludeAddressId = "") {
+  return new Set(
+    customerAddressRows
+      .filter((address) => String(address.addressId || "") !== String(excludeAddressId || ""))
+      .map((address) => String(address.label || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+function customerAddressLabelExists(label, excludeAddressId = editingCustomerAddressId || "") {
+  return customerAddressSavedLabelSet(excludeAddressId).has(String(label || "").trim().toLowerCase());
+}
+
+function customerAddressDefaultLabel() {
+  const editingAddress = customerAddressRows.find((address) => String(address.addressId || "") === String(editingCustomerAddressId || ""));
+  if (editingAddress) return ["Home", "Work"].includes(editingAddress.label) ? editingAddress.label : "Other";
+  if (!customerAddressLabelExists("Home")) return "Home";
+  if (!customerAddressLabelExists("Work")) return "Work";
+  return "Other";
+}
+
+function customerAddressLabelChip(label, checkedLabel) {
+  const disabled = ["Home", "Work"].includes(label) && customerAddressLabelExists(label);
+  return `<label class="customer-address-chip${disabled ? " disabled" : ""}">
+    <input type="radio" name="label" value="${escapeHtml(label)}" ${checkedLabel === label ? "checked" : ""} ${disabled ? "disabled" : ""}> ${escapeHtml(label)}
+  </label>`;
+}
+
+function customerAddressSearchResultsHtml() {
+  if (!customerAddressSearchText) return `<div class="empty-state">Search by address, place name, or landmark.</div>`;
+  if (customerAddressSearchText.trim().length < 3) return `<div class="empty-state">Type at least 3 characters.</div>`;
+  if (!customerAddressSearchResults.length) return `<div class="empty-state">No location results yet.</div>`;
+  return `<div class="booking-location-dropdown">${customerAddressSearchResults.map((location) => customerAddressLocationCard(location, "Choose")).join("")}</div>`;
+}
+
+function renderCustomerAddressSearchResults() {
+  const target = $("#customerAddressSearchResults");
+  if (target) target.innerHTML = customerAddressSearchResultsHtml();
+}
+
+function customerAddressSelectedHtml() {
+  const location = customerAddressSelectedLocation;
+  if (!location) return `<div class="empty-state">Choose a location before saving address details.</div>`;
+  const cluster = customerAddressServiceability?.cluster;
+  const serviceabilityHtml = customerAddressServiceability
+    ? customerAddressServiceability.isServiceable
+      ? `<div class="serviceability-result success customer-address-serviceability"><b>Working Cluster</b><span>${escapeHtml(cluster?.name || "-")} ${cluster?.code ? `(${escapeHtml(cluster.code)})` : ""}</span></div>`
+      : `<div class="serviceability-result danger customer-address-serviceability">${escapeHtml(customerAddressServiceability.message || "Selected location is outside active working clusters.")}</div>`
+    : `<div class="serviceability-result customer-address-serviceability">Cluster validation will appear after location selection.</div>`;
+  return `<div class="booking-location-selected">
+    <span>Selected Area</span>
+    <b>${escapeHtml(location.label || "Selected location")}</b>
+    <p>${escapeHtml(location.address || "-")}</p>
+    <span>${escapeHtml(formatLatLngText(location.latitude, location.longitude) || "-")}</span>
+    <textarea id="customerAddressSelectedAreaText" class="form-control customer-address-selected-text" rows="2" readonly>${escapeHtml(location.address || location.label || "")}</textarea>
+    ${serviceabilityHtml}
+  </div>`;
+}
+
+function cleanupCustomerAddressMap() {
+  if (customerAddressMapSyncTimer) clearTimeout(customerAddressMapSyncTimer);
+  customerAddressMapSyncTimer = null;
+  if (customerAddressMapPollTimer) clearInterval(customerAddressMapPollTimer);
+  customerAddressMapPollTimer = null;
+  customerAddressLastMapSyncKey = "";
+  customerAddressLastPointerLatLng = null;
+  customerAddressLivePinLocation = null;
+  customerAddressResolvedMap = null;
+  customerAddressMapEventsBound = false;
+  customerAddressSimpleMap = null;
+  customerAddressPersistentClusters = [];
+  if (!customerAddressMapInstance) return;
+  try {
+    if (customerAddressMapInstance.remove) customerAddressMapInstance.remove();
+    else if (customerAddressMapInstance.destroy) customerAddressMapInstance.destroy();
+  } catch (_error) {
+    // Map teardown can race with panel re-render.
+  }
+  customerAddressMapInstance = null;
+}
+
+function customerAddressMapCenterLocation() {
+  if (locationHasCoordinates(customerAddressSelectedLocation)) return customerAddressSelectedLocation;
+  return { latitude: 28.4595, longitude: 77.0266 };
+}
+
+function customerAddressMapWorldPoint(latitude, longitude, zoom) {
+  const scale = 256 * 2 ** zoom;
+  const sinLat = Math.sin((Number(latitude) * Math.PI) / 180);
+  return {
+    x: ((Number(longitude) + 180) / 360) * scale,
+    y: (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale
+  };
+}
+
+function customerAddressMapLatLngFromWorld(x, y, zoom) {
+  const scale = 256 * 2 ** zoom;
+  const longitude = (x / scale) * 360 - 180;
+  const n = Math.PI - (2 * Math.PI * y) / scale;
+  const latitude = (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+  return { latitude, longitude };
+}
+
+function customerAddressClusterPolygonCoordinates() {
+  const coordinates = customerAddressServiceability?.cluster?.polygonCoordinates;
+  if (!Array.isArray(coordinates)) return [];
+  return coordinates
+    .map((point) => ({ latitude: Number(point.latitude), longitude: Number(point.longitude) }))
+    .filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude));
+}
+
+function customerAddressClusterMapItems() {
+  const items = (cache.clusters || [])
+    .filter((cluster) => cluster.isBookingEnabled !== false && cluster.polygonDescription)
+    .map((cluster) => {
+      try {
+        const polygon = parseWktPolygon(cluster.polygonDescription).map(([longitude, latitude]) => ({ latitude, longitude }));
+        return { cluster, polygon };
+      } catch (_error) {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  const matchedPolygon = customerAddressClusterPolygonCoordinates();
+  const matchedClusterId = customerAddressServiceability?.cluster?.clusterId;
+  if (matchedPolygon.length >= 3 && matchedClusterId && !items.some((item) => item.cluster.id === matchedClusterId || item.cluster.clusterId === matchedClusterId)) {
+    items.push({
+      cluster: customerAddressServiceability.cluster,
+      polygon: matchedPolygon
+    });
+  }
+  (customerAddressPersistentClusters || []).forEach((item) => {
+    const id = item.cluster?.id || item.cluster?.clusterId;
+    if (id && items.some((existing) => (existing.cluster.id || existing.cluster.clusterId) === id)) return;
+    if (item.polygon?.length >= 3) items.push(item);
+  });
+  return items;
+}
+
+function customerAddressPolygonLabelPoint(polygon) {
+  const points = polygon.filter((point, index) => index === 0 || point.latitude !== polygon[0].latitude || point.longitude !== polygon[0].longitude);
+  const source = points.length ? points : polygon;
+  return source.reduce(
+    (sum, point) => ({ latitude: sum.latitude + point.latitude / source.length, longitude: sum.longitude + point.longitude / source.length }),
+    { latitude: 0, longitude: 0 }
+  );
+}
+
+function customerAddressClusterOverlaySvg(topLeft, zoom) {
+  const clusters = customerAddressClusterMapItems();
+  if (!clusters.length) return "";
+  const polygons = [];
+  const labels = [];
+  clusters.forEach(({ cluster, polygon }) => {
+    if (!polygon || polygon.length < 3) return;
+    const points = polygon
+      .map((point) => {
+        const world = customerAddressMapWorldPoint(point.latitude, point.longitude, zoom);
+        return `${(world.x - topLeft.x).toFixed(1)},${(world.y - topLeft.y).toFixed(1)}`;
+      })
+      .join(" ");
+    polygons.push(`<polygon points="${points}" class="customer-simple-map-cluster-fill"></polygon><polyline points="${points}" class="customer-simple-map-cluster-line"></polyline>`);
+    const labelPoint = customerAddressPolygonLabelPoint(polygon);
+    const labelWorld = customerAddressMapWorldPoint(labelPoint.latitude, labelPoint.longitude, zoom);
+    const left = labelWorld.x - topLeft.x;
+    const top = labelWorld.y - topLeft.y;
+    const name = cluster.name || cluster.clusterName || "Working Cluster";
+    const zoneCity = [cluster.zoneName, cluster.cityName].filter(Boolean).join(" / ");
+    labels.push(`<div class="customer-simple-map-cluster-label" style="left:${left.toFixed(1)}px;top:${top.toFixed(1)}px"><b>${escapeHtml(name)}</b>${zoneCity ? `<span>${escapeHtml(zoneCity)}</span>` : ""}</div>`);
+  });
+  return `<svg class="customer-simple-map-cluster" aria-label="Working cluster boundaries">${polygons.join("")}</svg>${labels.join("")}`;
+}
+
+function renderCustomerAddressSimpleMap() {
+  const mapEl = $("#customerAddressMap");
+  if (!mapEl || !customerAddressSimpleMap) return;
+  const { latitude, longitude, zoom } = customerAddressSimpleMap;
+  const rect = mapEl.getBoundingClientRect();
+  const width = Math.max(320, rect.width || mapEl.clientWidth || 760);
+  const height = Math.max(260, rect.height || mapEl.clientHeight || 430);
+  const center = customerAddressMapWorldPoint(latitude, longitude, zoom);
+  const topLeft = { x: center.x - width / 2, y: center.y - height / 2 };
+  const minTileX = Math.floor(topLeft.x / 256) - 1;
+  const maxTileX = Math.floor((topLeft.x + width) / 256) + 1;
+  const minTileY = Math.floor(topLeft.y / 256) - 1;
+  const maxTileY = Math.floor((topLeft.y + height) / 256) + 1;
+  const tileMax = 2 ** zoom;
+  const tiles = [];
+  for (let x = minTileX; x <= maxTileX; x += 1) {
+    for (let y = minTileY; y <= maxTileY; y += 1) {
+      if (y < 0 || y >= tileMax) continue;
+      const wrappedX = ((x % tileMax) + tileMax) % tileMax;
+      const left = Math.round(x * 256 - topLeft.x);
+      const top = Math.round(y * 256 - topLeft.y);
+      const subdomain = ["a", "b", "c"][Math.abs(wrappedX + y) % 3];
+      tiles.push(`<img class="customer-simple-map-tile" src="https://${subdomain}.tile.openstreetmap.org/${zoom}/${wrappedX}/${y}.png" referrerpolicy="no-referrer" style="left:${left}px;top:${top}px" alt="">`);
+    }
+  }
+  mapEl.innerHTML = `<div class="customer-simple-map-canvas">${tiles.join("")}${customerAddressClusterOverlaySvg(topLeft, zoom)}</div>`;
+  customerAddressLivePinLocation = { latitude, longitude };
+}
+
+function setCustomerAddressSimpleMapCenter(latitude, longitude, zoom = customerAddressSimpleMap?.zoom || 17) {
+  customerAddressSimpleMap = {
+    ...(customerAddressSimpleMap || {}),
+    latitude: Math.max(-85, Math.min(85, Number(latitude))),
+    longitude: Math.max(-180, Math.min(180, Number(longitude))),
+    zoom: Math.max(3, Math.min(19, Number(zoom) || 17)),
+    dragging: false,
+    dragStart: null,
+    startCenter: null
+  };
+  renderCustomerAddressSimpleMap();
+}
+
+function scheduleCustomerAddressSimpleMapPick() {
+  if (!customerAddressSimpleMap) return;
+  const { latitude, longitude } = customerAddressSimpleMap;
+  customerAddressLivePinLocation = { latitude, longitude };
+  if (customerAddressMapSyncTimer) clearTimeout(customerAddressMapSyncTimer);
+  customerAddressSelectedLocation = { label: "Map pin location", address: "Resolving selected area...", latitude, longitude, source: "map" };
+  customerAddressServiceability = null;
+  updateCustomerAddressSelectedPreview();
+  customerAddressMapSyncTimer = setTimeout(() => {
+    applyCustomerAddressPinLocation(latitude, longitude).catch((error) => showAlert(error.message));
+  }, 450);
+}
+
+function initializeCustomerAddressSimpleMap() {
+  const mapEl = $("#customerAddressMap");
+  if (!mapEl) return;
+  const center = customerAddressMapCenterLocation();
+  setCustomerAddressSimpleMapCenter(center.latitude, center.longitude, customerAddressSimpleMap?.zoom || 17);
+  mapEl.onpointerdown = (event) => {
+    if (!customerAddressSimpleMap) return;
+    mapEl.setPointerCapture?.(event.pointerId);
+    customerAddressSimpleMap.dragging = true;
+    customerAddressSimpleMap.dragStart = { x: event.clientX, y: event.clientY };
+    customerAddressSimpleMap.startCenter = { latitude: customerAddressSimpleMap.latitude, longitude: customerAddressSimpleMap.longitude };
+  };
+  mapEl.onpointermove = (event) => {
+    if (!customerAddressSimpleMap?.dragging || !customerAddressSimpleMap.dragStart || !customerAddressSimpleMap.startCenter) return;
+    const start = customerAddressMapWorldPoint(customerAddressSimpleMap.startCenter.latitude, customerAddressSimpleMap.startCenter.longitude, customerAddressSimpleMap.zoom);
+    const dx = event.clientX - customerAddressSimpleMap.dragStart.x;
+    const dy = event.clientY - customerAddressSimpleMap.dragStart.y;
+    const next = customerAddressMapLatLngFromWorld(start.x - dx, start.y - dy, customerAddressSimpleMap.zoom);
+    customerAddressSimpleMap.latitude = Math.max(-85, Math.min(85, next.latitude));
+    customerAddressSimpleMap.longitude = Math.max(-180, Math.min(180, next.longitude));
+    renderCustomerAddressSimpleMap();
+  };
+  mapEl.onpointerup = (event) => {
+    if (!customerAddressSimpleMap) return;
+    mapEl.releasePointerCapture?.(event.pointerId);
+    customerAddressSimpleMap.dragging = false;
+    scheduleCustomerAddressSimpleMapPick();
+  };
+  mapEl.onpointercancel = () => {
+    if (customerAddressSimpleMap) customerAddressSimpleMap.dragging = false;
+  };
+  mapEl.onwheel = (event) => {
+    event.preventDefault();
+    if (!customerAddressSimpleMap) return;
+    customerAddressSimpleMap.zoom = Math.max(3, Math.min(19, customerAddressSimpleMap.zoom + (event.deltaY < 0 ? 1 : -1)));
+    renderCustomerAddressSimpleMap();
+    scheduleCustomerAddressSimpleMapPick();
+  };
+  scheduleCustomerAddressSimpleMapPick();
+}
+
+function customerAddressMapObjects() {
+  const map = customerAddressMapInstance;
+  return [map, map?._map, map?.map, map?.mapInstance, map?.olamap].filter(Boolean);
+}
+
+function resolveCustomerAddressMapObject() {
+  customerAddressResolvedMap = customerAddressMapObjects().find((map) =>
+    typeof map?.getCenter === "function" ||
+    typeof map?.unproject === "function" ||
+    typeof map?.on === "function"
+  ) || null;
+  return customerAddressResolvedMap;
+}
+
+function customerAddressMapScreenCenterLatLng() {
+  const mapEl = $("#customerAddressMap");
+  if (!mapEl) return { latitude: NaN, longitude: NaN };
+  const rect = mapEl.getBoundingClientRect();
+  const point = [rect.width / 2, rect.height / 2];
+  for (const map of customerAddressMapObjects()) {
+    const projected = map?.unproject?.(point);
+    const location = readMapLngLat(projected);
+    if (Number.isFinite(location.latitude) && Number.isFinite(location.longitude)) return location;
+  }
+  return { latitude: NaN, longitude: NaN };
+}
+
+function customerAddressPinLatLng() {
+  if (customerAddressSimpleMap) return { latitude: customerAddressSimpleMap.latitude, longitude: customerAddressSimpleMap.longitude };
+  if (locationHasCoordinates(customerAddressLivePinLocation)) return customerAddressLivePinLocation;
+  const screenCenter = customerAddressMapScreenCenterLatLng();
+  if (Number.isFinite(screenCenter.latitude) && Number.isFinite(screenCenter.longitude)) return screenCenter;
+  const candidates = customerAddressMapObjects().flatMap((map) => [
+    map?.getCenter?.(),
+    map?.transform?.center
+  ]);
+  for (const candidate of candidates) {
+    const point = readMapLngLat(candidate);
+    if (Number.isFinite(point.latitude) && Number.isFinite(point.longitude)) return point;
+  }
+  return customerAddressLastPointerLatLng || { latitude: NaN, longitude: NaN };
+}
+
+function readCustomerAddressMapCenter(map = customerAddressResolvedMap || resolveCustomerAddressMapObject()) {
+  if (!map) return customerAddressMapScreenCenterLatLng();
+  const candidates = [map?.getCenter?.(), map?.transform?.center];
+  for (const candidate of candidates) {
+    const point = readMapLngLat(candidate);
+    if (Number.isFinite(point.latitude) && Number.isFinite(point.longitude)) return point;
+  }
+  const screenCenter = customerAddressMapScreenCenterLatLng();
+  if (Number.isFinite(screenCenter.latitude) && Number.isFinite(screenCenter.longitude)) return screenCenter;
+  return customerAddressLastPointerLatLng || { latitude: NaN, longitude: NaN };
+}
+
+function updateCustomerAddressSelectedPreview() {
+  const target = $("#customerAddressSelectedPreview");
+  if (target) target.innerHTML = customerAddressSelectedHtml();
+  const areaText = $("#customerAddressSelectedAreaText");
+  if (areaText && customerAddressSelectedLocation) areaText.value = customerAddressSelectedLocation.address || customerAddressSelectedLocation.label || "";
+  const submit = $("#customerAddressForm button[type='submit']");
+  if (submit) submit.disabled = !locationHasCoordinates(customerAddressSelectedLocation) || customerAddressServiceability?.isServiceable !== true;
+}
+
+function scheduleCustomerAddressMapSelectionSync(map = customerAddressResolvedMap || resolveCustomerAddressMapObject()) {
+  if (!customerAddressMapInstance) return;
+  const { latitude, longitude } = readCustomerAddressMapCenter(map);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+  customerAddressLivePinLocation = { latitude, longitude };
+  const syncKey = `${latitude.toFixed(6)},${longitude.toFixed(6)}`;
+  if (syncKey === customerAddressLastMapSyncKey) return;
+  customerAddressLastMapSyncKey = syncKey;
+  customerAddressSelectedLocation = {
+    ...(customerAddressSelectedLocation || {}),
+    label: "Map pin location",
+    address: "Resolving selected area...",
+    latitude,
+    longitude,
+    source: "map"
+  };
+  customerAddressServiceability = null;
+  updateCustomerAddressSelectedPreview();
+  if (customerAddressMapSyncTimer) clearTimeout(customerAddressMapSyncTimer);
+  customerAddressMapSyncTimer = setTimeout(async () => {
+    try {
+      if (!customerAddressMapInstance) return;
+      const current = readCustomerAddressMapCenter(map);
+      const currentKey = `${Number(current.latitude).toFixed(6)},${Number(current.longitude).toFixed(6)}`;
+      if (currentKey !== syncKey) return;
+      customerAddressLivePinLocation = { latitude, longitude };
+      await applyCustomerAddressPinLocation(latitude, longitude);
+    } catch (error) {
+      showAlert(error.message);
+    }
+  }, 400);
+}
+
+function startCustomerAddressMapAutoSync() {
+  if (customerAddressMapPollTimer) clearInterval(customerAddressMapPollTimer);
+  const map = customerAddressResolvedMap || resolveCustomerAddressMapObject();
+  if (!map) customerAddressMapPollTimer = setInterval(() => scheduleCustomerAddressMapSelectionSync(), 800);
+  setTimeout(() => scheduleCustomerAddressMapSelectionSync(map), 100);
+}
+
+async function initializeCustomerAddressMap() {
+  const mapEl = $("#customerAddressMap");
+  if (!mapEl) return;
+  if (customerAddressMapInstance) {
+    const map = resolveCustomerAddressMapObject();
+    if (map && !customerAddressMapEventsBound) bindCustomerAddressMapMoveEvents(map, mapEl);
+    startCustomerAddressMapAutoSync();
+    scheduleCustomerAddressMapSelectionSync(map);
+    return;
+  }
+  const config = await api(BASE_PATH+"/config/maps");
+  const { olaMapsApiKey, olaMapsStyleUrl } = config.data || {};
+  if (!olaMapsApiKey) throw new Error("Map key is not configured. Use search or current location.");
+  await loadOlaMapsSdk();
+  const centerLocation = customerAddressMapCenterLocation();
+  const center = [Number(centerLocation.longitude), Number(centerLocation.latitude)];
+  mapEl.innerHTML = "";
+  const olaMaps = new window.OlaMaps({ apiKey: olaMapsApiKey });
+  const initMap = (style) => olaMaps.init({ style, container: "customerAddressMap", center, zoom: 15 });
+  const attachMapClick = () => customerAddressMapInstance?.on?.("click", async (event) => {
+    const { latitude, longitude } = readMapLngLat(event?.lngLat);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+    customerAddressLivePinLocation = { latitude, longitude };
+    await applyCustomerAddressPinLocation(latitude, longitude);
+  });
+  customerAddressMapInstance = initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
+  attachMapClick();
+  customerAddressMapInstance.on?.("load", () => {
+    customerAddressMapInstance?.resize?.();
+    const map = resolveCustomerAddressMapObject();
+    bindCustomerAddressMapMoveEvents(map, mapEl);
+    if (locationHasCoordinates(customerAddressSelectedLocation)) {
+      customerAddressMapInstance?.flyTo?.({
+        center: [Number(customerAddressSelectedLocation.longitude), Number(customerAddressSelectedLocation.latitude)],
+        zoom: 18,
+        duration: 250
+      });
+    }
+    startCustomerAddressMapAutoSync();
+  });
+  setTimeout(() => {
+    const map = resolveCustomerAddressMapObject();
+    bindCustomerAddressMapMoveEvents(map, mapEl);
+    startCustomerAddressMapAutoSync();
+  }, 300);
+  let usedFallback = false;
+  customerAddressMapInstance.on?.("error", (event) => {
+    const message = event?.error?.message || "Ola Maps could not load for this domain.";
+    if (usedFallback || !isOlaMapAuthOrDomainError(event?.error || message)) return;
+    usedFallback = true;
+    cleanupCustomerAddressMap();
+    mapEl.innerHTML = "";
+    customerAddressMapInstance = initMap(fallbackRasterStyle());
+    attachMapClick();
+    customerAddressMapInstance.on?.("load", () => {
+      const map = resolveCustomerAddressMapObject();
+      bindCustomerAddressMapMoveEvents(map, mapEl);
+      if (locationHasCoordinates(customerAddressSelectedLocation)) {
+        customerAddressMapInstance?.flyTo?.({
+          center: [Number(customerAddressSelectedLocation.longitude), Number(customerAddressSelectedLocation.latitude)],
+          zoom: 18,
+          duration: 250
+        });
+      }
+      startCustomerAddressMapAutoSync();
+    });
+    showAlert(`${message}. Showing fallback map tiles. Add this admin domain to the Ola Maps credentials whitelist to use Ola vector tiles.`);
+  });
+}
+
+function bindCustomerAddressMapMoveEvents(map = resolveCustomerAddressMapObject(), mapEl = $("#customerAddressMap")) {
+  if (!map || !mapEl || customerAddressMapEventsBound) return;
+  customerAddressResolvedMap = map;
+  customerAddressMapEventsBound = true;
+  const onMove = () => scheduleCustomerAddressMapSelectionSync(map);
+  ["move", "drag", "zoom", "moveend", "dragend", "zoomend", "idle"].forEach((eventName) => map?.on?.(eventName, onMove));
+  ["pointerup", "mouseup", "touchend", "wheel"].forEach((eventName) => {
+    mapEl.addEventListener(eventName, () => setTimeout(() => scheduleCustomerAddressMapSelectionSync(map), 120));
+  });
+  mapEl.addEventListener("pointermove", (event) => {
+    const rect = mapEl.getBoundingClientRect();
+    const point = [event.clientX - rect.left, event.clientY - rect.top];
+    const projected = map?.unproject?.(point);
+    const location = readMapLngLat(projected);
+    if (Number.isFinite(location.latitude) && Number.isFinite(location.longitude)) {
+      customerAddressLastPointerLatLng = location;
+    }
+  });
+}
+
+async function openCustomerAddressMapPicker() {
+  if (!$("#customerAddressMap")) renderCustomerAddressManager();
+  const map = $("#customerAddressMap");
+  if (map) map.innerHTML = `<div class="empty-state">Loading map...</div>`;
+  await ensureCustomerAddressMapClusters();
+  initializeCustomerAddressSimpleMap();
+}
+
+function bookingMasterLocationSearchResultsHtml() {
+  if (bookingMasterLocationSearchLoading) return `<div class="booking-location-dropdown"><div class="empty-state">Searching map results...</div></div>`;
+  if (bookingMasterLocationSearchError) return `<div class="booking-location-dropdown"><div class="empty-state">${escapeHtml(bookingMasterLocationSearchError)}</div></div>`;
+  if (!bookingMasterSelectedCustomer) return `<div class="empty-state">Select a customer before searching locations.</div>`;
+  if (!bookingMasterLocationSearchText) return `<div class="empty-state">Search by address, place name, or coordinates.</div>`;
+  if (bookingMasterLocationSearchText.trim().length < 3) return `<div class="empty-state">Type at least 3 characters.</div>`;
+  if (!bookingMasterLocationSearchResults.length) return `<div class="empty-state">No location results yet.</div>`;
+  return `<div class="booking-location-dropdown">${bookingMasterLocationSearchResults.map((location) => bookingMasterLocationCard(location, "Pick")).join("")}</div>`;
+}
+
+function renderBookingMasterLocationSearchResults() {
+  const target = $("#bookingMasterLocationSearchResults");
+  if (target) target.innerHTML = bookingMasterLocationSearchResultsHtml();
+}
+
+function renderBookingMasterLocationPhase() {
+  const target = $("#bookingMasterLocationPhase");
+  if (!target) return;
+  renderBookingMasterAssistantWidget();
+  cleanupBookingMasterMap();
+  if (!bookingMasterSelectedCustomer) {
+    target.innerHTML = `<div class="empty-state">Pick a customer before choosing services.</div>`;
+    return;
+  }
+  if (!bookingMasterSelectedLocation && !bookingMasterServiceability?.pending) {
+    target.innerHTML = `<div class="booking-next-panel">
+      <div class="serviceability-result">
+        <b>No booking address selected.</b>
+        <span>Choose a saved address or add a new address before services and categories are shown.</span>
+        <button class="btn btn-primary btn-sm" data-action="change-booking-master-address" type="button">Choose Address</button>
+      </div>
+    </div>`;
+    return;
+  }
+  target.innerHTML = `<div id="bookingMasterServiceabilityResult">${bookingMasterServiceabilityHtml()}</div>
+  <div id="bookingMasterNextPhase">${bookingMasterNextPhaseHtml()}</div>`;
+}
+
+function bindBookingMasterLocationControls() {
+  const searchForm = document.querySelector('[data-booking-master-location-form="search"]');
+  const whatsappForm = document.querySelector('[data-booking-master-location-form="whatsapp"]');
+  const manualForm = document.querySelector('[data-booking-master-location-form="manual"]');
+  if (searchForm) {
+    searchForm.onsubmit = (event) => {
+      event.preventDefault();
+      searchBookingMasterLocations().catch((error) => {
+        bookingMasterLocationSearchResults = [];
+        showAlert(error.message);
+        renderBookingMasterLocationPhase();
+      });
+    };
+  }
+  if (whatsappForm) {
+    whatsappForm.onsubmit = (event) => {
+      event.preventDefault();
+      useBookingMasterLatLngInput("bookingMasterWhatsappLocationInput", "whatsapp").catch((error) => {
+        bookingMasterServiceability = { isServiceable: false, message: error.message };
+        renderBookingMasterLocationPhase();
+        showAlert(error.message);
+      });
+    };
+  }
+  if (manualForm) {
+    manualForm.onsubmit = (event) => {
+      event.preventDefault();
+      useBookingMasterLatLngInput("bookingMasterManualLatLngInput", "manual").catch((error) => {
+        bookingMasterServiceability = { isServiceable: false, message: error.message };
+        renderBookingMasterLocationPhase();
+        showAlert(error.message);
+      });
+    };
+  }
+  const whatsappButton = $("#bookingMasterWhatsappUseButton");
+  const manualButton = $("#bookingMasterManualUseButton");
+  if (whatsappButton) {
+    whatsappButton.onclick = (event) => {
+      event.preventDefault();
+      useBookingMasterLatLngInput("bookingMasterWhatsappLocationInput", "whatsapp").catch((error) => {
+        bookingMasterServiceability = { isServiceable: false, message: error.message };
+        renderBookingMasterLocationPhase();
+        showAlert(error.message);
+      });
+    };
+  }
+  if (manualButton) {
+    manualButton.onclick = (event) => {
+      event.preventDefault();
+      useBookingMasterLatLngInput("bookingMasterManualLatLngInput", "manual").catch((error) => {
+        bookingMasterServiceability = { isServiceable: false, message: error.message };
+        renderBookingMasterLocationPhase();
+        showAlert(error.message);
+      });
+    };
+  }
+}
+
+function bookingMasterSelectedLocationHtml() {
+  const location = bookingMasterSelectedLocation;
+  if (!location) return `<div class="empty-state">No task location selected.</div>`;
+  return `<div class="booking-location-selected">
+    <span>Selected location</span>
+    <b>${escapeHtml(location.address || location.label || "Task location")}</b>
+    <p>${escapeHtml(location.latitude)}, ${escapeHtml(location.longitude)}</p>
+    ${location.provider ? `<small>${escapeHtml(location.provider === "ola_maps" ? "Ola Maps" : location.provider)}</small>` : ""}
+  </div>`;
+}
+
+function bookingMasterServiceabilityHtml() {
+  const result = bookingMasterServiceability;
+  if (!result) return `<div class="empty-state">Serviceability will appear after location selection.</div>`;
+  if (result.pending) return `<div class="serviceability-result">${escapeHtml(result.message || "Checking serviceability...")}</div>`;
+  if (!result.isServiceable) return `<div class="serviceability-result danger">${escapeHtml(result.message)}</div>`;
+  return `<div class="serviceability-result success">
+    <b>Serviceable</b>
+    <span>${escapeHtml(result.cluster?.name || "-")} ${result.cluster?.code ? `(${escapeHtml(result.cluster.code)})` : ""}</span>
+    <span>${escapeHtml([result.cluster?.cityName, result.cluster?.zoneName].filter(Boolean).join(" / ") || "-")}</span>
+    <span>${escapeHtml(result.location?.latitude ?? "-")}, ${escapeHtml(result.location?.longitude ?? "-")}</span>
+  </div>`;
+}
+
+function bookingMasterNextPhaseHtml() {
+  if (!bookingMasterServiceability?.isServiceable) return "";
+  if (bookingMasterNextPhaseLoading) return `<div class="booking-next-panel"><div class="empty-state">Loading booking catalog...</div></div>`;
+  if (bookingMasterNextPhaseError) return `<div class="booking-next-panel"><div class="serviceability-result danger">${escapeHtml(bookingMasterNextPhaseError)}</div></div>`;
+  if (bookingMasterPhase === "location") return "";
+
+  const selectedService = bookingMasterClusterServices.find((service) => service.serviceId === bookingMasterSelectedServiceId);
+  const selectedCategory = bookingMasterClusterCategories.find((category) => category.categoryId === bookingMasterSelectedCategoryId);
+  const mode = bookingMasterSelectedPricingMode();
+  const categoryOnlyMode = bookingMasterUsesCategoryOnlyTaskMode();
+  const timeSlotMode = bookingMasterUsesTimeSlotMode();
+  const categoryGroup = bookingMasterCategoryGroupPricing(bookingMasterCategoryGroupRule() || {});
+  const maxCategoriesText = categoryGroup.maxCategoriesAllowed === "all" ? "All" : String(categoryGroup.maxCategoriesAllowed || "All");
+  const selectedCount = mode === "time" && bookingMasterQuote?.lineItems?.length ? 1 : bookingMasterCartItems.length;
+  const cartUnitLabel = mode === "time" ? "slot" : categoryOnlyMode ? "categor" : "store";
+  const cartUnitPlural = mode === "time" ? "slots" : categoryOnlyMode ? "categories" : "stores";
+  const categoryPanelLabel = timeSlotMode
+    ? "Durations"
+    : categoryOnlyMode
+      ? `Categories &middot; Max allowed in cart: ${escapeHtml(maxCategoriesText)}`
+      : "Categories";
+  const categoryPanelTitle = timeSlotMode ? "Select one time slot" : selectedService?.serviceName || "Select service";
+  const detailPanelLabel = timeSlotMode ? "Selected Duration" : categoryOnlyMode ? "Category Items" : "Stores";
+  const detailPanelTitle = timeSlotMode
+    ? selectedService?.serviceName || "Select service"
+    : categoryOnlyMode
+      ? selectedService?.serviceName || "Select service"
+      : selectedCategory?.categoryName || "Select category";
+  const cartReady = bookingMasterSelectedServiceId || bookingMasterCartItems.length;
+  return `<div class="booking-next-panel booking-shop-panel booking-master-catalog">
+    <section class="booking-shop-row booking-service-row">
+      <div class="booking-shop-cell-header">
+        <div><span>Our Services</span><h3>${escapeHtml(bookingMasterServiceability.cluster?.name || "Serviceable cluster")}</h3></div>
+        <b>${escapeHtml(selectedCount)} ${selectedCount === 1 ? (cartUnitLabel === "categor" ? "category" : cartUnitLabel) : cartUnitPlural} selected</b>
+      </div>
+      <div class="booking-service-grid booking-shop-scroll">${bookingMasterClusterServices.length ? bookingMasterClusterServices.map(bookingMasterServiceCard).join("") : `<div class="empty-state">No services are mapped to this cluster.</div>`}</div>
+    </section>
+    <section class="booking-shop-row booking-category-row">
+      <div class="booking-shop-cell-header">
+        <div><span>${categoryPanelLabel}</span><h3>${escapeHtml(categoryPanelTitle)}</h3></div>
+        <input id="bookingMasterCategorySearchInput" class="form-control booking-shop-search" type="search" value="${escapeHtml(bookingMasterCategorySearchText)}" placeholder="${timeSlotMode ? "Search time slots" : "Search categories"}" ${bookingMasterSelectedServiceId ? "" : "disabled"}>
+      </div>
+      <div id="bookingMasterCategoryGrid" class="${timeSlotMode ? `booking-duration-grid ${bookingMasterTimeSlotItems().length > 3 ? "many" : ""}` : "booking-category-grid"} booking-shop-scroll">${bookingMasterSelectedServiceId ? bookingMasterCategoryCards().join("") || `<div class="empty-state">${timeSlotMode ? "No time slots match this service." : "No categories match this service."}</div>` : `<div class="empty-state">Choose a service first.</div>`}</div>
+    </section>
+    <div class="booking-shop-commerce-grid">
+      <section class="booking-shop-cell booking-shop-store-cell">
+        <div class="booking-shop-cell-header"><div><span>${detailPanelLabel}</span><h3>${escapeHtml(detailPanelTitle)}</h3></div></div>
+        ${mode === "task" && !categoryOnlyMode ? `<input id="bookingMasterStoreSearchInput" class="form-control booking-shop-search" type="search" value="${escapeHtml(bookingMasterStoreSearchText)}" placeholder="Search Store" ${bookingMasterSelectedCategoryId ? "" : "disabled"}>` : ""}
+        ${timeSlotMode ? bookingMasterTimeSlotHelperHtml() : categoryOnlyMode ? bookingMasterCategoryOnlyListHtml() : bookingMasterSelectedCategoryId ? mode === "time" ? bookingMasterTimeSlabsHtml() : bookingMasterStoreListHtml() : `<div class="empty-state">Choose a category to continue.</div>`}
+      </section>
+      <section class="booking-shop-cell booking-shop-cart-cell">
+        ${cartReady ? bookingMasterCartHtml(false) : `<div class="booking-cart-panel"><div class="empty-state">Choose a service to start a cart.</div></div>`}
+      </section>
+    </div>
+    ${cartReady ? `${bookingMasterBookingDetailHtml()}${bookingMasterCreateActionsHtml()}` : ""}
+  </div>`;
+}
+
+function bookingMasterSelectedPricingMode() {
+  if (bookingMasterUsesCategoryOnlyTaskMode()) return "task";
+  if (bookingMasterUsesTimeSlotMode()) return "time";
+  if (!bookingMasterSelectedServiceId || !bookingMasterSelectedCategoryId) return "task";
+  if (bookingMasterMatchingPriceRules("task").length) return "task";
+  if (bookingMasterMatchingPriceRules("time").length) return "time";
+  return "task";
+}
+
+function bookingMasterCategoryGroupPricing(ruleOrMetadata = {}) {
+  const source = ruleOrMetadata.metadata?.categoryGroupPricing || ruleOrMetadata.categoryGroupPricing || {};
+  const slabs = Array.isArray(source.slabs) ? source.slabs : [];
+  return {
+    enabled: Boolean(source.enabled),
+    maxCategoriesAllowed: source.maxCategoriesAllowed === "all" || source.maxCategoriesAllowed === undefined ? "all" : Math.max(1, Number(source.maxCategoriesAllowed || 1)),
+    slabs: slabs
+      .map((slab) => ({
+        categoryId: String(slab.categoryId || ""),
+        categoryName: String(slab.categoryName || ""),
+        basePrice: moneyNumber(slab.basePrice || 0),
+        discountType: ["percent", "flat", "none"].includes(slab.discountType) ? slab.discountType : "none",
+        discountValue: moneyNumber(slab.discountValue || 0),
+        sellingPrice: moneyNumber(slab.sellingPrice || slab.basePrice || 0),
+        allottedTime: {
+          enabled: Boolean(slab.allottedTime?.enabled),
+          durationMinutes: Math.max(0, Number(slab.allottedTime?.durationMinutes || 0))
+        },
+        waitingCharge: {
+          enabled: Boolean(slab.waitingCharge?.enabled),
+          amount: Math.max(0, moneyNumber(slab.waitingCharge?.amount || 0)),
+          chargePerMinutes: Math.max(0, Number(slab.waitingCharge?.chargePerMinutes || 0))
+        }
+      }))
+      .filter((slab) => slab.categoryId)
+  };
+}
+
+function bookingMasterCategoryGroupRule(serviceId = bookingMasterSelectedServiceId) {
+  if (!serviceId) return null;
+  const clusterId = bookingMasterServiceability?.cluster?.clusterId || "";
+  const rank = { all: 1, state: 2, city: 3, zone: 4, cluster: 5 };
+  const serviceCategoryIds = new Set(
+    (bookingMasterClusterCategories || [])
+      .filter((category) => category.serviceId === serviceId)
+      .map((category) => category.categoryId)
+  );
+  const pricedSlabCount = (rule) => bookingMasterCategoryGroupPricing(rule).slabs
+    .filter((slab) => (!serviceCategoryIds.size || serviceCategoryIds.has(slab.categoryId)) && moneyNumber(slab.sellingPrice || 0) > 0)
+    .length;
+  return (bookingMasterPriceRules || [])
+    .filter((rule) => {
+      if (rule.isActive === false || rule.priceType !== "task" || rule.serviceId !== serviceId) return false;
+      if (!bookingMasterCategoryGroupPricing(rule).enabled) return false;
+      if (rule.scopeType === "cluster") return rule.clusterId === clusterId;
+      return !rule.scopeType || rule.scopeType === "all" || ["state", "city", "zone"].includes(rule.scopeType);
+    })
+    .slice()
+    .sort((a, b) =>
+      pricedSlabCount(b) - pricedSlabCount(a) ||
+      (rank[b.scopeType || "all"] || 1) - (rank[a.scopeType || "all"] || 1) ||
+      (b.categoryId ? 0 : 1) - (a.categoryId ? 0 : 1)
+    )[0] || null;
+}
+
+function bookingMasterUsesCategoryOnlyTaskMode(serviceId = bookingMasterSelectedServiceId) {
+  return Boolean(bookingMasterCategoryGroupRule(serviceId));
+}
+
+function bookingMasterCategoryGroupSlab(categoryId, serviceId = bookingMasterSelectedServiceId) {
+  const rule = bookingMasterCategoryGroupRule(serviceId);
+  return bookingMasterCategoryGroupPricing(rule || {}).slabs.find((slab) => slab.categoryId === categoryId) || null;
+}
+
+function bookingMasterCategoryGroupMaxAllowed(serviceId = bookingMasterSelectedServiceId) {
+  const max = bookingMasterCategoryGroupPricing(bookingMasterCategoryGroupRule(serviceId) || {}).maxCategoriesAllowed;
+  return max === "all" ? Infinity : Math.max(1, Number(max || 1));
+}
+
+function bookingMasterCategoryCartLimitReached(categoryId = "") {
+  if (!bookingMasterUsesCategoryOnlyTaskMode()) return false;
+  if (categoryId && bookingMasterCartItemIndexByCategoryId(categoryId) >= 0) return false;
+  const category = categoryId ? bookingMasterCategoryById(categoryId) : null;
+  const serviceId = category?.serviceId || bookingMasterSelectedServiceId;
+  const serviceCategoryCount = bookingMasterCartItems
+    .filter((item) => !item.storeId)
+    .filter((item) => (item.serviceId || bookingMasterCategoryById(item.categoryId)?.serviceId || "") === serviceId)
+    .length;
+  return serviceCategoryCount >= bookingMasterCategoryGroupMaxAllowed(serviceId);
+}
+
+function bookingMasterStoreCartLimitMessage(category, storeId) {
+  if (!category) return "";
+  const rule = bookingMasterBestPriceRule("task", category.categoryId, category.serviceId, storeId, true) || bookingMasterBestPriceRule("task", category.categoryId, category.serviceId);
+  if (!rule) return "";
+  const maxPerCategory = Math.max(1, Number(rule.maxStoresPerCategory || 1));
+  const maxTotal = rule.maxStoresTotal == null ? 0 : Math.max(1, Number(rule.maxStoresTotal || 1));
+  const categoryCount = bookingMasterCartItems.filter((item) => item.priceType !== "time" && item.storeId && item.categoryId === category.categoryId).length;
+  const serviceStoreCount = bookingMasterCartItems.filter((item) =>
+    item.priceType !== "time" &&
+    item.storeId &&
+    (item.serviceId || bookingMasterCategoryById(item.categoryId)?.serviceId || bookingMasterSelectedServiceId) === category.serviceId
+  ).length;
+  if (categoryCount >= maxPerCategory) {
+    return `Maximum stores limit reached for ${category.categoryName || "this category"}. Remove a store from cart to add a new store.`;
+  }
+  if (Number.isFinite(maxTotal) && maxTotal > 0 && serviceStoreCount >= maxTotal) {
+    return `Maximum stores limit reached. Remove a store from cart to add a new store.`;
+  }
+  return "";
+}
+
+function bookingMasterMatchingPriceRules(priceType, categoryId = bookingMasterSelectedCategoryId, serviceId = bookingMasterSelectedServiceId, storeId = null, includeStoreSpecific = false) {
+  const clusterId = bookingMasterServiceability?.cluster?.clusterId || "";
+  return (bookingMasterPriceRules || []).filter((rule) => {
+    if (rule.isActive === false || rule.priceType !== priceType || rule.serviceId !== serviceId) return false;
+    if (categoryId && rule.categoryId !== categoryId) return false;
+    if (!includeStoreSpecific && rule.storeId) return false;
+    if (includeStoreSpecific && storeId && rule.storeId && rule.storeId !== storeId) return false;
+    if (rule.scopeType === "cluster") return rule.clusterId === clusterId;
+    return !rule.scopeType || rule.scopeType === "all" || ["state", "city", "zone"].includes(rule.scopeType);
+  });
+}
+
+function bookingMasterBestPriceRule(priceType, categoryId = bookingMasterSelectedCategoryId, serviceId = bookingMasterSelectedServiceId, storeId = null, includeStoreSpecific = false) {
+  const rank = { all: 1, state: 2, city: 3, zone: 4, cluster: 5 };
+  return bookingMasterMatchingPriceRules(priceType, categoryId, serviceId, storeId, includeStoreSpecific)
+    .slice()
+    .sort((a, b) =>
+      (rank[b.scopeType || "all"] || 1) - (rank[a.scopeType || "all"] || 1) ||
+      (storeId ? (b.storeId === storeId ? 1 : 0) - (a.storeId === storeId ? 1 : 0) : 0) ||
+      (b.storeId ? 1 : 0) - (a.storeId ? 1 : 0)
+    )[0] || null;
+}
+
+function bookingMasterUsesTimeSlotMode(serviceId = bookingMasterSelectedServiceId) {
+  return !bookingMasterUsesCategoryOnlyTaskMode(serviceId) && bookingMasterTimeSlotItems(serviceId).length > 0;
+}
+
+function bookingMasterTimeSlotItems(serviceId = bookingMasterSelectedServiceId, includeSearch = false) {
+  if (!serviceId) return [];
+  const search = includeSearch ? bookingMasterCategorySearchText.trim().toLowerCase() : "";
+  const rules = bookingMasterMatchingPriceRules("time", "", serviceId);
+  return rules
+    .flatMap((rule) => {
+      const category = bookingMasterCategoryById(rule.categoryId || "");
+      return (rule.timeSlabs || []).filter(priceMasterTimeSlabIsActive).map((slab) => ({
+        ...slab,
+        ruleId: rule.id,
+        categoryId: rule.categoryId || "",
+        categoryName: rule.categoryName || category?.categoryName || "Time service"
+      }));
+    })
+    .filter((slot) => {
+      if (!search) return true;
+      return [slot.label, bookingMasterDurationLabel(slot.durationMinutes, slot.label), slot.categoryName].filter(Boolean).join(" ").toLowerCase().includes(search);
+    })
+    .sort((a, b) => Number(a.durationMinutes || 0) - Number(b.durationMinutes || 0));
+}
+
+function bookingMasterTimeSlabsHtml() {
+  const rule = bookingMasterBestPriceRule("time");
+  const slabs = (rule?.timeSlabs || []).filter(priceMasterTimeSlabIsActive).slice().sort((a, b) => Number(a.durationMinutes || 0) - Number(b.durationMinutes || 0));
+  return `<div class="booking-duration-panel">
+    <div class="booking-next-header compact"><div><span>Duration</span><h3>${escapeHtml(slabs.length ? "Select one time slot" : "No slots configured")}</h3></div></div>
+    <div class="booking-duration-grid ${slabs.length > 3 ? "many" : ""}">
+      ${slabs.map((slab) => bookingMasterTimeSlabCard(slab)).join("") || `<div class="empty-state">No active time slots are configured for this category.</div>`}
+    </div>`;
+}
+
+function bookingMasterTimeSlabCard(slab = {}) {
+  const durationMinutes = Number(slab.durationMinutes || 0);
+  const selected = bookingMasterCartItems.some((item) =>
+    item.priceType === "time" &&
+    Number(item.durationMinutes || 0) === durationMinutes &&
+    (item.categoryId || "") === (slab.categoryId || "")
+  );
+  const base = moneyNumber(slab.basePrice ?? slab.price ?? slab.sellingPrice ?? 0);
+  const selling = moneyNumber(slab.sellingPrice ?? slab.price ?? base);
+  const discountType = slab.discountType || "none";
+  const discountValue = moneyNumber(slab.discountValue || 0);
+  const discountLabel = discountType === "percent" && discountValue > 0
+    ? `${discountValue}% off`
+    : discountType === "flat" && discountValue > 0
+      ? `${bookingMasterPrice(discountValue)} off`
+      : "";
+  return `<button class="booking-duration-card ${selected ? "selected" : ""}" data-action="booking-master-add-time-slab" data-duration="${escapeHtml(durationMinutes)}" data-category-id="${escapeHtml(slab.categoryId || "")}" type="button" aria-pressed="${selected ? "true" : "false"}">
+    <span>${escapeHtml(bookingMasterDurationLabel(durationMinutes, slab.label))}</span>
+    <div>
+      <strong>${escapeHtml(bookingMasterPrice(selling))}</strong>
+      ${base > selling ? `<del>${escapeHtml(bookingMasterPrice(base))}</del>` : ""}
+    </div>
+    ${slab.categoryName ? `<em>${escapeHtml(slab.categoryName)}</em>` : ""}
+    ${discountLabel ? `<small>${escapeHtml(discountLabel)}</small>` : ""}
+  </button>`;
+}
+
+function bookingMasterDurationLabel(durationMinutes, label = "") {
+  const minutes = Number(durationMinutes || 0);
+  const custom = String(label || "").trim();
+  if (custom && !/^\d+\s*(min|mins|minute|minutes)$/i.test(custom)) return custom;
+  if (minutes >= 120 && minutes % 60 === 0) return `${minutes / 60} hrs`;
+  return `${minutes || 0} min`;
+}
+
+function bookingMasterServiceCard(service) {
+  const enabled = service.isActive !== false && service.isEnabled !== false && service.isVisible !== false;
+  const startingPrice = bookingMasterServiceStartingPrice(service.serviceId);
+  return `<button class="booking-service-card ${enabled ? "" : "disabled"} ${bookingMasterSelectedServiceId === service.serviceId ? "selected" : ""}" data-action="booking-master-select-service" data-service-id="${escapeHtml(service.serviceId)}" type="button" ${enabled ? "" : "disabled"}>
+    ${bookingMasterThumb(service.serviceImageUrl, service.serviceName || "Service")}
+    <span class="booking-card-body">
+      <b>${escapeHtml(service.serviceName || "-")}</b>
+      <span>${escapeHtml(service.serviceDescription || "Service available in this cluster")}</span>
+      <strong>${startingPrice ? `Start @ ${escapeHtml(bookingMasterPrice(startingPrice))}` : "Start @ -"}</strong>
+      <small>${enabled ? "Active" : "Disabled"}</small>
+    </span>
+    <span class="booking-card-arrow" aria-hidden="true">-></span>
+  </button>`;
+}
+
+function bookingMasterThumb(url, label) {
+  return url
+    ? `<span class="booking-card-thumb"><img src="${escapeHtml(withBasePath(url))}" alt="${escapeHtml(label)}"></span>`
+    : `<span class="booking-card-thumb placeholder">${escapeHtml(initials(label))}</span>`;
+}
+
+function bookingMasterCategoryCards() {
+  const search = bookingMasterCategorySearchText.trim().toLowerCase();
+  const timeSlotMode = bookingMasterUsesTimeSlotMode();
+  const categoryOnlyMode = bookingMasterUsesCategoryOnlyTaskMode();
+  if (timeSlotMode) return bookingMasterTimeSlotItems(bookingMasterSelectedServiceId, true).map((slot) => bookingMasterTimeSlabCard(slot));
+  return bookingMasterClusterCategories
+    .filter((category) => category.serviceId === bookingMasterSelectedServiceId)
+    .filter((category) => {
+      if (!search) return true;
+      return [category.categoryName, category.categoryCode, category.categoryDescription].filter(Boolean).join(" ").toLowerCase().includes(search);
+    })
+    .map((category) => {
+      const enabled = category.isActive !== false && category.isEnabled !== false && category.isVisible !== false;
+      const pricing = bookingMasterCategoryPricing(category);
+      const isInCart = bookingMasterCartItemIndexByCategoryId(category.categoryId) >= 0;
+      const matchingStores = bookingMasterStores.filter((store) => (store.serviceCategoryIds || []).includes(category.categoryId));
+      const categorySchedules = matchingStores.length
+        ? matchingStores.map((store) => store.operatingHours || {})
+        : (category.storeOperatingHours || []);
+      const categoryOpenNow = categorySchedules.some((schedule) => isScheduleOpenNow(schedule || {}));
+      if (categoryOnlyMode) {
+        const priceAvailable = moneyNumber(pricing.selling || 0) > 0;
+        const limitReached = bookingMasterCategoryCartLimitReached(category.categoryId);
+        const personalAssistantLimitReached = bookingMasterPersonalAssistantCategoryLimitReached(category.categoryId);
+        const addDisabled = !enabled || !priceAvailable || limitReached || personalAssistantLimitReached || isInCart;
+        const allottedText = pricing.allottedTime?.enabled ? `${pricing.allottedTime.durationMinutes || 0} mins` : "No";
+        const waitingText = pricing.waitingCharge?.enabled ? `${bookingMasterPrice(pricing.waitingCharge.amount || 0)} / ${pricing.waitingCharge.chargePerMinutes || 0} min` : "No";
+        const content = `
+          ${bookingMasterThumb(category.categoryImageUrl, category.categoryName || "Category")}
+          <div class="booking-card-body">
+            <b>${escapeHtml(category.categoryName || "-")}</b>
+            <span>${escapeHtml(category.categoryDescription || "Available category")}</span>
+            ${openNowStatusHtml(categoryOpenNow)}
+            <small>${escapeHtml(isInCart ? "Added to cart" : enabled ? "Active" : "Disabled")}</small>
+          </div>
+          <span class="booking-price-stack">
+            <small><b>Base</b> ${escapeHtml(bookingMasterPrice(pricing.base))}</small>
+            <small><b>Discount</b> ${escapeHtml(pricing.discountLabel)}</small>
+            <strong>${escapeHtml(bookingMasterPrice(pricing.selling))}</strong>
+            <small><b>Allotted</b> ${escapeHtml(allottedText)}</small>
+            <small><b>Waiting</b> ${escapeHtml(waitingText)}</small>
+            <button class="btn btn-primary btn-xs" data-action="booking-master-add-category" data-category-id="${escapeHtml(category.categoryId)}" type="button" ${addDisabled ? "disabled" : ""}>${isInCart ? "Added" : priceAvailable ? "Add" : "Price required"}</button>
+          </span>`;
+        return `<div class="booking-category-card category-cart-card ${enabled ? "" : "disabled"} ${isInCart ? "selected" : ""}">${content}</div>`;
+      }
+      return `<button class="booking-category-card ${enabled ? "" : "disabled"} ${bookingMasterSelectedCategoryId === category.categoryId ? "selected" : ""}" data-action="booking-master-select-category" data-category-id="${escapeHtml(category.categoryId)}" type="button" ${enabled ? "" : "disabled"}>
+        ${bookingMasterThumb(category.categoryImageUrl, category.categoryName || "Category")}
+        <div class="booking-card-body">
+          <b>${escapeHtml(category.categoryName || "-")}</b>
+          <span>${escapeHtml(category.categoryDescription || "Available category")}</span>
+          ${openNowStatusHtml(categoryOpenNow)}
+          <small>${enabled ? "Active" : "Disabled"}</small>
+        </div>
+        <span class="booking-price-stack">
+          ${pricing.base > pricing.selling ? `<del>${escapeHtml(bookingMasterPrice(pricing.base))}</del>` : ""}
+          <strong>${escapeHtml(bookingMasterPrice(pricing.selling))}</strong>
+          ${pricing.saveLabel ? `<small>${escapeHtml(pricing.saveLabel)}</small>` : ""}
+        </span>
+      </button>`;
+    });
+}
+
+function bookingMasterCategoryOnlyListHtml() {
+  if (!bookingMasterSelectedServiceId) return `<div class="empty-state">Choose a service first.</div>`;
+  return `<div class="empty-state">No store selection is required. Add categories directly from the category list.</div>`;
+}
+
+function bookingMasterTimeSlotHelperHtml() {
+  return `<div class="empty-state">Use Add in the Categories section. Only one time-based category can be added at a time.</div>`;
+}
+
+function bookingMasterServiceStartingPrice(serviceId) {
+  const prices = [];
+  const timeSlots = bookingMasterTimeSlotItems(serviceId);
+  prices.push(...timeSlots.map((slot) => moneyNumber(slot.sellingPrice ?? slot.price ?? slot.basePrice ?? 0)));
+  prices.push(
+    ...bookingMasterMatchingPriceRules("task", "", serviceId, null, true)
+      .map((rule) => moneyNumber(rule.sellingPrice ?? rule.basePrice ?? 0))
+  );
+  prices.push(
+    ...bookingMasterCategoryGroupPricing(bookingMasterCategoryGroupRule(serviceId) || {}).slabs
+      .map((slab) => moneyNumber(slab.sellingPrice || 0))
+  );
+  prices.push(...bookingMasterClusterCategories
+    .filter((category) => category.serviceId === serviceId && category.isActive !== false && category.isEnabled !== false && category.isVisible !== false)
+    .map((category) => bookingMasterCategoryPricing(category).selling)
+  );
+  const validPrices = prices.filter((price) => Number.isFinite(price) && price > 0);
+  return validPrices.length ? Math.min(...validPrices) : 0;
+}
+
+function bookingMasterCategoryPricing(category) {
+  const categoryGroupSlab = bookingMasterCategoryGroupSlab(category.categoryId, category.serviceId);
+  const categoryGroupSlabHasPrice = categoryGroupSlab && (moneyNumber(categoryGroupSlab.basePrice || 0) > 0 || moneyNumber(categoryGroupSlab.sellingPrice || 0) > 0 || moneyNumber(categoryGroupSlab.discountValue || 0) > 0);
+  if (categoryGroupSlabHasPrice) {
+    const save = Math.max(0, categoryGroupSlab.basePrice - categoryGroupSlab.sellingPrice);
+    const discountLabel = categoryGroupSlab.discountType === "percent" && categoryGroupSlab.discountValue > 0
+      ? `Discount ${categoryGroupSlab.discountValue}%`
+      : categoryGroupSlab.discountType === "flat" && categoryGroupSlab.discountValue > 0
+        ? `Discount Rs ${categoryGroupSlab.discountValue.toFixed(2)}`
+        : "No discount";
+    return {
+      base: categoryGroupSlab.basePrice,
+      selling: categoryGroupSlab.sellingPrice,
+      durationMinutes: categoryGroupSlab.durationMinutes || categoryGroupSlab.allottedTime?.durationMinutes || 0,
+      saveLabel: save > 0 ? `Save Rs ${save.toFixed(2)}` : "",
+      discountLabel,
+      allottedTime: categoryGroupSlab.allottedTime || { enabled: false, durationMinutes: 0 },
+      waitingCharge: categoryGroupSlab.waitingCharge || { enabled: false, amount: 0, chargePerMinutes: 0 }
+    };
+  }
+  if (bookingMasterUsesCategoryOnlyTaskMode(category.serviceId)) {
+    return {
+      base: 0,
+      selling: 0,
+      durationMinutes: categoryGroupSlab?.durationMinutes || categoryGroupSlab?.allottedTime?.durationMinutes || 0,
+      saveLabel: "",
+      discountLabel: "Price Master price required",
+      allottedTime: categoryGroupSlab?.allottedTime || { enabled: false, durationMinutes: 0 },
+      waitingCharge: categoryGroupSlab?.waitingCharge || { enabled: false, amount: 0, chargePerMinutes: 0 },
+      priceMissing: true
+    };
+  }
+  const priceRule = bookingMasterBestPriceRule("task", category.categoryId, category.serviceId) || bookingMasterBestPriceRule("time", category.categoryId, category.serviceId);
+  const base = moneyNumber(priceRule?.basePrice ?? category.basePrice ?? 0);
+  const selling = moneyNumber(priceRule?.sellingPrice ?? category.sellingPrice ?? base ?? 0) + (priceRule ? 0 : moneyNumber(category.additionalCharges || 0));
+  const save = Math.max(0, base - selling);
+  const discountType = priceRule?.discountType || category.discountType || "none";
+  const discountValue = moneyNumber(priceRule?.discountValue ?? category.discountValue ?? 0);
+  const discountLabel = discountType === "percent" && discountValue > 0
+    ? `Discount ${discountValue}%`
+    : discountType === "flat" && discountValue > 0
+      ? `Discount Rs ${discountValue.toFixed(2)}`
+      : "No discount";
+  const saveLabel = save > 0
+    ? discountType === "percent" && discountValue > 0
+      ? `Save ${discountValue}%`
+      : `Save Rs ${save.toFixed(2)}`
+    : "";
+  return { base, selling, durationMinutes: priceMasterTaskDurationMinutes(priceRule || {}), saveLabel, discountLabel, allottedTime: { enabled: false, durationMinutes: 0 }, waitingCharge: { enabled: false, amount: 0, chargePerMinutes: 0 } };
+}
+
+function bookingMasterComplexitySlabForStoreNumber(rule = {}, storeNumber = 1) {
+  if (!rule || storeNumber <= 1) return null;
+  const additionalStoreNumber = Math.max(1, Number(storeNumber || 1) - 1);
+  let cursor = 1;
+  return normalizeComplexitySlabsForUi(rule.complexitySlabs || rule.metadata?.complexitySlabs || [])
+    .find((slab) => {
+      const start = cursor;
+      const end = cursor + slab.storeNumber - 1;
+      cursor = end + 1;
+      return additionalStoreNumber >= start && additionalStoreNumber <= end;
+    }) || null;
+}
+
+function bookingMasterCartStorePosition(categoryId = "", storeId = "", fallbackIndex = bookingMasterCartItems.length) {
+  const rows = bookingMasterCartItems
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.storeId && String(item.categoryId || "") === String(categoryId || ""));
+  const existing = rows.find(({ item }) => String(item.storeId || "") === String(storeId || ""));
+  if (existing) return rows.filter(({ index }) => index <= existing.index).length;
+  return rows.filter(({ index }) => index <= fallbackIndex).length + 1;
+}
+
+function bookingMasterStorePricing(category, storeId, storeNumber = 1) {
+  if (!category) return { base: 0, selling: 0, durationMinutes: 0, saveLabel: "", discountLabel: "No discount" };
+  const storeRule = storeId ? bookingMasterBestPriceRule("task", category.categoryId, category.serviceId, storeId, true) : null;
+  if (!storeRule) return bookingMasterCategoryPricing(category);
+  const base = moneyNumber(storeRule.basePrice ?? 0);
+  const parentDurationMinutes = priceMasterTaskDurationMinutes(storeRule || {});
+  const slab = bookingMasterComplexitySlabForStoreNumber(storeRule, storeNumber);
+  const complexityBase = storeRule.complexityBase === "base" ? "base" : "selling";
+  const sourceAmount = complexityBase === "base" ? base : moneyNumber(storeRule.sellingPrice ?? base);
+  const selling = storeNumber > 1 && slab ? moneyNumber(sourceAmount * slab.multiplier) : moneyNumber(storeRule.sellingPrice ?? base);
+  const save = Math.max(0, base - selling);
+  const discountType = storeRule.discountType || "none";
+  const discountValue = moneyNumber(storeRule.discountValue || 0);
+  const discountLabel = discountType === "percent" && discountValue > 0
+    ? `Discount ${discountValue}%`
+    : discountType === "flat" && discountValue > 0
+      ? `Discount Rs ${discountValue.toFixed(2)}`
+      : "No discount";
+  return {
+    base,
+    selling,
+    durationMinutes: storeNumber > 1 && slab ? Math.max(0, Number(slab.durationMinutes || 0)) : parentDurationMinutes,
+    saveLabel: save > 0 ? `Save Rs ${save.toFixed(2)}` : "",
+    discountLabel,
+    allottedTime: { enabled: false, durationMinutes: 0 },
+    waitingCharge: { enabled: false, amount: 0, chargePerMinutes: 0 }
+  };
+}
+
+function bookingMasterPrice(value) {
+  return `Rs ${moneyNumber(value).toFixed(2)}`;
+}
+
+function bookingMasterStoreListHtml() {
+  if (bookingMasterStoresLoading) return `<div class="empty-state">Loading stores...</div>`;
+  if (bookingMasterStoresError) return `<div class="serviceability-result danger">${escapeHtml(bookingMasterStoresError)}</div>`;
+  const stores = bookingMasterSelectedCategoryStores();
+  return stores.length ? `<div class="booking-store-grid booking-shop-scroll">${stores.map(bookingMasterStoreCard).join("")}</div>` : `<div class="empty-state">No active stores match this category and search.</div>`;
+}
+
+function bookingMasterSelectedCategoryStores() {
+  const clusterId = bookingMasterServiceability?.cluster?.clusterId;
+  const categoryId = bookingMasterSelectedCategoryId;
+  return bookingMasterStores.filter((store) =>
+    store.isActive !== false &&
+    (!clusterId || (store.clusterIds || []).includes(clusterId)) &&
+    (!categoryId || (store.serviceCategoryIds || []).includes(categoryId))
+  );
+}
+
+function bookingMasterStoreCard(store) {
+  const selectedCategory = bookingMasterClusterCategories.find((category) => category.categoryId === bookingMasterSelectedCategoryId);
+  const storeNumber = selectedCategory ? bookingMasterCartStorePosition(selectedCategory.categoryId, store.id) : 1;
+  const pricing = selectedCategory ? bookingMasterStorePricing(selectedCategory, store.id, storeNumber) : { selling: 0 };
+  const cartIndex = bookingMasterCartItemIndexByStoreId(store.id);
+  const isInCart = cartIndex >= 0;
+  const isOpenNow = isScheduleOpenNow(store.operatingHours || {});
+  const capsules = (store.storeCategoryIds || [])
+    .map((id) => bookingMasterStoreCategories.find((category) => category.id === id)?.name)
+    .filter(Boolean)
+    .map((name) => `<span>${escapeHtml(name)}</span>`)
+    .join("");
+  return `<div class="booking-store-card ${isInCart ? "in-cart" : ""}">
+    ${bookingMasterThumb(store.primaryImageUrl, store.name || "Store")}
+    <div class="booking-card-body">
+      <b>${escapeHtml(store.name || "-")}</b>
+      <div class="booking-store-capsules">${capsules || "<span>GENERAL</span>"}</div>
+      <small>${contactActions(store.contact)}</small>
+      <p>${escapeHtml(store.address || "-")}</p>
+      ${openNowStatusHtml(isOpenNow)}
+      <small>${escapeHtml(summarizeWeeklySchedule(store.operatingHours || {}) || "-")}</small>
+    </div>
+    <div class="booking-store-actions">
+      <strong>${escapeHtml(bookingMasterPrice(pricing.selling || 0))}</strong>
+      <button class="btn btn-soft btn-xs" data-action="booking-master-open-store" data-store-id="${escapeHtml(store.id)}" type="button">Details</button>
+      ${isInCart
+        ? `<button class="booking-remove-icon" data-action="booking-master-remove-cart-store" data-store-id="${escapeHtml(store.id)}" type="button" title="Remove from cart" aria-label="Remove ${escapeHtml(store.name || "store")} from cart">${iconSvg("trash")}</button>`
+        : `<button class="btn btn-primary btn-xs" data-action="booking-master-add-store" data-store-id="${escapeHtml(store.id)}" type="button">Add</button>`}
+    </div>
+  </div>`;
+}
+
+function bookingMasterCartItemIndexByStoreId(storeId) {
+  return bookingMasterCartItems.findIndex((item) => item.storeId === storeId);
+}
+
+function bookingMasterCartItemIndexByCategoryId(categoryId) {
+  return bookingMasterCartItems.findIndex((item) => item.categoryId === categoryId && !item.storeId);
+}
+
+function bookingMasterSelectedTimeSlot() {
+  const selectedCategory = bookingMasterCategoryById(bookingMasterSelectedCategoryId);
+  const serviceId = selectedCategory?.serviceId || bookingMasterSelectedServiceId;
+  return bookingMasterTimeSlotItems(serviceId)
+    .find((slot) => Number(slot.durationMinutes || 0) === Number(bookingMasterDurationMinutes || 0) && (slot.categoryId || "") === (bookingMasterSelectedCategoryId || ""))
+    || bookingMasterTimeSlotItems(serviceId)
+      .find((slot) => Number(slot.durationMinutes || 0) === Number(bookingMasterDurationMinutes || 0))
+    || null;
+}
+
+function bookingMasterLineForCartItem(item, index) {
+  return bookingMasterQuote?.lineItems?.find((line) =>
+    (item.priceType === "time" || (line.categoryId || "") === (item.categoryId || "")) &&
+    (line.storeId || "") === (item.storeId || "")
+  ) || bookingMasterQuote?.lineItems?.[index] || null;
+}
+
+function bookingMasterFallbackLineForCartItem(item, index) {
+  const quotedLine = bookingMasterLineForCartItem(item, index);
+  if (quotedLine) return quotedLine;
+  const category = bookingMasterCategoryById(item.categoryId);
+  const storeNumber = item.storeId ? bookingMasterCartStorePosition(item.categoryId, item.storeId, index) : 1;
+  const pricing = category ? bookingMasterStorePricing(category, item.storeId || null, storeNumber) : null;
+  if (!pricing) return null;
+  return {
+    categoryId: item.categoryId,
+    categoryName: category?.categoryName || item.categoryName || "",
+    storeId: item.storeId || null,
+    storeName: item.storeName || "",
+    priceLogic: item.storeId ? "pending store quote" : "category selling price",
+    basePrice: pricing.base,
+    durationMinutes: pricing.durationMinutes || item.durationMinutes || 0,
+    amount: pricing.selling,
+    runningTotal: 0
+  };
+}
+
+function bookingMasterFallbackTimeLine(item = null, index = 0) {
+  const categoryId = item?.categoryId || bookingMasterSelectedCategoryId;
+  const durationMinutes = Number(item?.durationMinutes || bookingMasterDurationMinutes);
+  const quotedLine = item ? bookingMasterLineForCartItem(item, index) : bookingMasterQuote?.lineItems?.[0];
+  if (quotedLine && Number(quotedLine.durationMinutes || durationMinutes) === durationMinutes && (quotedLine.categoryId || "") === (categoryId || "")) return quotedLine;
+  const category = bookingMasterCategoryById(categoryId);
+  const serviceId = item?.serviceId || category?.serviceId || bookingMasterSelectedServiceId;
+  const slot = bookingMasterTimeSlotItems(serviceId)
+    .find((candidate) => Number(candidate.durationMinutes || 0) === durationMinutes && (candidate.categoryId || "") === (categoryId || ""))
+    || bookingMasterTimeSlotItems(serviceId).find((candidate) => Number(candidate.durationMinutes || 0) === durationMinutes)
+    || bookingMasterSelectedTimeSlot();
+  if (!slot) return null;
+  const amount = moneyNumber(slot.sellingPrice ?? slot.price ?? slot.basePrice ?? 0);
+  return {
+    categoryId: slot.categoryId || null,
+    categoryName: slot.categoryName || "Time service",
+    durationMinutes,
+    billedDurationMinutes: slot.durationMinutes,
+    slab: slot,
+    amount,
+    runningTotal: amount
+  };
+}
+
+function bookingMasterCartSummary() {
+  const lineItems = bookingMasterCartItems.map((item, index) =>
+    item.priceType === "time" ? bookingMasterFallbackTimeLine(item, index) : bookingMasterFallbackLineForCartItem(item, index)
+  ).filter(Boolean);
+  const totalDurationMinutes = bookingMasterCartItems.reduce((sum, item, index) => sum + bookingMasterCartItemDurationMinutes(item, index), 0);
+  const amountToPay = moneyNumber(bookingMasterQuote?.grandTotal || lineItems.reduce((sum, line) => sum + moneyNumber(line.amount || 0), 0));
+  const totalAmount = bookingMasterCartItems.reduce((sum, item, index) => {
+    if (item.priceType === "time") {
+      const timeLine = bookingMasterFallbackTimeLine(item, index);
+      return sum + moneyNumber(timeLine?.slab?.basePrice ?? timeLine?.slab?.price ?? timeLine?.amount ?? 0);
+    }
+    const category = bookingMasterCategoryById(item.categoryId);
+    const storeNumber = item.storeId ? bookingMasterCartStorePosition(item.categoryId, item.storeId, index) : 1;
+    const pricing = category ? bookingMasterStorePricing(category, item.storeId || null, storeNumber) : null;
+    const fallback = moneyNumber(lineItems[index]?.amount || bookingMasterFallbackLineForCartItem(item, index)?.amount || 0);
+    return sum + moneyNumber(pricing?.base || fallback);
+  }, 0);
+  const safeTotal = Math.max(totalAmount, amountToPay);
+  const hasTime = bookingMasterCartItems.some((item) => item.priceType === "time");
+  const hasTask = bookingMasterCartItems.some((item) => item.priceType !== "time");
+  return {
+    totalAmount: safeTotal,
+    discountAmount: Math.max(0, safeTotal - amountToPay),
+    amountToPay,
+    totalDurationMinutes,
+    totalStores: bookingMasterCartItems.length,
+    totalLabel: hasTime && hasTask ? "Total Items" : hasTime ? "Total Slots" : bookingMasterUsesCategoryOnlyTaskMode() ? "Total Categories" : "Total Stores"
+  };
+}
+
+function bookingMasterCartItemDurationMinutes(item, index) {
+  if (item.priceType === "time") {
+    const line = bookingMasterFallbackTimeLine(item, index);
+    return Math.max(0, Number(line?.durationMinutes || line?.billedDurationMinutes || item.durationMinutes || 0));
+  }
+  const line = bookingMasterFallbackLineForCartItem(item, index);
+  return Math.max(0, Number(line?.durationMinutes || item.durationMinutes || 0));
+}
+
+function bookingMasterCartSummaryHtml() {
+  const summary = bookingMasterCartSummary();
+  return `<div class="booking-cart-summary-strip">
+    <div><span>Total</span><b>${escapeHtml(bookingMasterPrice(summary.totalAmount))}</b></div>
+    <div><span>Discount</span><b>${escapeHtml(bookingMasterPrice(summary.discountAmount))}</b></div>
+    <div><span>Amount To Pay</span><b>${escapeHtml(bookingMasterPrice(summary.amountToPay))}</b></div>
+    <div><span>Total Time</span><b>${escapeHtml(bookingMasterDurationLabel(summary.totalDurationMinutes))}</b></div>
+    <div><span>${escapeHtml(summary.totalLabel)}</span><b>${escapeHtml(summary.totalStores)}</b></div>
+  </div>`;
+}
+
+function bookingMasterModeDefault(mode = "instant") {
+  const normalized = mode === "schedule" ? "schedule" : "instant";
+  const candidates = (cache.bookingTypes || []).filter((item) => item.isActive !== false && item.bookingType === normalized);
+  return candidates.find((item) => item.isDefault) || candidates[0] || null;
+}
+
+function bookingMasterSourceConfigForMode(mode, fallback = {}) {
+  const source = fallback?.bookingType === mode ? fallback : bookingMasterModeDefault(mode) || fallback || {};
+  return {
+    id: source.id || null,
+    bookingType: mode,
+    instantMode: "manual",
+    waitWindowMinutes: 0,
+    waitWindowNote: "",
+    maxAdvanceDays: Number(source.maxAdvanceDays ?? source.config?.maxAdvanceDays ?? 1),
+    allowedDays: source.allowedDays || source.config?.allowedDays || [],
+    timeCategories: source.timeCategories || source.config?.timeCategories || [],
+    timeSlots: source.timeSlots || source.config?.timeSlots || []
+  };
+}
+
+function bookingMasterNonEmptyArray(primary, fallback = []) {
+  return Array.isArray(primary) && primary.length ? primary : Array.isArray(fallback) ? fallback : [];
+}
+
+function bookingMasterServiceBookingType(serviceId) {
+  const service = bookingMasterClusterServices.find((item) => item.serviceId === serviceId);
+  const serviceConfig = service?.bookingTypeConfig || {};
+  const defaults = service?.defaultBookingType || {};
+  const configuredMode = serviceConfig.isActive === false ? "" : serviceConfig.mode || defaults.bookingType || "both";
+  const mode = ["instant", "schedule", "both"].includes(configuredMode) ? configuredMode : "both";
+  const scheduleSource = bookingMasterSourceConfigForMode("schedule", defaults);
+  return {
+    serviceId,
+    serviceName: service?.serviceName || "Service",
+    mode,
+    allowsInstant: mode === "instant" || mode === "both",
+    allowsSchedule: mode === "schedule" || mode === "both",
+    instantMode: serviceConfig.instantMode && serviceConfig.instantMode !== "both" ? serviceConfig.instantMode : "manual",
+    waitWindowMinutes: Number(serviceConfig.waitWindowMinutes ?? 0),
+    waitWindowNote: serviceConfig.waitWindowNote || "",
+    maxAdvanceDays: Number(serviceConfig.maxAdvanceDays ?? scheduleSource.maxAdvanceDays ?? 1),
+    allowedDays: bookingMasterNonEmptyArray(serviceConfig.allowedDays, scheduleSource.allowedDays),
+    timeCategories: activeBookingTypeTimeCategories(bookingMasterNonEmptyArray(serviceConfig.timeCategories, scheduleSource.timeCategories), bookingMasterNonEmptyArray(serviceConfig.timeSlots, scheduleSource.timeSlots)),
+    timeSlots: bookingMasterNonEmptyArray(serviceConfig.timeSlots, scheduleSource.timeSlots)
+  };
+}
+
+function bookingMasterCartBookingTypePlan() {
+  const serviceIds = bookingMasterCartServiceIds().length ? bookingMasterCartServiceIds() : [bookingMasterSelectedServiceId].filter(Boolean);
+  const services = serviceIds.map(bookingMasterServiceBookingType).filter((item) => item.serviceId);
+  const instantServices = services.filter((item) => item.allowsInstant);
+  const scheduleServices = services.filter((item) => item.allowsSchedule);
+  const scheduleBase = scheduleServices[0] || services.find((item) => item.timeSlots?.length || item.timeCategories?.length) || bookingMasterServiceBookingType(serviceIds[0] || "");
+  return {
+    services,
+    instantServices,
+    scheduleServices,
+    hasInstant: instantServices.length > 0,
+    hasSchedule: scheduleServices.length > 0,
+    isMixed: instantServices.length > 0 && scheduleServices.length > 0 && services.some((item) => item.mode !== "both"),
+    scheduleConfig: scheduleBase
+  };
+}
+
+function bookingMasterEffectiveBookingType(requestedMode = "") {
+  const plan = bookingMasterCartBookingTypePlan();
+  if (requestedMode === "instant" && plan.instantServices[0]) {
+    const instant = plan.instantServices[0];
+    return { mode: "instant", instantMode: instant.instantMode || "manual", waitWindowMinutes: Number(instant.waitWindowMinutes || 0), waitWindowNote: instant.waitWindowNote || "", maxAdvanceDays: 0, allowedDays: [], timeCategories: [], timeSlots: [] };
+  }
+  if (requestedMode === "schedule" && plan.scheduleConfig) {
+    const schedule = plan.scheduleConfig;
+    return {
+      mode: "schedule",
+      instantMode: schedule.instantMode || "manual",
+      waitWindowMinutes: Number(schedule.waitWindowMinutes || 0),
+      waitWindowNote: schedule.waitWindowNote || "",
+      maxAdvanceDays: Number(schedule.maxAdvanceDays || 1),
+      allowedDays: schedule.allowedDays || [],
+      timeCategories: activeBookingTypeTimeCategories(schedule.timeCategories || [], schedule.timeSlots || []),
+      timeSlots: bookingMasterNonEmptyArray(schedule.timeSlots, [])
+    };
+  }
+  const serviceId = bookingMasterCartServiceId() || bookingMasterSelectedServiceId;
+  const service = bookingMasterClusterServices.find((item) => item.serviceId === serviceId);
+  const categoryConfig = bookingMasterCartItems
+    .map((item) => bookingMasterCategoryById(item.categoryId)?.bookingTypeConfig)
+    .find((item) => item && item.isActive !== false && item.mode);
+  const serviceConfig = service?.bookingTypeConfig || {};
+  const config = categoryConfig || (serviceConfig.isActive === false ? {} : serviceConfig);
+  const scheduleFallback = bookingMasterSourceConfigForMode("schedule", service?.defaultBookingType || {});
+  if (config.mode === "instant" && requestedMode !== "schedule") return { mode: "instant", instantMode: config.instantMode && config.instantMode !== "both" ? config.instantMode : "manual", waitWindowMinutes: Number(config.waitWindowMinutes ?? 0), waitWindowNote: config.waitWindowNote || "", maxAdvanceDays: 0, allowedDays: [], timeCategories: [], timeSlots: [] };
+  if (config.mode === "schedule") return {
+    mode: "schedule",
+    waitWindowMinutes: Number(config.waitWindowMinutes ?? 0),
+    waitWindowNote: config.waitWindowNote || "",
+    maxAdvanceDays: Number(config.maxAdvanceDays ?? scheduleFallback.maxAdvanceDays ?? 1),
+    allowedDays: bookingMasterNonEmptyArray(config.allowedDays, scheduleFallback.allowedDays),
+    timeCategories: activeBookingTypeTimeCategories(bookingMasterNonEmptyArray(config.timeCategories, scheduleFallback.timeCategories), bookingMasterNonEmptyArray(config.timeSlots, scheduleFallback.timeSlots)),
+    timeSlots: bookingMasterNonEmptyArray(config.timeSlots, scheduleFallback.timeSlots)
+  };
+  const defaults = service?.defaultBookingType || {};
+  const base = {
+    mode: defaults.bookingType === "schedule" ? "schedule" : "instant",
+    instantMode: "manual",
+    waitWindowMinutes: 0,
+    waitWindowNote: "",
+    maxAdvanceDays: Number(defaults.maxAdvanceDays || 1),
+    allowedDays: defaults.allowedDays || [],
+    timeCategories: activeBookingTypeTimeCategories(defaults.timeCategories || [], defaults.timeSlots || []),
+    timeSlots: defaults.timeSlots || []
+  };
+  if (config.mode === "both") {
+    base.instantMode = config.instantMode && config.instantMode !== "both" ? config.instantMode : base.instantMode;
+    base.waitWindowMinutes = Number(config.waitWindowMinutes || 0);
+    base.waitWindowNote = config.waitWindowNote || "";
+  }
+  if (bookingMasterAvailabilityDecision?.serviceId === serviceId && bookingMasterAvailabilityDecision?.clusterId === bookingMasterServiceability?.cluster?.clusterId) {
+    if (bookingMasterAvailabilityDecision.effectiveBookingType === "schedule") {
+      return {
+        mode: "schedule",
+        instantMode: bookingMasterAvailabilityDecision.instantMode || base.instantMode,
+        waitWindowMinutes: Number(bookingMasterAvailabilityDecision.config?.waitWindowMinutes || base.waitWindowMinutes || 0),
+        waitWindowNote: bookingMasterAvailabilityDecision.config?.waitWindowNote || base.waitWindowNote || "",
+        maxAdvanceDays: Number(bookingMasterAvailabilityDecision.config?.maxAdvanceDays || base.maxAdvanceDays || 1),
+        allowedDays: bookingMasterAvailabilityDecision.config?.allowedDays || base.allowedDays || [],
+        timeCategories: activeBookingTypeTimeCategories(bookingMasterAvailabilityDecision.config?.timeCategories || base.timeCategories || [], bookingMasterAvailabilityDecision.scheduleTimeSlots || bookingMasterAvailabilityDecision.config?.timeSlots || base.timeSlots || []),
+        timeSlots: bookingMasterAvailabilityDecision.scheduleTimeSlots || bookingMasterAvailabilityDecision.config?.timeSlots || base.timeSlots || []
+      };
+    }
+    return { mode: "instant", instantMode: bookingMasterAvailabilityDecision.instantMode || base.instantMode, waitWindowMinutes: Number(bookingMasterAvailabilityDecision.config?.waitWindowMinutes || base.waitWindowMinutes || 0), waitWindowNote: bookingMasterAvailabilityDecision.config?.waitWindowNote || base.waitWindowNote || "", maxAdvanceDays: 0, allowedDays: [], timeCategories: [], timeSlots: [] };
+  }
+  const planned = requestedMode === "schedule"
+    ? plan.scheduleConfig
+    : requestedMode === "instant"
+      ? plan.instantServices[0] || base
+      : plan.hasSchedule && !plan.hasInstant
+        ? plan.scheduleConfig
+        : plan.hasInstant && !plan.hasSchedule
+          ? plan.instantServices[0] || base
+          : null;
+  if (planned) {
+    if (requestedMode === "schedule" || (!plan.hasInstant && plan.hasSchedule)) {
+      return {
+        mode: "schedule",
+        instantMode: planned.instantMode || base.instantMode,
+        waitWindowMinutes: Number(planned.waitWindowMinutes || base.waitWindowMinutes || 0),
+        waitWindowNote: planned.waitWindowNote || base.waitWindowNote || "",
+        maxAdvanceDays: Number(planned.maxAdvanceDays || base.maxAdvanceDays || 1),
+        allowedDays: planned.allowedDays || base.allowedDays || [],
+        timeCategories: activeBookingTypeTimeCategories(planned.timeCategories || base.timeCategories || [], planned.timeSlots || base.timeSlots || []),
+        timeSlots: planned.timeSlots || base.timeSlots || []
+      };
+    }
+    if (requestedMode === "instant" || (plan.hasInstant && !plan.hasSchedule)) {
+      return { mode: "instant", instantMode: planned.instantMode || base.instantMode, waitWindowMinutes: Number(planned.waitWindowMinutes || base.waitWindowMinutes || 0), waitWindowNote: planned.waitWindowNote || base.waitWindowNote || "", maxAdvanceDays: 0, allowedDays: [], timeCategories: [], timeSlots: [] };
+    }
+  }
+  return base;
+}
+
+function bookingMasterScheduleDates(config = bookingMasterEffectiveBookingType("schedule")) {
+  const maxAdvanceDays = Math.max(0, Number(config.maxAdvanceDays || 0));
+  const allowed = new Set((config.allowedDays || []).map((item) => String(item).toLowerCase()));
+  const dates = [];
+  for (let offset = 0; offset <= maxAdvanceDays; offset += 1) {
+    const token = offset === 0 ? "today" : offset === 1 ? "tomorrow" : `next_${offset}`;
+    if (allowed.size && !allowed.has(token) && !allowed.has(String(offset))) continue;
+    const date = new Date();
+    date.setDate(date.getDate() + offset);
+    const value = bookingMasterLocalDateValue(date);
+    const day = date.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase();
+    const label = offset === 0 ? "Today" : offset === 1 ? "Tomorrow" : String(date.getDate()).padStart(2, "0");
+    dates.push({ value, label, day });
+  }
+  return dates;
+}
+
+function bookingMasterLocalDateValue(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function bookingMasterScheduleDateTime(dateValue, time) {
+  const [year, month, day] = String(dateValue || "").split("-").map(Number);
+  const [hour, minute] = String(time || "").split(":").map(Number);
+  if (!year || !month || !day || Number.isNaN(hour) || Number.isNaN(minute)) return null;
+  return new Date(year, month - 1, day, hour, minute, 0, 0);
+}
+
+function bookingMasterScheduleTimeDisabled(dateValue, time) {
+  const slotDate = bookingMasterScheduleDateTime(dateValue, time);
+  if (!slotDate) return true;
+  if (slotDate.getTime() <= Date.now()) return true;
+  const finalAvailableAt = bookingMasterAvailabilityDecision?.finalAssistantAvailableAt ? new Date(bookingMasterAvailabilityDecision.finalAssistantAvailableAt) : null;
+  if (finalAvailableAt && Number.isFinite(finalAvailableAt.getTime()) && slotDate.getTime() < finalAvailableAt.getTime()) return true;
+  const availableSlots = Array.isArray(bookingMasterAvailabilityDecision?.scheduleAvailableSlots) ? bookingMasterAvailabilityDecision.scheduleAvailableSlots : [];
+  if (!bookingMasterAvailabilityDecision?.scheduleAvailabilityChecked) return false;
+  return !availableSlots.some((slot) => slot.date === dateValue && slot.time === time && Number(slot.availableAssistants || 0) > 0);
+}
+
+function bookingMasterScheduleSlotCapacity(dateValue, time) {
+  const availableSlots = Array.isArray(bookingMasterAvailabilityDecision?.scheduleAvailableSlots) ? bookingMasterAvailabilityDecision.scheduleAvailableSlots : [];
+  const slot = availableSlots.find((item) => item.date === dateValue && item.time === time);
+  return slot ? Number(slot.availableAssistants || 0) : null;
+}
+
+function bookingMasterAvailableScheduleTimes(config = {}, dateValue = bookingMasterSelectedScheduleDate) {
+  return bookingMasterScheduleTimes(config).filter((time) => !bookingMasterScheduleTimeDisabled(dateValue, time));
+}
+
+function bookingMasterScheduleDateDisabled(config = {}, dateValue = "") {
+  return !bookingMasterAvailableScheduleTimes(config, dateValue).length;
+}
+
+function bookingMasterScheduleSelectionIsValid(config = bookingMasterEffectiveBookingType("schedule")) {
+  const times = bookingMasterScheduleTimes(config);
+  return Boolean(
+    bookingMasterSelectedScheduleDate
+    && bookingMasterSelectedScheduleTime
+    && times.includes(bookingMasterSelectedScheduleTime)
+    && !bookingMasterScheduleTimeDisabled(bookingMasterSelectedScheduleDate, bookingMasterSelectedScheduleTime)
+  );
+}
+
+function bookingMasterScheduleAvailabilityMessageHtml() {
+  const decision = bookingMasterAvailabilityDecision || {};
+  const reasonMessages = {
+    multi_cluster_locations: "Selected booking locations are in different clusters. Schedule needs all locations in the same cluster.",
+    no_cluster_assistant: "No online or busy assistant is mapped to this cluster right now.",
+    no_schedule_slots: "No schedule slots are available for this cluster."
+  };
+  const parts = [];
+  if (decision.unavailableReason && reasonMessages[decision.unavailableReason]) {
+    parts.push(reasonMessages[decision.unavailableReason]);
+  }
+  if (decision.earliestAssistantAvailableAt) {
+    parts.push(`Earliest assistant availability: ${formatDate(decision.earliestAssistantAvailableAt)}.`);
+  }
+  if (!parts.length) return "";
+  return `<div class="serviceability-result warning">${escapeHtml(parts.join(" "))}</div>`;
+}
+
+function bookingMasterInstantCapacityError(error) {
+  return /no online assistant capacity|slot is no longer available|assistant will be available/i.test(String(error?.message || error || ""));
+}
+
+function bookingMasterInstantWaitLimitMinutes(config = {}) {
+  return 45;
+}
+
+function bookingMasterInstantAssignMinutes() {
+  const value = Number(bookingMasterAvailabilityDecision?.finalAssistantAvailableInMinutes ?? bookingMasterAvailabilityDecision?.instantEstimatedAssignMinutes ?? bookingMasterAvailabilityDecision?.estimatedReachMinutes ?? 0);
+  return Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0;
+}
+
+function bookingMasterDurationShortLabel(minutes) {
+  const value = Math.max(0, Math.round(Number(minutes || 0)));
+  if (value < 60) return `${value} mins`;
+  const hours = Math.floor(value / 60);
+  const mins = value % 60;
+  return `${hours} hr${hours === 1 ? "" : "s"}${mins ? ` ${mins} mins` : ""}`;
+}
+
+function bookingMasterInstantDisabledReason(config = bookingMasterEffectiveBookingType("instant")) {
+  if (config.instantMode !== "automate") return "";
+  if (!bookingMasterAvailabilityDecision) return "";
+  const estimate = bookingMasterInstantAssignMinutes();
+  const limit = bookingMasterInstantWaitLimitMinutes(config);
+  if (bookingMasterAvailabilityDecision.instantAllowed === false) {
+    if (estimate) return bookingMasterInstantCapacityNotification(config);
+    if (bookingMasterAvailabilityDecision.unavailableReason === "multi_cluster_locations") return "Selected booking locations are in different clusters. Use Schedule after choosing locations in the same cluster.";
+    if (bookingMasterAvailabilityDecision.unavailableReason === "no_cluster_assistant") return "No mapped online assistant is available for Instant booking. Try Schedule.";
+    return `Taking more than ${bookingMasterDurationShortLabel(limit)} to assign. Try Schedule.`;
+  }
+  return "";
+}
+
+function bookingMasterInstantButtonTimeLabel(config = bookingMasterEffectiveBookingType("instant")) {
+  return "";
+}
+
+function bookingMasterInstantCapacityNotification(config = bookingMasterEffectiveBookingType("instant")) {
+  const decision = bookingMasterAvailabilityDecision || {};
+  const waitWindowMinutes = Math.max(0, Math.round(Number(decision.serviceWaitWindowMinutes ?? config.waitWindowMinutes ?? 0)));
+  const availableInMinutes = Math.max(0, Math.round(Number(decision.assistantAvailableInMinutes ?? decision.instantWaitMinutes ?? 0)));
+  const totalMinutes = Math.max(0, Math.round(Number(decision.finalAssistantAvailableInMinutes ?? (availableInMinutes + waitWindowMinutes))));
+  return `Assistant will be available in ${bookingMasterDurationShortLabel(totalMinutes)}. Next availability ${bookingMasterDurationShortLabel(availableInMinutes)} + service wait window ${bookingMasterDurationShortLabel(waitWindowMinutes)}. To wait so much time, please go with schedule booking.`;
+}
+
+function bookingMasterPeriodForTime(time) {
+  return bookingTypeTimePeriod(time);
+}
+
+function bookingMasterPeriodOrder(category = {}) {
+  const periodOrder = {
+    early_morning: 1,
+    morning: 2,
+    afternoon: 3,
+    evening: 4,
+    night: 5,
+    mid_night: 6
+  };
+  const tokens = [
+    category.id,
+    bookingTypeCategoryId(category.name || ""),
+    bookingMasterPeriodForTime((category.timeSlots || [])[0] || "")
+  ].filter(Boolean);
+  const token = tokens.find((item) => periodOrder[item] != null);
+  return periodOrder[token] || 99;
+}
+
+function bookingMasterSortedTimeCategories(categories = []) {
+  return [...categories].sort((left, right) => {
+    const leftTime = (left.timeSlots || [])[0] || "99:99";
+    const rightTime = (right.timeSlots || [])[0] || "99:99";
+    return bookingMasterPeriodOrder(left) - bookingMasterPeriodOrder(right) || leftTime.localeCompare(rightTime) || String(left.name || "").localeCompare(String(right.name || ""));
+  });
+}
+
+function bookingMasterAvailableTimeCategoriesForDate(config = {}, dateValue = bookingMasterSelectedScheduleDate) {
+  const times = bookingMasterScheduleTimes(config);
+  return bookingMasterSortedTimeCategories(activeBookingTypeTimeCategories(config.timeCategories || [], times))
+    .filter((category) => (category.timeSlots || []).some((time) =>
+      times.includes(time) && !bookingMasterScheduleTimeDisabled(dateValue, time)
+    ));
+}
+
+function bookingMasterScheduleTimes(config = {}) {
+  const configuredTimes = Array.isArray(config.timeSlots) ? config.timeSlots : [];
+  const categoryTimes = (config.timeCategories || []).flatMap((category) => category.timeSlots || []);
+  return [...new Set([...configuredTimes, ...categoryTimes])]
+    .filter((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time))
+    .sort();
+}
+
+function bookingMasterFormatTime(time) {
+  const [hourRaw, minute = "00"] = String(time || "00:00").split(":");
+  const hour = Number(hourRaw || 0);
+  const period = hour >= 12 ? "PM" : "AM";
+  const displayHour = hour % 12 || 12;
+  return `${String(displayHour).padStart(2, "0")}:${minute} ${period}`;
+}
+
+function ensureBookingMasterScheduleSelection(config = bookingMasterEffectiveBookingType("schedule")) {
+  if (config.mode !== "schedule") return;
+  const dates = bookingMasterScheduleDates(config);
+  const availableDates = dates.filter((date) => !bookingMasterScheduleDateDisabled(config, date.value));
+  if (!dates.some((date) => date.value === bookingMasterSelectedScheduleDate) || bookingMasterScheduleDateDisabled(config, bookingMasterSelectedScheduleDate)) {
+    bookingMasterSelectedScheduleDate = availableDates[0]?.value || dates[0]?.value || "";
+  }
+  const times = bookingMasterScheduleTimes(config);
+  const availableTimes = bookingMasterAvailableScheduleTimes(config, bookingMasterSelectedScheduleDate);
+  if (!availableTimes.includes(bookingMasterSelectedScheduleTime)) {
+    bookingMasterSelectedScheduleTime = availableTimes[0] || "";
+  }
+  const categories = bookingMasterAvailableTimeCategoriesForDate(config, bookingMasterSelectedScheduleDate);
+  const selectedCategory = categories.find((category) => category.id === bookingMasterSelectedSchedulePeriod && category.timeSlots.some((time) => availableTimes.includes(time)));
+  if (!selectedCategory) {
+    const categoryWithSelectedTime = categories.find((category) => category.timeSlots.includes(bookingMasterSelectedScheduleTime));
+    const firstAvailable = categories.find((category) => category.timeSlots.some((time) => availableTimes.includes(time)));
+    bookingMasterSelectedSchedulePeriod = categoryWithSelectedTime?.id || firstAvailable?.id || bookingMasterPeriodForTime(bookingMasterSelectedScheduleTime || availableTimes[0] || times[0]);
+  }
+}
+
+function bookingMasterSchedulePickerHtml() {
+  const plan = bookingMasterCartBookingTypePlan();
+  const config = bookingMasterEffectiveBookingType("schedule");
+  if (!plan.hasSchedule || !bookingMasterCartItems.length) return "";
+  ensureBookingMasterScheduleSelection(config);
+  const dates = bookingMasterScheduleDates(config);
+  const times = bookingMasterScheduleTimes(config);
+  const categories = bookingMasterAvailableTimeCategoriesForDate(config, bookingMasterSelectedScheduleDate);
+  const activeCategory = categories.find((category) => category.id === bookingMasterSelectedSchedulePeriod) || categories[0] || null;
+  const periodTimes = activeCategory ? activeCategory.timeSlots.filter((time) => times.includes(time)).sort() : [];
+  return `${bookingMasterScheduleAvailabilityMessageHtml()}<div class="booking-schedule-card">
+    <div class="booking-schedule-block">
+      <h3>Select Date</h3>
+      <div class="booking-date-chip-grid">
+        ${dates.map((date) => {
+          const disabled = bookingMasterScheduleDateDisabled(config, date.value);
+          return `<button class="booking-date-chip ${bookingMasterSelectedScheduleDate === date.value ? "selected" : ""} ${disabled ? "disabled" : ""}" data-action="booking-master-select-schedule-date" data-date="${escapeHtml(date.value)}" type="button" ${disabled ? "disabled" : ""}><span>${escapeHtml(date.label)}</span>${date.label === "Today" || date.label === "Tomorrow" ? "" : `<small>${escapeHtml(date.day)}</small>`}</button>`;
+        }).join("") || `<div class="empty-state">No schedule dates configured.</div>`}
+      </div>
+    </div>
+    <div class="booking-schedule-block">
+      <h3>Start Time</h3>
+      <div class="booking-period-tabs">
+        ${categories.map((category) => {
+          const disabled = !category.timeSlots.some((time) => times.includes(time) && !bookingMasterScheduleTimeDisabled(bookingMasterSelectedScheduleDate, time));
+          return `<button class="${bookingMasterSelectedSchedulePeriod === category.id ? "selected" : ""} ${disabled ? "disabled" : ""}" data-action="booking-master-select-schedule-period" data-period="${escapeHtml(category.id)}" type="button" ${disabled ? "disabled" : ""}>${escapeHtml(category.name)}</button>`;
+        }).join("") || `<div class="empty-state">No time categories configured.</div>`}
+      </div>
+      <div class="booking-time-chip-grid">
+        ${periodTimes.map((time) => {
+          const disabled = bookingMasterScheduleTimeDisabled(bookingMasterSelectedScheduleDate, time);
+          const capacity = bookingMasterScheduleSlotCapacity(bookingMasterSelectedScheduleDate, time);
+          return `<button class="booking-time-chip ${bookingMasterSelectedScheduleTime === time ? "selected" : ""} ${disabled ? "disabled" : ""}" data-action="booking-master-select-schedule-time" data-time="${escapeHtml(time)}" type="button" ${disabled ? "disabled" : ""}><span>${escapeHtml(bookingMasterFormatTime(time))}</span>${!disabled && capacity != null ? `<small>OA ${escapeHtml(capacity)}</small>` : ""}</button>`;
+        }).join("") || `<div class="empty-state">No ${escapeHtml(activeCategory?.name || "time")} slots configured.</div>`}
+      </div>
+    </div>
+  </div>`;
+}
+
+function ensureBookingMasterScheduleSheet() {
+  let modal = $("#bookingMasterScheduleSheet");
+  if (modal) return modal;
+  const locationTitle = bookingMasterSelectedLocation?.isDefault || bookingMasterSelectedCustomer?.isDefault ? "Home" : "Address";
+  const locationText = bookingMasterSelectedLocation?.address || bookingMasterSelectedLocation?.label || bookingMasterSelectedCustomer?.address || "Selected location";
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `<div id="bookingMasterScheduleSheet" class="booking-bottom-sheet d-none" role="dialog" aria-modal="true" aria-labelledby="bookingMasterScheduleSheetTitle">
+      <div class="booking-bottom-sheet-backdrop" data-action="close-booking-master-schedule-sheet"></div>
+      <div class="booking-bottom-sheet-card">
+        <div class="booking-bottom-sheet-handle"></div>
+        <div class="booking-bottom-sheet-header">
+          <div>
+            <h2 id="bookingMasterScheduleSheetTitle">Schedule</h2>
+            <p id="bookingMasterScheduleSheetLocation"><b>${escapeHtml(locationTitle)}</b> | ${escapeHtml(locationText)}</p>
+          </div>
+          <button class="btn btn-light btn-sm" data-action="close-booking-master-schedule-sheet" type="button">Close</button>
+        </div>
+        <div class="booking-bottom-sheet-info"><span>SC</span><p>Choose from the next available slots for selected services.</p></div>
+        <div id="bookingMasterScheduleSheetBody" class="booking-bottom-sheet-body"></div>
+        <div class="booking-bottom-sheet-actions">
+          <button id="bookingMasterScheduleConfirmButton" class="btn btn-primary" data-action="booking-master-confirm-schedule-booking" type="button">Confirm</button>
+        </div>
+      </div>
+    </div>`
+  );
+  return $("#bookingMasterScheduleSheet");
+}
+
+function renderBookingMasterScheduleSheet() {
+  const body = $("#bookingMasterScheduleSheetBody");
+  if (!body) return;
+  const config = bookingMasterEffectiveBookingType("schedule");
+  body.innerHTML = bookingMasterSchedulePickerHtml() || `<div class="empty-state">No schedule slots configured.</div>`;
+  const confirmButton = $("#bookingMasterScheduleConfirmButton");
+  if (confirmButton) confirmButton.disabled = !bookingMasterScheduleSelectionIsValid(config);
+}
+
+function openBookingMasterScheduleSheet() {
+  const plan = bookingMasterCartBookingTypePlan();
+  if (!plan.hasSchedule) throw new Error("Schedule booking is not enabled for selected cart services.");
+  const config = bookingMasterEffectiveBookingType("schedule");
+  ensureBookingMasterScheduleSelection(config);
+  const modal = ensureBookingMasterScheduleSheet();
+  const locationTitle = bookingMasterSelectedLocation?.isDefault || bookingMasterSelectedCustomer?.isDefault ? "Home" : "Address";
+  const locationText = bookingMasterSelectedLocation?.address || bookingMasterSelectedLocation?.label || bookingMasterSelectedCustomer?.address || "Selected location";
+  const locationEl = $("#bookingMasterScheduleSheetLocation");
+  if (locationEl) locationEl.innerHTML = `<b>${escapeHtml(locationTitle)}</b> | ${escapeHtml(locationText)}`;
+  renderBookingMasterScheduleSheet();
+  modal.classList.remove("d-none", "closing");
+  requestAnimationFrame(() => modal.classList.add("open"));
+}
+
+function closeBookingMasterScheduleSheet() {
+  const modal = $("#bookingMasterScheduleSheet");
+  if (!modal || modal.classList.contains("d-none")) return;
+  modal.classList.remove("open");
+  modal.classList.add("closing");
+  window.setTimeout(() => {
+    modal.classList.add("d-none");
+    modal.classList.remove("closing");
+  }, 260);
+}
+
+function refreshBookingMasterScheduleSelectionUi() {
+  const sheet = $("#bookingMasterScheduleSheet");
+  if (sheet && !sheet.classList.contains("d-none")) {
+    renderBookingMasterScheduleSheet();
+    return;
+  }
+  renderBookingMasterNextPhase();
+}
+
+function bookingMasterBookingTypeSummaryHtml() {
+  const plan = bookingMasterCartBookingTypePlan();
+  if (!bookingMasterCartItems.length || !plan.services.length) return "";
+  const serviceRows = plan.services.map((service) => {
+    const modeLabel = service.mode === "both" ? "Instant / Schedule" : service.mode === "schedule" ? "Schedule" : "Instant";
+    return `<span class="booking-type-service-chip ${escapeHtml(service.mode)}"><b>${escapeHtml(service.serviceName)}</b>${escapeHtml(modeLabel)}</span>`;
+  }).join("");
+  const helper = plan.isMixed
+    ? "This cart has mixed booking type services. Create instant work for instant services, or choose schedule for services that support scheduled slots."
+    : plan.hasInstant && plan.hasSchedule
+      ? "Selected services support both Instant and Schedule."
+      : plan.hasSchedule
+        ? "Selected services are schedule enabled."
+        : "Selected services are instant enabled.";
+  return `<div class="booking-type-summary">
+    <div class="booking-type-summary-head"><span>Booking Type</span><b>${escapeHtml(helper)}</b></div>
+    <div class="booking-type-service-list">${serviceRows}</div>
+  </div>`;
+}
+
+function bookingMasterCreateModeServiceLabel(plan, mode) {
+  const concreteModes = new Set(plan.services.map((service) => service.mode).filter((item) => item === "instant" || item === "schedule"));
+  if (concreteModes.size < 2) return "";
+  const names = plan.services
+    .filter((service) => service.mode === mode)
+    .map((service) => service.serviceName)
+    .filter(Boolean);
+  if (!names.length) return "";
+  return `<span class="booking-create-mode-label">${escapeHtml(names.join(", "))}</span>`;
+}
+
+function bookingMasterCartHtml(includeDetails = true) {
+  const rows = bookingMasterCartItems.map((item, index) => {
+    const itemServiceId = item.serviceId || bookingMasterCategoryById(item.categoryId)?.serviceId || bookingMasterSelectedServiceId;
+    const serviceName = bookingMasterServiceById(itemServiceId)?.serviceName || "Service";
+    const itemDuration = bookingMasterCartItemDurationMinutes(item, index);
+    if (item.priceType === "time") {
+      const line = bookingMasterFallbackTimeLine(item, index);
+      return `<div class="booking-cart-row">
+        <span class="booking-cart-time-icon">${escapeHtml(String(line?.slab?.label || line?.categoryName || "Time").slice(0, 2).toUpperCase())}</span>
+        <div class="booking-cart-main">
+          <span>${escapeHtml(`${serviceName} / Time service`)}</span>
+          <b>${escapeHtml(bookingMasterDurationLabel(line?.billedDurationMinutes || line?.durationMinutes || item.durationMinutes || bookingMasterDurationMinutes, line?.slab?.label))}</b>
+          <small>${escapeHtml(`${line?.durationMinutes || item.durationMinutes || bookingMasterDurationMinutes} min requested${line?.billedDurationMinutes ? `, ${line.billedDurationMinutes} min billed` : ""}`)}</small>
+        </div>
+        <strong>${escapeHtml(bookingMasterPrice(line?.amount || 0))}</strong>
+        <button class="booking-remove-icon" data-action="booking-master-remove-cart-item" data-index="${index}" type="button" title="Remove from cart" aria-label="Remove selected time category">${iconSvg("trash")}</button>
+      </div>`;
+    }
+    const store = bookingMasterStores.find((candidate) => candidate.id === item.storeId);
+    const category = bookingMasterClusterCategories.find((candidate) => candidate.categoryId === item.categoryId);
+    const line = bookingMasterFallbackLineForCartItem(item, index);
+    const categoryOnly = !item.storeId;
+    return `<div class="booking-cart-row">
+      ${bookingMasterThumb(categoryOnly ? category?.categoryImageUrl : store?.primaryImageUrl || item.storeImageUrl, categoryOnly ? category?.categoryName || item.categoryName || "Category" : store?.name || item.storeName || "Store")}
+      <div class="booking-cart-main">
+        <span>${escapeHtml(`${serviceName} / ${categoryOnly ? "Category" : category?.categoryName || "Store"}`)}</span>
+        <b>${escapeHtml(categoryOnly ? category?.categoryName || item.categoryName || "-" : store?.name || item.storeName || "-")}</b>
+        <small>${escapeHtml(`${line?.priceLogic || "-"}${itemDuration ? ` · ${bookingMasterDurationLabel(itemDuration)} task time` : ""}`)}</small>
+      </div>
+      <strong>${escapeHtml(bookingMasterPrice(line?.amount || 0))}</strong>
+      <button class="booking-remove-icon" data-action="booking-master-remove-cart-item" data-index="${index}" type="button" title="Remove from cart" aria-label="Remove ${escapeHtml(categoryOnly ? category?.categoryName || item.categoryName || "category" : store?.name || item.storeName || "store")} from cart">${iconSvg("trash")}</button>
+    </div>`;
+  }).join("");
+  return `<div class="booking-cart-panel">
+    <div class="booking-next-header compact"><div><span>Cart</span><h3>Price Master Quote</h3></div>${bookingMasterQuoteLoading ? "<b>Quoting...</b>" : `<b>${escapeHtml(bookingMasterPrice(bookingMasterQuote?.grandTotal || 0))}</b>`}</div>
+    <div class="booking-cart-scroll">${rows || `<div class="empty-state">${bookingMasterUsesTimeSlotMode() ? "Add one time-based category." : bookingMasterUsesCategoryOnlyTaskMode() ? "Add categories to cart." : "Add stores to cart."}</div>`}</div>
+    ${bookingMasterQuoteError ? `<div class="serviceability-result danger">${escapeHtml(bookingMasterQuoteError)}</div>` : ""}
+    ${(bookingMasterQuote?.errors || []).length ? `<div class="serviceability-result danger">${bookingMasterQuote.errors.map(escapeHtml).join("<br>")}</div>` : ""}
+    ${bookingMasterCartSummaryHtml()}
+  </div>
+  ${includeDetails ? bookingMasterBookingDetailHtml() : ""}
+  ${includeDetails ? bookingMasterCreateActionsHtml() : ""}`;
+}
+
+function bookingMasterCreateActionsHtml() {
+  const quoteDisabled = bookingMasterQuote?.isValid ? "" : "disabled";
+  const plan = bookingMasterCartBookingTypePlan();
+  const instantNames = plan.instantServices.map((item) => item.serviceName).join(", ");
+  const scheduleNames = plan.scheduleServices.map((item) => item.serviceName).join(", ");
+  const instantLabel = bookingMasterCreateModeServiceLabel(plan, "instant");
+  const scheduleLabel = bookingMasterCreateModeServiceLabel(plan, "schedule");
+  const instantConfig = bookingMasterEffectiveBookingType("instant");
+  const instantDisabledReason = bookingMasterInstantDisabledReason(instantConfig);
+  const instantTimeLabel = bookingMasterInstantButtonTimeLabel(instantConfig);
+  const instantDisabled = quoteDisabled || instantDisabledReason ? "disabled" : "";
+  return `${bookingMasterBookingTypeSummaryHtml()}<div class="booking-create-actions">
+    ${plan.hasInstant ? `<button class="btn btn-primary booking-create-mode-btn ${instantLabel ? "has-service-label" : ""}" data-action="booking-master-create-booking" data-booking-mode="instant" type="button" title="${escapeHtml(instantDisabledReason || instantNames)}" ${instantDisabled}>${instantLabel}${instantTimeLabel ? `<small class="booking-create-mode-time">${escapeHtml(instantTimeLabel)}</small>` : ""}<span class="booking-create-mode-main">${iconSvg("zap")}<span>Instant</span></span></button>` : ""}
+    ${plan.hasSchedule ? `<button class="btn btn-soft booking-create-mode-btn ${scheduleLabel ? "has-service-label" : ""}" data-action="booking-master-create-booking" data-booking-mode="schedule" type="button" title="${escapeHtml(scheduleNames)}" ${quoteDisabled}>${scheduleLabel}<span class="booking-create-mode-main">${iconSvg("calendar")}<span>Schedule</span></span></button>` : ""}
+  </div>${instantDisabledReason ? `<div class="serviceability-result warning">${escapeHtml(instantDisabledReason)}</div>` : ""}`;
+}
+
+function bookingMasterStoreById(storeId) {
+  return bookingMasterStores.find((store) => store.id === storeId);
+}
+
+function ensureBookingMasterStoreModal() {
+  let modal = $("#bookingMasterStoreModal");
+  if (modal) return modal;
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `<div id="bookingMasterStoreModal" class="map-modal d-none" role="dialog" aria-modal="true" aria-labelledby="bookingMasterStoreModalTitle">
+      <div class="map-modal-card booking-modal-card booking-store-detail-modal">
+        <div class="map-modal-header">
+          <div>
+            <p>Booking Master Store</p>
+            <h2 id="bookingMasterStoreModalTitle">Store Details</h2>
+          </div>
+          <button id="closeBookingMasterStoreModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+        </div>
+        <div id="bookingMasterStoreModalBody" class="booking-modal-body"></div>
+      </div>
+    </div>`
+  );
+  modal = $("#bookingMasterStoreModal");
+  $("#closeBookingMasterStoreModalButton")?.addEventListener("click", () => {
+    cleanupBookingMasterStoreMap();
+    modal.classList.add("d-none");
+  });
+  return modal;
+}
+
+function ensureBookingMasterConfirmModal() {
+  let modal = $("#bookingMasterConfirmModal");
+  if (modal) return modal;
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `<div id="bookingMasterConfirmModal" class="booking-confirm-modal d-none" role="dialog" aria-modal="true" aria-labelledby="bookingMasterConfirmTitle">
+      <div class="booking-confirm-card">
+        <button id="bookingMasterConfirmCloseButton" class="booking-confirm-close" type="button" aria-label="Close confirmation">x</button>
+        <h2 id="bookingMasterConfirmTitle">Replace cart items?</h2>
+        <p id="bookingMasterConfirmMessage"></p>
+        <div class="booking-confirm-actions">
+          <button id="bookingMasterConfirmCancelButton" class="booking-confirm-btn secondary" type="button">No</button>
+          <button id="bookingMasterConfirmAcceptButton" class="booking-confirm-btn primary" type="button">Replace</button>
+        </div>
+      </div>
+    </div>`
+  );
+  return $("#bookingMasterConfirmModal");
+}
+
+function bookingMasterConfirmReplaceCart({ currentService, nextService }) {
+  const modal = ensureBookingMasterConfirmModal();
+  $("#bookingMasterConfirmTitle").textContent = "Replace cart items?";
+  $("#bookingMasterConfirmMessage").textContent = `Your cart has items from ${currentService}. To add items from ${nextService}, the current cart must be cleared first.`;
+  $("#bookingMasterConfirmCancelButton").textContent = "No";
+  $("#bookingMasterConfirmAcceptButton").textContent = "Replace";
+  modal.classList.remove("d-none");
+  return new Promise((resolve) => {
+    const close = (value) => {
+      modal.classList.add("d-none");
+      cleanup();
+      resolve(value);
+    };
+    const onCancel = () => close(false);
+    const onAccept = () => close(true);
+    const onKeydown = (event) => {
+      if (event.key === "Escape") close(false);
+    };
+    const cleanup = () => {
+      $("#bookingMasterConfirmCancelButton")?.removeEventListener("click", onCancel);
+      $("#bookingMasterConfirmCloseButton")?.removeEventListener("click", onCancel);
+      $("#bookingMasterConfirmAcceptButton")?.removeEventListener("click", onAccept);
+      document.removeEventListener("keydown", onKeydown);
+    };
+    $("#bookingMasterConfirmCancelButton")?.addEventListener("click", onCancel);
+    $("#bookingMasterConfirmCloseButton")?.addEventListener("click", onCancel);
+    $("#bookingMasterConfirmAcceptButton")?.addEventListener("click", onAccept);
+    document.addEventListener("keydown", onKeydown);
+    $("#bookingMasterConfirmAcceptButton")?.focus();
+  });
+}
+
+function appConfirmAction({ title = "Confirm action", message = "", acceptLabel = "Yes", cancelLabel = "No" } = {}) {
+  const modal = ensureBookingMasterConfirmModal();
+  const titleEl = $("#bookingMasterConfirmTitle");
+  const messageEl = $("#bookingMasterConfirmMessage");
+  const acceptButton = $("#bookingMasterConfirmAcceptButton");
+  const cancelButton = $("#bookingMasterConfirmCancelButton");
+  if (titleEl) titleEl.textContent = title;
+  if (messageEl) messageEl.textContent = message;
+  if (acceptButton) acceptButton.textContent = acceptLabel;
+  if (cancelButton) cancelButton.textContent = cancelLabel;
+  modal.classList.remove("d-none");
+  return new Promise((resolve) => {
+    const close = (value) => {
+      modal.classList.add("d-none");
+      cleanup();
+      resolve(value);
+    };
+    const onCancel = () => close(false);
+    const onAccept = () => close(true);
+    const onKeydown = (event) => {
+      if (event.key === "Escape") close(false);
+    };
+    const cleanup = () => {
+      cancelButton?.removeEventListener("click", onCancel);
+      $("#bookingMasterConfirmCloseButton")?.removeEventListener("click", onCancel);
+      acceptButton?.removeEventListener("click", onAccept);
+      document.removeEventListener("keydown", onKeydown);
+    };
+    cancelButton?.addEventListener("click", onCancel);
+    $("#bookingMasterConfirmCloseButton")?.addEventListener("click", onCancel);
+    acceptButton?.addEventListener("click", onAccept);
+    document.addEventListener("keydown", onKeydown);
+    acceptButton?.focus();
+  });
+}
+
+function namesForIds(ids = [], source = []) {
+  return (ids || []).map((id) => source.find((item) => item.id === id || item.categoryId === id)?.name || source.find((item) => item.id === id || item.categoryId === id)?.categoryName).filter(Boolean);
+}
+
+function bookingMasterStoreScheduleDetails(schedule = {}) {
+  const rows = weekDays
+    .map((day) => {
+      const value = schedule?.[day] || {};
+      const label = day.charAt(0).toUpperCase() + day.slice(1);
+      return `<div class="booking-store-detail-row">
+        <span>${label}</span>
+        <b>${value.enabled ? `${escapeHtml(value.openTime || "--:--")} - ${escapeHtml(value.closeTime || "--:--")}` : "Closed"}</b>
+      </div>`;
+    })
+    .join("");
+  return `<div class="booking-store-schedule">${rows}</div>`;
+}
+
+function bookingMasterStoreImagesHtml(store) {
+  const urls = [
+    ...(store.primaryImageUrl ? [store.primaryImageUrl] : []),
+    ...((store.images || []).map((image) => image.imageUrl).filter(Boolean))
+  ];
+  const uniqueUrls = [...new Set(urls)];
+  return uniqueUrls.length
+    ? `<div class="booking-store-detail-images">${uniqueUrls.map((url) => `<img src="${escapeHtml(withBasePath(url))}" alt="${escapeHtml(store.name || "Store image")}">`).join("")}</div>`
+    : `<div class="booking-store-detail-image-empty">${bookingMasterThumb("", store.name || "Store")}</div>`;
+}
+
+function storeWebsiteUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return /^https?:\/\//i.test(text) ? text : `https://${text}`;
+}
+
+function storeMapUrl(store) {
+  const latitude = Number(store.latitude);
+  const longitude = Number(store.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return "";
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${latitude},${longitude}`)}`;
+}
+
+function whatsappChatUrl(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  const normalized = digits.length === 10 ? `91${digits}` : digits;
+  return `https://wa.me/${normalized}`;
+}
+
+function phoneCallUrl(phone) {
+  const text = String(phone || "").trim();
+  if (!text) return "";
+  const digits = text.replace(/[^\d+]/g, "");
+  return digits ? `tel:${digits}` : "";
+}
+
+function contactIcon(name) {
+  const icons = {
+    whatsapp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.1 3.2a8.7 8.7 0 0 0-7.5 13.1l-.9 3.4 3.5-.9a8.7 8.7 0 1 0 4.9-15.6Zm0 1.6a7.1 7.1 0 0 1 6 10.9 7.1 7.1 0 0 1-8.2 2.5l-.3-.1-2.1.6.6-2-.2-.3a7.1 7.1 0 0 1 4.2-11.6Zm-3 3.9c-.2 0-.5.1-.7.4-.2.3-.9.9-.9 2.1s.9 2.4 1 2.5c.1.2 1.8 2.8 4.4 3.8 2.2.9 2.6.7 3.1.7.5-.1 1.5-.6 1.7-1.2.2-.6.2-1.1.1-1.2-.1-.1-.2-.2-.5-.4l-1.8-.9c-.3-.1-.5-.1-.7.2l-.7.9c-.1.2-.3.2-.6.1-.3-.1-1.1-.4-2-1.2-.8-.7-1.3-1.5-1.4-1.8-.1-.2 0-.4.1-.5l.4-.5c.1-.2.2-.3.3-.5.1-.2 0-.4 0-.5l-.8-1.9c-.2-.5-.4-.5-.6-.5h-.4Z"></path></svg>`,
+    call: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 4.2c.5-.5 1.3-.6 1.9-.2l2.1 1.4c.6.4.8 1.2.5 1.9l-.8 1.9c-.1.3-.1.6.1.8.9 1.5 2.1 2.7 3.6 3.6.3.2.6.2.8.1l1.9-.8c.7-.3 1.5-.1 1.9.5l1.4 2.1c.4.6.3 1.4-.2 1.9l-1 1c-.7.7-1.8 1-2.8.8-6.1-1.2-10.9-6-12.1-12.1-.2-1 .1-2.1.8-2.8l1-1Z"></path></svg>`
+  };
+  return icons[name] || "";
+}
+
+function contactActions(phone) {
+  const text = String(phone || "").trim();
+  if (!text) return "-";
+  const whatsAppUrl = whatsappChatUrl(text);
+  const callUrl = phoneCallUrl(text);
+  return `<span class="contact-actions">
+    <span class="contact-number">${escapeHtml(text)}</span>
+    ${whatsAppUrl ? `<a class="contact-icon whatsapp" href="${escapeHtml(whatsAppUrl)}" target="_blank" rel="noreferrer" title="Chat on WhatsApp" aria-label="Chat on WhatsApp">${contactIcon("whatsapp")}</a>` : ""}
+    ${callUrl ? `<a class="contact-icon call" href="${escapeHtml(callUrl)}" title="Call number" aria-label="Call number">${contactIcon("call")}</a>` : ""}
+  </span>`;
+}
+
+function bookingMasterStoreImagePanelHtml(store) {
+  const websiteUrl = storeWebsiteUrl(store.website);
+  const mapUrl = storeMapUrl(store);
+  return `<div class="booking-store-detail-media">
+    ${bookingMasterStoreImagesHtml(store)}
+    <div class="booking-store-detail-actions">
+      ${websiteUrl ? `<a class="btn btn-soft btn-sm" href="${escapeHtml(websiteUrl)}" target="_blank" rel="noreferrer">Website</a>` : `<span class="btn btn-soft btn-sm disabled">No website</span>`}
+      ${mapUrl ? `<a class="btn btn-primary btn-sm" href="${escapeHtml(mapUrl)}" target="_blank" rel="noreferrer">View Map</a>` : `<span class="btn btn-soft btn-sm disabled">No map</span>`}
+    </div>
+    <div class="booking-store-mini-map-wrap">
+      <div id="bookingMasterStoreMap" class="booking-store-mini-map"><div class="empty-state">Loading map...</div></div>
+    </div>
+  </div>`;
+}
+
+function cleanupBookingMasterStoreMap() {
+  if (!bookingMasterStoreMapInstance) return;
+  try {
+    bookingMasterStoreMapInstance.remove?.();
+  } catch (error) {
+    console.warn("Unable to clean up store map", error);
+  }
+  bookingMasterStoreMapInstance = null;
+}
+
+async function renderBookingMasterStoreMap(store) {
+  const mapEl = $("#bookingMasterStoreMap");
+  if (!mapEl) return;
+  cleanupBookingMasterStoreMap();
+  const latitude = Number(store.latitude);
+  const longitude = Number(store.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    mapEl.innerHTML = `<div class="empty-state">Store latitude and longitude are not available.</div>`;
+    return;
+  }
+  try {
+    const config = await api(BASE_PATH+"/config/maps");
+    const { olaMapsApiKey, olaMapsStyleUrl } = config.data || {};
+    if (!olaMapsApiKey) throw new Error("Map key is not configured.");
+    await loadOlaMapsSdk();
+    const olaMaps = new window.OlaMaps({ apiKey: olaMapsApiKey });
+    const initMap = (style) =>
+      olaMaps.init({
+        style,
+        container: "bookingMasterStoreMap",
+        center: [longitude, latitude],
+        zoom: 15
+      });
+    let usedFallback = false;
+    const drawPin = () => {
+      if (!bookingMasterStoreMapInstance?.getSource || !bookingMasterStoreMapInstance?.addSource) return;
+      const data = {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [longitude, latitude] },
+        properties: { name: store.name || "Store" }
+      };
+      if (!bookingMasterStoreMapInstance.getSource("booking-master-store-point")) {
+        bookingMasterStoreMapInstance.addSource("booking-master-store-point", { type: "geojson", data });
+        bookingMasterStoreMapInstance.addLayer({
+          id: "booking-master-store-point",
+          type: "circle",
+          source: "booking-master-store-point",
+          paint: {
+            "circle-color": "#003880",
+            "circle-radius": 8,
+            "circle-stroke-color": "#ffffff",
+            "circle-stroke-width": 3
+          }
+        });
+      } else {
+        bookingMasterStoreMapInstance.getSource("booking-master-store-point")?.setData?.(data);
+      }
+      bookingMasterStoreMapInstance.resize?.();
+    };
+    mapEl.innerHTML = "";
+    bookingMasterStoreMapInstance = initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
+    bookingMasterStoreMapInstance.on?.("load", drawPin);
+    bookingMasterStoreMapInstance.on?.("idle", drawPin);
+    bookingMasterStoreMapInstance.on?.("error", (event) => {
+      if (!usedFallback && isOlaMapAuthOrDomainError(event?.error || event)) {
+        usedFallback = true;
+        cleanupBookingMasterStoreMap();
+        mapEl.innerHTML = "";
+        bookingMasterStoreMapInstance = initMap(fallbackRasterStyle());
+        bookingMasterStoreMapInstance.on?.("load", drawPin);
+        bookingMasterStoreMapInstance.on?.("idle", drawPin);
+      }
+    });
+    setTimeout(() => bookingMasterStoreMapInstance?.resize?.(), 150);
+  } catch (error) {
+    mapEl.innerHTML = `<div class="empty-state">${escapeHtml(error.message || "Unable to load store map.")}</div>`;
+  }
+}
+
+function bookingMasterOpenStoreDetails(storeId) {
+  const modal = ensureBookingMasterStoreModal();
+  const store = bookingMasterStoreById(storeId);
+  if (!store) {
+    showAlert("Store details expired. Select the category again.");
+    return;
+  }
+  const selectedCategory = bookingMasterClusterCategories.find((category) => category.categoryId === bookingMasterSelectedCategoryId);
+  const pricing = selectedCategory ? bookingMasterCategoryPricing(selectedCategory) : { selling: 0, base: 0, saveLabel: "" };
+  const serviceCategoryNames = namesForIds(store.serviceCategoryIds || [], bookingMasterClusterCategories);
+  const storeCategoryNames = namesForIds(store.storeCategoryIds || [], bookingMasterStoreCategories);
+  const storeKeywordNames = namesForIds(store.storeKeywordIds || [], bookingMasterStoreKeywords);
+  $("#bookingMasterStoreModalTitle").textContent = store.name || "Store Details";
+  $("#bookingMasterStoreModalBody").innerHTML = `<div class="booking-store-detail">
+    ${bookingMasterStoreImagePanelHtml(store)}
+    <div class="booking-store-detail-main">
+      <div>
+        <p class="helper-text mb-1">Store</p>
+        <h3>${escapeHtml(store.name || "-")}</h3>
+        <span class="status-pill ${store.isActive === false ? "danger" : ""}">${store.isActive === false ? "inactive" : "active"}</span>
+      </div>
+      <div class="booking-store-detail-price">
+        ${pricing.base > pricing.selling ? `<del>${escapeHtml(bookingMasterPrice(pricing.base))}</del>` : ""}
+        <strong>${escapeHtml(bookingMasterPrice(pricing.selling || 0))}</strong>
+        ${pricing.saveLabel ? `<span>${escapeHtml(pricing.saveLabel)}</span>` : ""}
+      </div>
+      <div class="booking-store-detail-grid">
+        <div><span>Selected category</span><b>${escapeHtml(selectedCategory?.categoryName || "-")}</b></div>
+        <div><span>Contact</span><b>${contactActions(store.contact)}</b></div>
+        <div><span>Coordinates</span><b>${escapeHtml([store.latitude, store.longitude].filter(Boolean).join(", ") || "-")}</b></div>
+        <div><span>Code</span><b>${escapeHtml(store.code || "-")}</b></div>
+      </div>
+      <div class="booking-store-detail-section">
+        <span>Address</span>
+        <p>${escapeHtml(store.address || "-")}</p>
+      </div>
+      ${store.description ? `<div class="booking-store-detail-section"><span>Description</span><p>${escapeHtml(store.description)}</p></div>` : ""}
+      <div class="booking-store-detail-section">
+        <span>Service categories</span>
+        <div class="booking-store-capsules">${serviceCategoryNames.map((name) => `<span>${escapeHtml(name)}</span>`).join("") || "<span>NONE</span>"}</div>
+      </div>
+      <div class="booking-store-detail-section">
+        <span>Store categories</span>
+        <div class="booking-store-capsules">${storeCategoryNames.map((name) => `<span>${escapeHtml(name)}</span>`).join("") || "<span>GENERAL</span>"}</div>
+      </div>
+      <div class="booking-store-detail-section">
+        <span>Store keywords</span>
+        <div class="booking-store-capsules">${storeKeywordNames.map((name) => `<span>${escapeHtml(name)}</span>`).join("") || "<span>NONE</span>"}</div>
+      </div>
+      <div class="booking-store-detail-section">
+        <span>Opening & closing time</span>
+        ${bookingMasterStoreScheduleDetails(store.operatingHours || {})}
+      </div>
+    </div>
+  </div>`;
+  modal.classList.remove("d-none");
+  renderBookingMasterStoreMap(store);
+}
+
+async function continueBookingMasterToServices() {
+  if (!bookingMasterServiceability?.isServiceable || !bookingMasterServiceability.cluster?.clusterId) {
+    showAlert("Validate a serviceable location before continuing.");
+    return;
+  }
+  bookingMasterPhase = "services";
+  bookingMasterNextPhaseLoading = true;
+  bookingMasterNextPhaseError = "";
+  renderBookingMasterNextPhase();
+  try {
+    const clusterId = bookingMasterServiceability.cluster.clusterId;
+    const [payload, cartMixPayload, bookingTypesPayload] = await Promise.all([
+      api(bookingMasterCatalogUrl({ clusterId })),
+      api(BASE_PATH+"/settings/booking-cart-mix"),
+      safeApi(BASE_PATH+"/masters/booking-types")
+    ]);
+    applyBookingMasterCatalog(payload.data || {});
+    bookingMasterCartMixSetting = cartMixPayload.data || { personalAssistantServiceId: null, allowedWithMode: "none", allowedServiceIds: [] };
+    cache.bookingTypes = bookingTypesPayload.data || cache.bookingTypes || [];
+    bookingMasterSelectedServiceId = "";
+    bookingMasterSelectedCategoryId = "";
+    bookingMasterCategorySearchText = "";
+    bookingMasterStoreSearchText = "";
+    bookingMasterStores = [];
+  } catch (error) {
+    bookingMasterNextPhaseError = error.message;
+  } finally {
+    bookingMasterNextPhaseLoading = false;
+    renderBookingMasterNextPhase();
+  }
+}
+
+function bookingMasterCatalogUrl({ clusterId = bookingMasterServiceability?.cluster?.clusterId || "", serviceId = bookingMasterSelectedServiceId, categoryId = bookingMasterSelectedCategoryId, q = bookingMasterStoreSearchText } = {}) {
+  const params = new URLSearchParams();
+  params.set("clusterId", clusterId);
+  if (serviceId) params.set("serviceId", serviceId);
+  if (categoryId) params.set("categoryId", categoryId);
+  if (q?.trim()) params.set("q", q.trim());
+  return `/masters/booking-catalog?${params.toString()}`;
+}
+
+function applyBookingMasterCatalog(catalog = {}, options = {}) {
+  if (!options.preserveCatalog && catalog.services) bookingMasterClusterServices = catalog.services || [];
+  if (!options.preserveCatalog && catalog.categories) bookingMasterClusterCategories = catalog.categories || [];
+  if (!options.preserveCatalog && catalog.priceRules) bookingMasterPriceRules = catalog.priceRules || [];
+  if (catalog.stores || options.replaceStores) bookingMasterStores = catalog.stores || [];
+  if (catalog.storeCategories) bookingMasterStoreCategories = catalog.storeCategories || [];
+  if (catalog.storeKeywords) bookingMasterStoreKeywords = catalog.storeKeywords || [];
+}
+
+function bookingMasterServiceById(serviceId) {
+  return bookingMasterClusterServices.find((service) => service.serviceId === serviceId);
+}
+
+function bookingMasterServiceMixSettings(serviceId) {
+  const mode = ["all", "selected"].includes(bookingMasterCartMixSetting.allowedWithMode) ? bookingMasterCartMixSetting.allowedWithMode : "none";
+  return {
+    mode,
+    personalAssistantServiceId: bookingMasterCartMixSetting.personalAssistantServiceId || "",
+    allowedServiceIds: Array.isArray(bookingMasterCartMixSetting.allowedServiceIds) ? bookingMasterCartMixSetting.allowedServiceIds : []
+  };
+}
+
+function bookingMasterPersonalAssistantAllowsService(otherServiceId) {
+  if (!otherServiceId) return false;
+  const settings = bookingMasterServiceMixSettings();
+  if (!settings.personalAssistantServiceId) return false;
+  if (otherServiceId === settings.personalAssistantServiceId) return true;
+  if (settings.mode === "all") return true;
+  if (settings.mode === "selected") return settings.allowedServiceIds.includes(otherServiceId);
+  return false;
+}
+
+function bookingMasterPersonalAssistantServiceId() {
+  return bookingMasterCartMixSetting.personalAssistantServiceId || "";
+}
+
+function bookingMasterIsPersonalAssistantService(serviceId) {
+  return Boolean(serviceId && serviceId === bookingMasterPersonalAssistantServiceId());
+}
+
+function bookingMasterPersonalAssistantCartItemIndex() {
+  const personalAssistantServiceId = bookingMasterPersonalAssistantServiceId();
+  if (!personalAssistantServiceId) return -1;
+  return bookingMasterCartItems.findIndex((item) => (item.serviceId || bookingMasterCategoryById(item.categoryId)?.serviceId || "") === personalAssistantServiceId);
+}
+
+function bookingMasterPersonalAssistantCategoryLimitReached(categoryId) {
+  const category = bookingMasterCategoryById(categoryId);
+  if (!bookingMasterIsPersonalAssistantService(category?.serviceId)) return false;
+  const existingIndex = bookingMasterPersonalAssistantCartItemIndex();
+  if (existingIndex < 0) return false;
+  return bookingMasterCartItems[existingIndex]?.categoryId !== categoryId;
+}
+
+function bookingMasterServicesCanShareCart(serviceId, otherServiceId) {
+  if (!serviceId || !otherServiceId || serviceId === otherServiceId) return true;
+  const personalAssistantServiceId = bookingMasterPersonalAssistantServiceId();
+  if (!personalAssistantServiceId) return false;
+  if (serviceId === personalAssistantServiceId) return bookingMasterPersonalAssistantAllowsService(otherServiceId);
+  if (otherServiceId === personalAssistantServiceId) return bookingMasterPersonalAssistantAllowsService(serviceId);
+  return false;
+}
+
+function bookingMasterCartServiceIds() {
+  return [...new Set(bookingMasterCartItems.map((item) => item.serviceId || bookingMasterCategoryById(item.categoryId)?.serviceId).filter(Boolean))];
+}
+
+function bookingMasterLocationServiceIds() {
+  const cartIds = bookingMasterCartServiceIds();
+  return cartIds.length ? cartIds : [bookingMasterSelectedServiceId].filter(Boolean);
+}
+
+function bookingMasterServiceLocationRule(serviceId) {
+  const service = bookingMasterServiceById(serviceId) || {};
+  const mode = service.locationMode === "multi" ? "multi" : "current";
+  const maxLocationsLimit = mode === "multi" ? Math.max(1, Number(service.maxLocationsLimit || 1)) : 1;
+  return {
+    serviceId,
+    serviceName: service.serviceName || "Service",
+    locationMode: mode,
+    maxLocationsLimit
+  };
+}
+
+function bookingMasterLocationRequirement() {
+  const serviceIds = bookingMasterLocationServiceIds();
+  const serviceRules = serviceIds.map(bookingMasterServiceLocationRule);
+  const maxLocations = Math.max(1, serviceRules.reduce((total, rule) => {
+    const limit = rule.locationMode === "multi" ? rule.maxLocationsLimit : 1;
+    return total + Math.max(1, Number(limit || 1));
+  }, 0));
+  return {
+    mode: maxLocations > 1 ? "multi" : "current",
+    maxLocations,
+    serviceRules
+  };
+}
+
+function normalizeBookingMasterLocationStop(location = {}, index = 0, isPrimary = false) {
+  return {
+    addressId: location.addressId || null,
+    label: location.label || (isPrimary ? "Primary location" : `Stop ${index + 1}`),
+    address: location.address || location.label || "",
+    latitude: location.latitude == null ? null : Number(location.latitude),
+    longitude: location.longitude == null ? null : Number(location.longitude),
+    clusterId: location.clusterId || bookingMasterServiceability?.cluster?.clusterId || null,
+    clusterName: location.clusterName || bookingMasterServiceability?.cluster?.name || null,
+    zoneName: location.zoneName || null,
+    cityName: location.cityName || null,
+    isDefault: Boolean(location.isDefault),
+    isPrimary: Boolean(isPrimary),
+    sequence: index + 1
+  };
+}
+
+function bookingMasterPrimaryLocationStop() {
+  if (!locationHasCoordinates(bookingMasterSelectedLocation)) return null;
+  return normalizeBookingMasterLocationStop({
+    ...bookingMasterSelectedLocation,
+    label: bookingMasterSelectedLocation.label || (bookingMasterSelectedLocation.isDefault ? "Default location" : "Primary location"),
+    zoneName: bookingMasterSelectedCustomer?.zoneName || bookingMasterSelectedLocation.zoneName,
+    cityName: bookingMasterSelectedCustomer?.cityName || bookingMasterSelectedLocation.cityName
+  }, 0, true);
+}
+
+function bookingMasterStopKey(stop = {}) {
+  if (stop.addressId) return `address:${stop.addressId}`;
+  return `pin:${Number(stop.latitude).toFixed(6)},${Number(stop.longitude).toFixed(6)}`;
+}
+
+function syncBookingMasterLocationStops() {
+  const requirement = bookingMasterLocationRequirement();
+  const primary = bookingMasterPrimaryLocationStop();
+  const primaryKey = primary ? bookingMasterStopKey(primary) : "";
+  const seen = new Set(primaryKey ? [primaryKey] : []);
+  bookingMasterLocationStops = bookingMasterLocationStops
+    .filter(locationHasCoordinates)
+    .map((stop, index) => normalizeBookingMasterLocationStop(stop, index + 1, false))
+    .filter((stop) => {
+      const key = bookingMasterStopKey(stop);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, Math.max(0, requirement.maxLocations - 1));
+}
+
+function bookingMasterLocationStopsForPayload() {
+  syncBookingMasterLocationStops();
+  const primary = bookingMasterPrimaryLocationStop();
+  const stops = primary ? [primary, ...bookingMasterLocationStops] : [...bookingMasterLocationStops];
+  return stops.map((stop, index) => ({ ...stop, sequence: index + 1, isPrimary: index === 0 }));
+}
+
+function bookingMasterLocationClusterIds() {
+  const ids = bookingMasterLocationStopsForPayload()
+    .map((stop) => stop.clusterId)
+    .filter(Boolean);
+  if (!ids.length && bookingMasterServiceability?.cluster?.clusterId) ids.push(bookingMasterServiceability.cluster.clusterId);
+  return [...new Set(ids)];
+}
+
+function bookingMasterLocationStopCard(stop, index, removable = false) {
+  return `<div class="booking-location-card booking-detail-location-card">
+    <div>
+      <b>${escapeHtml(index === 0 ? `${stop.label || "Primary location"} (Stop 1)` : stop.label || `Stop ${index + 1}`)}</b>
+      <p>${escapeHtml(stop.address || "-")}</p>
+      <span>${escapeHtml(formatLatLngText(stop.latitude, stop.longitude) || "-")}</span>
+      <span>${escapeHtml([stop.clusterName, stop.zoneName, stop.cityName].filter(Boolean).join(", ") || "-")}</span>
+    </div>
+    ${removable ? `<button class="btn btn-outline-danger btn-sm" data-action="remove-booking-master-location-stop" data-index="${index - 1}" type="button">Remove</button>` : `<button class="btn btn-soft btn-sm" data-action="change-booking-master-address" type="button">Change</button>`}
+  </div>`;
+}
+
+function bookingMasterBookingDetailHtml() {
+  if (!bookingMasterCartItems.length) return "";
+  const requirement = bookingMasterLocationRequirement();
+  const stops = bookingMasterLocationStopsForPayload();
+  const canAddStop = requirement.mode === "multi" && stops.length < requirement.maxLocations;
+  const rulesText = requirement.serviceRules
+    .map((rule) => `${rule.serviceName}: ${rule.locationMode === "multi" ? `${rule.maxLocationsLimit} locations` : "current location"}`)
+    .join(" | ");
+  return `<div class="booking-detail-panel">
+    <div class="booking-next-header compact">
+      <div><span>Booking Detail</span><h3>${escapeHtml(stops.length)} of ${escapeHtml(requirement.maxLocations)} locations selected</h3></div>
+      ${requirement.mode === "multi" ? `<button class="btn btn-soft btn-sm" data-action="add-booking-master-location-stop" type="button" ${canAddStop ? "" : "disabled"}>Add Stop</button>` : ""}
+    </div>
+    ${rulesText ? `<div class="booking-cart-note">${escapeHtml(rulesText)}</div>` : ""}
+    <div class="booking-location-list">
+      ${stops.length ? stops.map((stop, index) => bookingMasterLocationStopCard(stop, index, index > 0)).join("") : `<div class="empty-state">Choose a confirmed booking address first.</div>`}
+    </div>
+    ${requirement.mode === "multi" && !canAddStop ? `<div class="serviceability-result warning">Maximum location limit reached for selected cart services.</div>` : ""}
+    <div class="booking-detail-extra-grid">
+      <label class="form-label">Upload Files (if required) ${bookingMasterAttachmentUploadControl()}</label>
+      <label class="form-label">Note <textarea id="bookingMasterDetailNoteInput" class="form-control" rows="4" placeholder="Add booking notes">${escapeHtml(bookingMasterDetailNote)}</textarea></label>
+    </div>
+  </div>`;
+}
+
+function bookingMasterCartCanAddService(serviceId) {
+  if (!serviceId) return true;
+  return bookingMasterCartServiceIds().every((cartServiceId) => bookingMasterServicesCanShareCart(cartServiceId, serviceId));
+}
+
+function bookingMasterMixedServiceMessage(serviceId) {
+  const nextService = bookingMasterServiceById(serviceId)?.serviceName || "the selected service";
+  return `${nextService} is not allowed with the services already in cart. Remove the current cart items before adding it.`;
+}
+
+function bookingMasterCategoryById(categoryId) {
+  return bookingMasterClusterCategories.find((category) => category.categoryId === categoryId);
+}
+
+function bookingMasterCartServiceId() {
+  return bookingMasterCartServiceIds()[0] || bookingMasterSelectedServiceId || "";
+}
+
+function clearBookingMasterCart() {
+  bookingMasterQuoteRequestId += 1;
+  bookingMasterCartItems = [];
+  bookingMasterQuote = null;
+  bookingMasterQuoteError = "";
+  bookingMasterQuoteLoading = false;
+}
+
+async function selectBookingMasterService(serviceId) {
+  if (!serviceId || bookingMasterSelectedServiceId === serviceId) return;
+  const cartServiceId = bookingMasterCartServiceId();
+  if (bookingMasterCartItems.length && cartServiceId && cartServiceId !== serviceId && !bookingMasterCartCanAddService(serviceId)) {
+    const currentService = bookingMasterServiceById(cartServiceId)?.serviceName || "the current service";
+    const nextService = bookingMasterServiceById(serviceId)?.serviceName || "the selected service";
+    const shouldClear = await bookingMasterConfirmReplaceCart({ currentService, nextService });
+    if (!shouldClear) return;
+    clearBookingMasterCart();
+  }
+  bookingMasterSelectedServiceId = serviceId;
+  bookingMasterSelectedCategoryId = "";
+  bookingMasterDurationMinutes = 0;
+  bookingMasterCategorySearchText = "";
+  bookingMasterStoreSearchText = "";
+  bookingMasterStores = [];
+  if (!bookingMasterCartItems.length) bookingMasterQuote = null;
+  bookingMasterAvailabilityDecision = null;
+  refreshBookingMasterAvailabilityDecision().finally(() => renderBookingMasterNextPhase());
+  renderBookingMasterNextPhase();
+}
+
+async function selectBookingMasterCategory(categoryId) {
+  const previousCategoryId = bookingMasterSelectedCategoryId;
+  bookingMasterSelectedCategoryId = categoryId;
+  bookingMasterStoreSearchText = "";
+  if (bookingMasterUsesCategoryOnlyTaskMode()) {
+    bookingMasterStores = [];
+    bookingMasterStoresLoading = false;
+    bookingMasterStoresError = "";
+    renderBookingMasterNextPhase();
+    return;
+  }
+  if (bookingMasterSelectedPricingMode() === "time") {
+    const selectedTimeSlot = bookingMasterQuote?.lineItems?.length;
+    const selectingCurrentTimeSlot = selectedTimeSlot && previousCategoryId === categoryId;
+    if (selectedTimeSlot && !selectingCurrentTimeSlot) {
+      bookingMasterSelectedCategoryId = previousCategoryId;
+      showAlert("Only one time-based category can be added to cart at a time. Remove the selected one before adding another.");
+      renderBookingMasterNextPhase();
+      return;
+    }
+    bookingMasterStores = [];
+    bookingMasterStoresLoading = false;
+    bookingMasterStoresError = "";
+    const rule = bookingMasterBestPriceRule("time", categoryId, bookingMasterSelectedServiceId);
+    const slabs = (rule?.timeSlabs || []).filter(priceMasterTimeSlabIsActive).slice().sort((a, b) => Number(a.durationMinutes || 0) - Number(b.durationMinutes || 0));
+    if (slabs.length && !slabs.some((slab) => Number(slab.durationMinutes || 0) === Number(bookingMasterDurationMinutes))) {
+      bookingMasterDurationMinutes = Number(slabs[0].durationMinutes || 30);
+    }
+    renderBookingMasterNextPhase();
+    return;
+  }
+  bookingMasterStoresLoading = true;
+  bookingMasterStoresError = "";
+  renderBookingMasterNextPhase();
+  try {
+    const payload = await api(bookingMasterCatalogUrl({ categoryId, q: "" }));
+    applyBookingMasterCatalog(payload.data || {}, { replaceStores: true, preserveCatalog: true });
+  } catch (error) {
+    bookingMasterStoresError = error.message;
+  } finally {
+    bookingMasterStoresLoading = false;
+    renderBookingMasterNextPhase();
+  }
+}
+
+async function searchBookingMasterStores() {
+  if (!bookingMasterSelectedCategoryId || bookingMasterSelectedPricingMode() !== "task") return;
+  bookingMasterStoresLoading = true;
+  bookingMasterStoresError = "";
+  renderBookingMasterNextPhase();
+  try {
+    const payload = await api(bookingMasterCatalogUrl());
+    applyBookingMasterCatalog(payload.data || {}, { replaceStores: true, preserveCatalog: true });
+  } catch (error) {
+    bookingMasterStoresError = error.message;
+  } finally {
+    bookingMasterStoresLoading = false;
+    renderBookingMasterNextPhase();
+  }
+}
+
+function scheduleBookingMasterStoreSearch() {
+  if (bookingMasterStoreSearchTimer) clearTimeout(bookingMasterStoreSearchTimer);
+  bookingMasterStoreSearchTimer = setTimeout(() => {
+    searchBookingMasterStores().catch((error) => {
+      bookingMasterStoresError = error.message;
+      bookingMasterStoresLoading = false;
+      renderBookingMasterNextPhase();
+    });
+  }, 300);
+}
+
+async function quoteBookingMasterCart(priceType = "task") {
+  if (!bookingMasterSelectedServiceId) return;
+  const requestId = ++bookingMasterQuoteRequestId;
+  bookingMasterQuoteLoading = true;
+  bookingMasterQuoteError = "";
+  renderBookingMasterNextPhase();
+  try {
+    const payload = await api(BASE_PATH+"/masters/price-master/quote", {
+      method: "POST",
+      body: JSON.stringify({
+        priceType,
+        clusterId: bookingMasterServiceability?.cluster?.clusterId || null,
+        serviceId: bookingMasterSelectedServiceId,
+        categoryId: bookingMasterSelectedCategoryId || null,
+        durationMinutes: Number(bookingMasterDurationMinutes) > 0 ? bookingMasterDurationMinutes : undefined,
+        cartItems: bookingMasterCartItems
+      })
+    });
+    if (requestId !== bookingMasterQuoteRequestId) return;
+    bookingMasterQuote = payload.data;
+  } catch (error) {
+    if (requestId !== bookingMasterQuoteRequestId) return;
+    bookingMasterQuoteError = error.message;
+  } finally {
+    if (requestId === bookingMasterQuoteRequestId) {
+      bookingMasterQuoteLoading = false;
+      await refreshBookingMasterAvailabilityDecision();
+      renderBookingMasterNextPhase();
+    }
+  }
+}
+
+async function refreshBookingMasterAvailabilityDecision() {
+  const clusterId = bookingMasterServiceability?.cluster?.clusterId || "";
+  const serviceId = bookingMasterCartServiceId() || bookingMasterSelectedServiceId || "";
+  if (!clusterId || !serviceId) {
+    bookingMasterAvailabilityDecision = null;
+    return;
+  }
+  const requestId = ++bookingMasterAvailabilityRequestId;
+  const instantConfig = bookingMasterEffectiveBookingType("instant");
+  const firstCartItem = bookingMasterCartItems[0] || null;
+  const categoryId = firstCartItem?.categoryId || bookingMasterSelectedCategoryId || null;
+  try {
+    const payload = await api(BASE_PATH+"/operations/bookings/availability", {
+      method: "POST",
+      body: JSON.stringify({
+        clusterId,
+        locationClusterIds: bookingMasterLocationClusterIds(),
+        serviceId,
+        categoryId,
+        durationMinutes: bookingMasterScheduleDurationMinutes(),
+        waitWindowMinutes: instantConfig.waitWindowMinutes || 0,
+        latitude: bookingMasterSelectedLocation?.latitude ?? null,
+        longitude: bookingMasterSelectedLocation?.longitude ?? null
+      })
+    });
+    if (requestId !== bookingMasterAvailabilityRequestId) return;
+    bookingMasterAvailabilityDecision = { ...(payload.data || {}), clusterId, serviceId };
+  } catch (error) {
+    if (requestId !== bookingMasterAvailabilityRequestId) return;
+    bookingMasterAvailabilityDecision = null;
+  }
+}
+
+function bookingMasterScheduleDurationMinutes() {
+  const quoteDurations = (bookingMasterQuote?.lineItems || [])
+    .map((item) => Number(item.billedDurationMinutes || item.durationMinutes || 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const cartDurations = (bookingMasterCartItems || [])
+    .map((item) => Number(item.durationMinutes || 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const quoteTotal = quoteDurations.reduce((sum, value) => sum + value, 0);
+  const cartTotal = cartDurations.reduce((sum, value) => sum + value, 0);
+  return Math.max(1, Math.round(quoteTotal || cartTotal || Number(bookingMasterDurationMinutes || 0) || 30));
+}
+
+async function addBookingMasterTimeSlotToCart(categoryId, durationMinutes) {
+  if (bookingMasterSelectedPricingMode() !== "time") return;
+  const category = bookingMasterCategoryById(categoryId);
+  const serviceId = category?.serviceId || bookingMasterSelectedServiceId;
+  const existingTimeIndex = bookingMasterCartItems.findIndex((item) => item.priceType === "time");
+  if (bookingMasterCartItems.length && existingTimeIndex < 0 && serviceId && !bookingMasterCartCanAddService(serviceId)) {
+    showAlert(bookingMasterMixedServiceMessage(category.serviceId));
+    return;
+  }
+  const slot = bookingMasterTimeSlotItems(serviceId)
+    .find((candidate) => Number(candidate.durationMinutes || 0) === Number(durationMinutes || 30) && (candidate.categoryId || "") === (categoryId || ""));
+  bookingMasterSelectedCategoryId = categoryId || "";
+  bookingMasterDurationMinutes = Number(durationMinutes || 30);
+  const nextItem = {
+    categoryId: categoryId || null,
+    categoryName: category?.categoryName || slot?.categoryName || "Time service",
+    serviceId,
+    storeId: null,
+    priceType: "time",
+    durationMinutes: bookingMasterDurationMinutes
+  };
+  if (existingTimeIndex >= 0) bookingMasterCartItems[existingTimeIndex] = nextItem;
+  else bookingMasterCartItems.push(nextItem);
+  await quoteBookingMasterCart("task");
+}
+
+async function addBookingMasterStoreToCart(storeId) {
+  if (!bookingMasterSelectedCategoryId) return;
+  if (bookingMasterSelectedPricingMode() === "time") return;
+  const category = bookingMasterCategoryById(bookingMasterSelectedCategoryId);
+  const cartServiceId = bookingMasterCartServiceId();
+  if (bookingMasterCartItems.length && cartServiceId && category?.serviceId && !bookingMasterCartCanAddService(category.serviceId)) {
+    showAlert(bookingMasterMixedServiceMessage(category.serviceId));
+    return;
+  }
+  if (bookingMasterCartItemIndexByStoreId(storeId) >= 0) {
+    showAlert("This store is already added in cart.");
+    return;
+  }
+  const limitMessage = bookingMasterStoreCartLimitMessage(category, storeId);
+  if (limitMessage) {
+    showAlert(limitMessage);
+    return;
+  }
+  const store = bookingMasterStores.find((candidate) => candidate.id === storeId);
+  bookingMasterCartItems.push({
+    categoryId: bookingMasterSelectedCategoryId,
+    serviceId: category?.serviceId || bookingMasterSelectedServiceId,
+    storeId,
+    storeName: store?.name || "",
+    storeImageUrl: store?.primaryImageUrl || ""
+  });
+  await quoteBookingMasterCart("task");
+}
+
+async function addBookingMasterCategoryToCart(categoryId) {
+  if (!bookingMasterUsesCategoryOnlyTaskMode()) return;
+  const category = bookingMasterCategoryById(categoryId);
+  if (!category) return;
+  const isPersonalAssistantCategory = bookingMasterIsPersonalAssistantService(category.serviceId);
+  const cartServiceId = bookingMasterCartServiceId();
+  if (bookingMasterCartItems.length && cartServiceId && category.serviceId && !bookingMasterCartCanAddService(category.serviceId)) {
+    showAlert(bookingMasterMixedServiceMessage(category.serviceId));
+    return;
+  }
+  if (bookingMasterCartItemIndexByCategoryId(categoryId) >= 0) {
+    bookingMasterSelectedCategoryId = categoryId;
+    renderBookingMasterNextPhase();
+    return;
+  }
+  const pricing = bookingMasterCategoryPricing(category);
+  if (moneyNumber(pricing.selling || 0) <= 0) {
+    showAlert("Price is required for this category. Add a valid price in Price Master before adding it to cart.");
+    return;
+  }
+  const maxAllowed = bookingMasterCategoryGroupMaxAllowed();
+  if (!isPersonalAssistantCategory && bookingMasterCategoryCartLimitReached(categoryId)) {
+    showAlert(`You can add only ${maxAllowed} categor${maxAllowed === 1 ? "y" : "ies"} in cart for this service.`);
+    return;
+  }
+  const nextItem = {
+    categoryId,
+    categoryName: category.categoryName || "",
+    serviceId: category.serviceId || bookingMasterSelectedServiceId,
+    storeId: null
+  };
+  const existingPersonalAssistantIndex = isPersonalAssistantCategory ? bookingMasterPersonalAssistantCartItemIndex() : -1;
+  if (existingPersonalAssistantIndex >= 0) bookingMasterCartItems[existingPersonalAssistantIndex] = nextItem;
+  else bookingMasterCartItems.push(nextItem);
+  bookingMasterSelectedCategoryId = categoryId;
+  await quoteBookingMasterCart("task");
+}
+
+async function removeBookingMasterCartItem(index) {
+  bookingMasterCartItems.splice(index, 1);
+  if (bookingMasterCartItems.length) await quoteBookingMasterCart("task");
+  else {
+    bookingMasterQuoteRequestId += 1;
+    bookingMasterQuote = null;
+    bookingMasterQuoteLoading = false;
+    renderBookingMasterNextPhase();
+  }
+}
+
+async function removeBookingMasterStoreFromCart(storeId) {
+  const index = bookingMasterCartItemIndexByStoreId(storeId);
+  if (index < 0) return;
+  await removeBookingMasterCartItem(index);
+}
+
+async function removeBookingMasterCategoryFromCart(categoryId) {
+  const index = bookingMasterCartItemIndexByCategoryId(categoryId);
+  if (index < 0) return;
+  await removeBookingMasterCartItem(index);
+}
+
+function removeBookingMasterTimeSlotFromCart() {
+  bookingMasterQuoteRequestId += 1;
+  bookingMasterCartItems = bookingMasterCartItems.filter((item) => item.priceType !== "time");
+  bookingMasterDurationMinutes = 0;
+  bookingMasterQuote = null;
+  bookingMasterQuoteLoading = false;
+  bookingMasterQuoteError = "";
+  if (bookingMasterCartItems.length) quoteBookingMasterCart("task").catch((error) => showAlert(error.message));
+  else renderBookingMasterNextPhase();
+}
+
+async function createBookingMasterBooking(requestedMode = "") {
+  if (!bookingMasterSelectedCustomer?.customerId) throw new Error("Select a customer.");
+  if (!bookingMasterServiceability?.cluster?.clusterId) throw new Error("Select a serviceable location.");
+  if (!bookingMasterSelectedServiceId) throw new Error("Select a service.");
+  if (!bookingMasterQuote?.isValid) throw new Error("Create a valid Price Master quote before booking.");
+  const plan = bookingMasterCartBookingTypePlan();
+  if (requestedMode === "instant" && !plan.hasInstant) throw new Error("Instant booking is not enabled for selected cart services.");
+  if (requestedMode === "schedule" && !plan.hasSchedule) throw new Error("Schedule booking is not enabled for selected cart services.");
+  const bookingType = bookingMasterEffectiveBookingType(requestedMode);
+  if (requestedMode === "instant") bookingType.mode = "instant";
+  if (requestedMode === "schedule") {
+    if (!bookingType.maxAdvanceDays && !(bookingType.timeSlots || []).length) throw new Error("Schedule booking is not configured for the selected cart.");
+    bookingType.mode = "schedule";
+  }
+  if (bookingType.mode === "schedule") {
+    ensureBookingMasterScheduleSelection(bookingType);
+    if (!bookingMasterSelectedScheduleDate || !bookingMasterSelectedScheduleTime) throw new Error("Select schedule date and start time.");
+    if (!bookingMasterScheduleSelectionIsValid(bookingType)) throw new Error("Select a future schedule slot.");
+  }
+  const priceType = bookingMasterSelectedPricingMode() === "time" && !bookingMasterCartItems.length ? "time" : "task";
+  const firstItem = bookingMasterCartItems[0];
+  const categoryId = firstItem?.categoryId || bookingMasterSelectedCategoryId || null;
+  const primaryServiceId = firstItem?.serviceId || bookingMasterSelectedServiceId;
+  const locationRequirement = bookingMasterLocationRequirement();
+  const locationStops = bookingMasterLocationStopsForPayload();
+  const requestDurationMinutes = bookingType.mode === "schedule" ? bookingMasterScheduleDurationMinutes() : Math.max(1, Number(bookingMasterDurationMinutes || 30));
+  const bookingDetailNote = String($("#bookingMasterDetailNoteInput")?.value || bookingMasterDetailNote || "").trim();
+  const bookingAttachments = bookingMasterAttachments.map(normalizeBookingAttachment).filter((attachment) => attachment.url || attachment.previewUrl);
+  const bookingDetailImageUrl = bookingAttachments.find((attachment) => attachment.type === "image")?.url || bookingMasterDetailImageUrl || "";
+  const uploadedImageUrls = bookingAttachments.filter((attachment) => attachment.type === "image").map((attachment) => attachment.url || attachment.previewUrl).filter(Boolean);
+  const uploadedVideoUrls = bookingAttachments.filter((attachment) => attachment.type === "video").map((attachment) => attachment.url || attachment.previewUrl).filter(Boolean);
+  const uploadedDocumentUrls = bookingAttachments.filter((attachment) => !["image", "video"].includes(attachment.type)).map((attachment) => attachment.url || attachment.previewUrl).filter(Boolean);
+  if (!locationStops.length) throw new Error("Confirm booking location details before creating booking.");
+  if (locationStops.length > locationRequirement.maxLocations) throw new Error(`Maximum ${locationRequirement.maxLocations} location${locationRequirement.maxLocations === 1 ? "" : "s"} allowed for selected services.`);
+  try {
+    await api(BASE_PATH+"/operations/bookings", {
+      method: "POST",
+      body: JSON.stringify({
+        customerId: bookingMasterSelectedCustomer.customerId,
+        serviceId: primaryServiceId,
+        clusterId: bookingMasterServiceability.cluster.clusterId,
+        categoryId,
+        address: bookingMasterSelectedLocation?.address || bookingMasterSelectedLocation?.label || "Selected location",
+        latitude: bookingMasterSelectedLocation?.latitude ?? null,
+        longitude: bookingMasterSelectedLocation?.longitude ?? null,
+        estimatedAmountPaise: bookingMasterQuote.grandTotalPaise || Math.round((bookingMasterQuote.grandTotal || 0) * 100),
+        durationMinutes: requestDurationMinutes,
+        notes: bookingDetailNote || "Booking Master with Price Master cart",
+        metadata: {
+          bookingMaster: true,
+          priceMasterQuote: bookingMasterQuote,
+          cartItems: bookingMasterCartItems,
+          bookingDetailNote,
+          bookingDetailImageUrl,
+          bookingAttachments,
+          uploadedImageUrls,
+          uploadedVideoUrls,
+          uploadedDocumentUrls,
+          durationMinutes: requestDurationMinutes,
+          bookingType: bookingType.mode,
+          serviceBookingTypes: plan.services.map((service) => ({
+            serviceId: service.serviceId,
+            serviceName: service.serviceName,
+            mode: service.mode,
+            selectedMode: bookingType.mode,
+            appliesToSelectedMode: bookingType.mode === "instant" ? service.allowsInstant : service.allowsSchedule
+          })),
+          assignmentMode: bookingType.instantMode === "automate" ? "automate" : "manual",
+          waitWindowMinutes: bookingType.waitWindowMinutes || 0,
+          estimatedReachMinutes: bookingMasterAvailabilityDecision?.estimatedReachMinutes ?? null,
+          scheduledDate: bookingType.mode === "schedule" ? bookingMasterSelectedScheduleDate : null,
+          scheduledTime: bookingType.mode === "schedule" ? bookingMasterSelectedScheduleTime : null,
+          priceType,
+          bookingLocations: {
+            mode: locationRequirement.mode,
+            maxLocations: locationRequirement.maxLocations,
+            selectedCount: locationStops.length,
+            serviceRules: locationRequirement.serviceRules,
+            stops: locationStops
+          }
+        }
+      })
+    });
+  } catch (error) {
+    if (bookingType.mode === "schedule") {
+      await refreshBookingMasterAvailabilityDecision();
+      renderBookingMasterScheduleSheet();
+    }
+    if (bookingType.mode === "instant" && bookingMasterInstantCapacityError(error)) {
+      await refreshBookingMasterAvailabilityDecision();
+      const backendMessage = String(error?.message || "");
+      showAlert(/assistant will be available/i.test(backendMessage) ? backendMessage : bookingMasterInstantCapacityNotification(bookingType), "warning");
+      if (bookingType.instantMode !== "automate" && plan.hasSchedule) openBookingMasterScheduleSheet();
+      return;
+    }
+    throw error;
+  }
+  showAlert("Booking created successfully.");
+  bookingMasterCartItems = [];
+  bookingMasterLocationStops = [];
+  bookingMasterDetailImageUrl = "";
+  bookingMasterAttachments = [];
+  bookingMasterDetailNote = "";
+  bookingMasterQuote = null;
+  renderBookingMasterNextPhase();
+}
+
+function renderBookingMasterNextPhase() {
+  const target = $("#bookingMasterNextPhase");
+  if (target) target.innerHTML = bookingMasterNextPhaseHtml();
+}
+
+async function loadBookingMasterAddresses() {
+  if (!bookingMasterSelectedCustomer?.customerId) return;
+  const payload = await api(`/operations/customers/${bookingMasterSelectedCustomer.customerId}/addresses`);
+  bookingMasterAddresses = payload.data || [];
+}
+
+async function selectBookingMasterCustomer(customer) {
+  if (!bookingMasterCustomerIsActive(customer)) return;
+  resetBookingMasterLocationState();
+  bookingMasterSelectedCustomer = customer;
+  try {
+    await loadBookingMasterAddresses();
+    const defaultAddress = bookingMasterAddresses.find((address) => address.isDefault) || bookingMasterAddresses[0];
+    if (defaultAddress) {
+      mergeBookingMasterCustomerAddress(defaultAddress);
+      renderBookingMasterSelectedCustomer();
+      await selectBookingMasterLocation({ ...defaultAddress, source: "saved" });
+      return;
+    }
+  } catch (error) {
+    bookingMasterAddresses = [];
+    showAlert(error.message);
+  }
+  renderBookingMasterSelectedCustomer();
+  renderBookingMasterLocationPhase();
+}
+
+async function chooseBookingMasterAddress(address) {
+  if (!bookingMasterSelectedCustomer || !address) return;
+  const mode = bookingMasterAddressPickerMode;
+  bookingMasterAddressPickerActive = false;
+  bookingMasterAddressPickerMode = "primary";
+  if (mode === "stop") {
+    const requirement = bookingMasterLocationRequirement();
+    syncBookingMasterLocationStops();
+    if (bookingMasterLocationStopsForPayload().length >= requirement.maxLocations) throw new Error(`You can add only ${requirement.maxLocations} location${requirement.maxLocations === 1 ? "" : "s"} for selected services.`);
+    const nextStop = normalizeBookingMasterLocationStop({ ...address, source: "saved" }, bookingMasterLocationStops.length + 1, false);
+    const existingKeys = new Set(bookingMasterLocationStopsForPayload().map(bookingMasterStopKey));
+    if (existingKeys.has(bookingMasterStopKey(nextStop))) throw new Error("This location is already added.");
+    bookingMasterLocationStops.push(nextStop);
+    syncBookingMasterLocationStops();
+    renderBookingMasterSelectedCustomer();
+    renderBookingMasterNextPhase();
+  } else {
+    mergeBookingMasterCustomerAddress(address);
+    await selectBookingMasterLocation({ ...address, source: "saved" }, { preserveNextPhase: bookingMasterPhase === "services" });
+  }
+  await showSection("bookingMaster");
+}
+
+async function refreshBookingMasterCustomerFromAddresses(preferredAddressId = "") {
+  if (!bookingMasterSelectedCustomer?.customerId) return;
+  await loadBookingMasterAddresses();
+  const selectedAddress =
+    bookingMasterAddresses.find((address) => String(address.addressId || "") === String(preferredAddressId || "")) ||
+    bookingMasterAddresses.find((address) => address.isDefault) ||
+    bookingMasterAddresses[0];
+  if (selectedAddress) await chooseBookingMasterAddress(selectedAddress);
+}
+
+async function selectBookingMasterLocation(location, options = {}) {
+  if (!locationHasCoordinates(location)) {
+    renderBookingMasterLocationPhase();
+    return;
+  }
+  const previousClusterId = bookingMasterServiceability?.cluster?.clusterId || "";
+  const preserveNextPhase = options.preserveNextPhase === true && bookingMasterPhase === "services";
+  if (["coordinates", "map", "manual", "whatsapp"].includes(location.source) && location.provider !== "ola_maps" && !location.reverseResolved) {
+    bookingMasterServiceability = { pending: true, message: "Resolving place name..." };
+    renderBookingMasterLocationPhase();
+    location = await reverseBookingMasterCoordinates(Number(location.latitude), Number(location.longitude), location);
+  }
+  bookingMasterSelectedLocation = {
+    ...location,
+    latitude: Number(location.latitude),
+    longitude: Number(location.longitude),
+    source: normalizeBookingMasterLocationSource(location.source)
+  };
+  bookingMasterLocationStops = [];
+  if (!preserveNextPhase) resetBookingMasterNextPhaseState();
+  if (location.source === "search") bookingMasterLocationSearchText = location.address || location.label || bookingMasterLocationSearchText;
+  syncBookingMasterSelectedLocationFields();
+  bookingMasterMapSelectionFitDone = false;
+  bookingMasterServiceability = { pending: true, message: "Checking serviceability..." };
+  renderBookingMasterLocationPhase();
+  try {
+    await validateBookingMasterLocation();
+    if (bookingMasterServiceability?.isServiceable) {
+      const nextClusterId = bookingMasterServiceability?.cluster?.clusterId || "";
+      if (preserveNextPhase && previousClusterId && nextClusterId && previousClusterId !== nextClusterId) resetBookingMasterNextPhaseState();
+      if (!preserveNextPhase || (previousClusterId && nextClusterId && previousClusterId !== nextClusterId)) await continueBookingMasterToServices();
+      else renderBookingMasterNextPhase();
+    }
+  } catch (error) {
+    bookingMasterServiceability = { isServiceable: false, message: error.message };
+    clearBookingMasterFormLocation();
+    renderBookingMasterLocationPhase();
+  }
+}
+
+async function validateBookingMasterLocation() {
+  const customer = bookingMasterSelectedCustomer;
+  const location = bookingMasterSelectedLocation;
+  if (!customer?.customerId || !locationHasCoordinates(location)) return;
+  const result = await api(BASE_PATH+"/operations/bookings/location/validate", {
+    method: "POST",
+    body: JSON.stringify({
+      customerId: customer.customerId,
+      addressId: location.addressId || null,
+      address: location.address || location.label || null,
+      latitude: Number(location.latitude),
+      longitude: Number(location.longitude),
+      source: normalizeBookingMasterLocationSource(location.source)
+    })
+  });
+  bookingMasterServiceability = result.data;
+  if (result.data?.isServiceable) {
+    bookingMasterSelectedLocation = {
+      ...bookingMasterSelectedLocation,
+      latitude: Number(result.data.location?.latitude ?? bookingMasterSelectedLocation.latitude),
+      longitude: Number(result.data.location?.longitude ?? bookingMasterSelectedLocation.longitude),
+      clusterId: result.data.cluster?.clusterId || null,
+      clusterName: result.data.cluster?.name || null
+    };
+  }
+  syncBookingMasterSelectedLocationFields();
+  const form = $("#bookingMasterCustomerForm");
+  if (form && result.data?.isServiceable) {
+    form.elements.address.value = result.data?.location?.address || "";
+    form.elements.latitude.value = result.data?.location?.latitude ?? "";
+    form.elements.longitude.value = result.data?.location?.longitude ?? "";
+    form.elements.clusterId.value = result.data.cluster?.clusterId || "";
+  } else {
+    clearBookingMasterFormLocation();
+  }
+  renderBookingMasterLocationPhase();
+}
+
+async function reverseBookingMasterCoordinates(latitude, longitude, fallback = {}) {
+  const fallbackLocation = {
+    label: fallback.label || "Picked location",
+    address: fallback.address || formatLatLngText(latitude, longitude) || "Picked location",
+    latitude,
+    longitude,
+    source: normalizeBookingMasterLocationSource(fallback.source || "map"),
+    provider: fallback.provider || "local",
+    reverseResolved: true
+  };
+  if (!Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))) return fallbackLocation;
+  try {
+    const payload = await api(`/operations/locations/reverse?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}`);
+    return {
+      ...fallbackLocation,
+      ...(payload.data || {}),
+      latitude: Number(payload.data?.latitude ?? latitude),
+      longitude: Number(payload.data?.longitude ?? longitude),
+      source: normalizeBookingMasterLocationSource(fallback.source || payload.data?.source || "reverse"),
+      reverseResolved: true
+    };
+  } catch (error) {
+    showAlert(error.message);
+    return fallbackLocation;
+  }
+}
+
+function parseLatLngText(value) {
+  const text = String(value || "").trim();
+  let decoded = text;
+  try {
+    decoded = decodeURIComponent(text);
+  } catch (_error) {
+    decoded = text;
+  }
+  const patterns = [
+    /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/,
+    /[?&](?:q|ll)=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/,
+    /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/,
+    /(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/
+  ];
+  for (const pattern of patterns) {
+    const match = decoded.match(pattern);
+    if (!match) continue;
+    const latitude = Number(match[1]);
+    const longitude = Number(match[2]);
+    if (Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180) {
+      return { latitude, longitude };
+    }
+  }
+  return null;
+}
+
+async function useBookingMasterLatLngInput(inputId, source) {
+  const input = document.getElementById(inputId);
+  const rawValue = input?.value || "";
+  if (source === "whatsapp") bookingMasterWhatsappLocationText = rawValue;
+  else bookingMasterManualLatLngText = rawValue;
+  const parsed = parseLatLngText(rawValue);
+  const help = source === "whatsapp" ? $("#bookingMasterWhatsappLocationHelp") : null;
+  const label = source === "whatsapp" ? "WhatsApp shared location" : "Manual location";
+  if (!parsed) {
+    if (help) help.textContent = "Invalid location format. Paste a WhatsApp/Google Maps link or Lat,Lng.";
+    else showAlert("Invalid location format. Enter Lat,Lng.");
+    return;
+  }
+  if (help) help.textContent = "";
+  bookingMasterServiceability = { pending: true, message: `Checking ${parsed.latitude}, ${parsed.longitude}...` };
+  renderBookingMasterLocationPhase();
+  await selectBookingMasterLocation(await reverseBookingMasterCoordinates(parsed.latitude, parsed.longitude, {
+    label,
+    address: label,
+    source
+  }));
+}
+
+async function searchBookingMasterLocations(options = {}) {
+  const input = $("#bookingMasterLocationSearchInput");
+  bookingMasterLocationSearchText = input?.value?.trim() || "";
+  if (!bookingMasterSelectedCustomer?.customerId) {
+    bookingMasterLocationSearchLoading = false;
+    bookingMasterLocationSearchError = "Select a customer before searching task location.";
+    renderBookingMasterLocationSearchResults();
+    if (!options.silent) showAlert("Select a customer before searching task location.");
+    return;
+  }
+  if (bookingMasterLocationSearchText.length < 3) {
+    bookingMasterLocationSearchResults = [];
+    bookingMasterLocationSearchLoading = false;
+    bookingMasterLocationSearchError = "";
+    renderBookingMasterLocationSearchResults();
+    if (!options.silent) showAlert("Enter at least 3 characters to search location.");
+    return;
+  }
+  bookingMasterLocationSearchResults = [];
+  bookingMasterLocationSearchLoading = true;
+  bookingMasterLocationSearchError = "";
+  renderBookingMasterLocationSearchResults();
+  const parsed = parseLatLngText(bookingMasterLocationSearchText);
+  if (parsed) {
+    bookingMasterLocationSearchResults = [
+      {
+        label: "Searched Lat,Lng",
+        address: formatLatLngText(parsed.latitude, parsed.longitude),
+        latitude: parsed.latitude,
+        longitude: parsed.longitude,
+        source: "coordinates",
+        provider: "local"
+      }
+    ];
+    bookingMasterLocationSearchLoading = false;
+    renderBookingMasterLocationSearchResults();
+    return;
+  }
+  const payload = await api(`/operations/locations/search?q=${encodeURIComponent(bookingMasterLocationSearchText)}`);
+  bookingMasterLocationSearchResults = payload.data || [];
+  bookingMasterLocationSearchLoading = false;
+  bookingMasterLocationSearchError = "";
+  if (!bookingMasterLocationSearchResults.length && !options.silent) showAlert("No location results found. Try Lat,Lng or a more specific address.");
+  renderBookingMasterLocationSearchResults();
+}
+
+async function useBookingMasterMapCenter() {
+  if (!bookingMasterSelectedCustomer?.customerId) {
+    showAlert("Select a customer before choosing task location.");
+    return;
+  }
+  const { latitude, longitude } = bookingMasterPinDropLatLng();
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    showAlert("Map center is not ready yet. Move the map slightly and try again.");
+    return;
+  }
+  bookingMasterServiceability = { pending: true, message: "Resolving picked map location..." };
+  renderBookingMasterLocationPhase();
+  await selectBookingMasterLocation(await reverseBookingMasterCoordinates(latitude, longitude, {
+    label: "Map pin location",
+    address: "Map pin location",
+    source: "map"
+  }));
+}
+
+function syncBookingMasterLatLngFromPinDrop() {
+  const { latitude, longitude } = bookingMasterPinDropLatLng();
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+  setBookingMasterDraftLocation({
+    label: "Map pin location",
+    address: "Map pin location",
+    latitude,
+    longitude,
+    source: "map"
+  }, { resetServiceability: false });
+}
+
+function syncBookingMasterMapCenterFromManualInput() {
+  const parsed = parseLatLngText(bookingMasterManualLatLngText);
+  if (!parsed || !bookingMasterMapInstance) return;
+  const { latitude: currentLatitude, longitude: currentLongitude } = bookingMasterPinDropLatLng();
+  if (Number.isFinite(currentLatitude) && Number.isFinite(currentLongitude)) {
+    const alreadyCentered = Math.abs(currentLatitude - parsed.latitude) < 0.000001 && Math.abs(currentLongitude - parsed.longitude) < 0.000001;
+    if (alreadyCentered) return;
+  }
+  moveBookingMasterPinDrop({ label: "Manual location", address: "Manual location", ...parsed, source: "manual" });
+}
+
+function scheduleBookingMasterManualMapSync() {
+  if (bookingMasterManualMapSyncTimer) clearTimeout(bookingMasterManualMapSyncTimer);
+  bookingMasterManualMapSyncTimer = setTimeout(syncBookingMasterMapCenterFromManualInput, 250);
+}
+
+function startBookingMasterPinDropFrameSync() {
+  if (bookingMasterMapPinFrame) cancelAnimationFrame(bookingMasterMapPinFrame);
+  const tick = () => {
+    if (!bookingMasterMapInstance || !document.getElementById("bookingMasterMap")) {
+      bookingMasterMapPinFrame = null;
+      return;
+    }
+    syncBookingMasterLatLngFromPinDrop();
+    bookingMasterMapPinFrame = requestAnimationFrame(tick);
+  };
+  bookingMasterMapPinFrame = requestAnimationFrame(tick);
+}
+
+function stopBookingMasterPinDropFrameSync() {
+  if (bookingMasterMapPinFrame) cancelAnimationFrame(bookingMasterMapPinFrame);
+  bookingMasterMapPinFrame = null;
+  syncBookingMasterLatLngFromPinDrop();
+}
+
+function startBookingMasterPinDropSync() {
+  if (bookingMasterMapPinSyncTimer) clearInterval(bookingMasterMapPinSyncTimer);
+  syncBookingMasterLatLngFromPinDrop();
+  setTimeout(syncBookingMasterLatLngFromPinDrop, 100);
+  setTimeout(syncBookingMasterLatLngFromPinDrop, 500);
+  bookingMasterMapPinSyncTimer = setInterval(syncBookingMasterLatLngFromPinDrop, 250);
+}
+
+async function initializeBookingMasterLocationMap() {
+  const mapEl = $("#bookingMasterMap");
+  if (!mapEl || bookingMasterMapInstance) return;
+  const config = await api(BASE_PATH+"/config/maps");
+  const { olaMapsApiKey, olaMapsStyleUrl } = config.data || {};
+  if (!olaMapsApiKey) throw new Error("Map key is not configured. Use manual Lat,Lng.");
+  await loadOlaMapsSdk();
+  const centerLocation = bookingMasterMapCenterLocation();
+  const center = [Number(centerLocation.longitude), Number(centerLocation.latitude)];
+  mapEl.innerHTML = "";
+  const olaMaps = new window.OlaMaps({ apiKey: olaMapsApiKey });
+  const initMap = (style) =>
+    olaMaps.init({
+      style,
+      container: "bookingMasterMap",
+      center,
+      zoom: 13
+    });
+  const attachMapClick = () => bookingMasterMapInstance?.on?.("click", (event) => {
+    const { latitude, longitude } = readMapLngLat(event?.lngLat);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+    moveBookingMasterPinDrop({
+      label: "Map selected location",
+      address: "Map selected location",
+      latitude,
+      longitude,
+      source: "map"
+    });
+    syncBookingMasterLatLngFromPinDrop();
+  });
+  const drawWhenReady = () => {
+    bookingMasterMapInstance?.resize?.();
+    syncBookingMasterLatLngFromPinDrop();
+    drawBookingMasterMapSelection();
+  };
+  bookingMasterMapInstance = initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
+  attachMapClick();
+  startBookingMasterPinDropSync();
+  if (bookingMasterMapInstance.loaded?.()) drawWhenReady();
+  else bookingMasterMapInstance.on?.("load", drawWhenReady);
+  bookingMasterMapInstance.on?.("movestart", startBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("dragstart", startBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("zoomstart", startBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("rotatestart", startBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("pitchstart", startBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("move", syncBookingMasterLatLngFromPinDrop);
+  bookingMasterMapInstance.on?.("drag", syncBookingMasterLatLngFromPinDrop);
+  bookingMasterMapInstance.on?.("zoom", syncBookingMasterLatLngFromPinDrop);
+  bookingMasterMapInstance.on?.("rotate", syncBookingMasterLatLngFromPinDrop);
+  bookingMasterMapInstance.on?.("pitch", syncBookingMasterLatLngFromPinDrop);
+  bookingMasterMapInstance.on?.("render", syncBookingMasterLatLngFromPinDrop);
+  bookingMasterMapInstance.on?.("idle", syncBookingMasterLatLngFromPinDrop);
+  bookingMasterMapInstance.on?.("moveend", stopBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("dragend", stopBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("zoomend", stopBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("rotateend", stopBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("pitchend", stopBookingMasterPinDropFrameSync);
+  bookingMasterMapInstance.on?.("idle", drawBookingMasterMapSelection);
+  let usedFallback = false;
+  bookingMasterMapInstance.on?.("error", (event) => {
+    const message = event?.error?.message || "Ola Maps could not load for this domain.";
+    if (usedFallback || !isOlaMapAuthOrDomainError(event?.error || message)) return;
+    usedFallback = true;
+    cleanupBookingMasterMap();
+    mapEl.innerHTML = "";
+    bookingMasterMapInstance = initMap(fallbackRasterStyle());
+    showAlert(`${message}. Showing fallback map tiles. Add this admin domain to the Ola Maps credentials whitelist to use Ola vector tiles.`);
+    attachMapClick();
+    startBookingMasterPinDropSync();
+    if (bookingMasterMapInstance.loaded?.()) drawWhenReady();
+    else bookingMasterMapInstance.on?.("load", drawWhenReady);
+    bookingMasterMapInstance.on?.("movestart", startBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("dragstart", startBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("zoomstart", startBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("rotatestart", startBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("pitchstart", startBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("move", syncBookingMasterLatLngFromPinDrop);
+    bookingMasterMapInstance.on?.("drag", syncBookingMasterLatLngFromPinDrop);
+    bookingMasterMapInstance.on?.("zoom", syncBookingMasterLatLngFromPinDrop);
+    bookingMasterMapInstance.on?.("rotate", syncBookingMasterLatLngFromPinDrop);
+    bookingMasterMapInstance.on?.("pitch", syncBookingMasterLatLngFromPinDrop);
+    bookingMasterMapInstance.on?.("render", syncBookingMasterLatLngFromPinDrop);
+    bookingMasterMapInstance.on?.("idle", syncBookingMasterLatLngFromPinDrop);
+    bookingMasterMapInstance.on?.("moveend", stopBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("dragend", stopBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("zoomend", stopBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("rotateend", stopBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("pitchend", stopBookingMasterPinDropFrameSync);
+    bookingMasterMapInstance.on?.("idle", drawBookingMasterMapSelection);
+  });
+}
+
+async function loadBookingMaster() {
+  $("#bookingMasterSection").innerHTML =
+    `<div class="booking-master-page">
+        <div class="booking-master-live-row">${bookingRealtimePillHtml()}</div>
+        <form id="bookingMasterCustomerForm" class="module-form booking-master-form">
+          <input type="hidden" name="customerId">
+          <input type="hidden" name="address">
+          <input type="hidden" name="latitude">
+          <input type="hidden" name="longitude">
+          <input type="hidden" name="clusterId">
+          <div class="booking-master-customer-picker" data-action="open-booking-master-customer-picker">
+            <span class="booking-master-search-icon">Search</span>
+            <input id="bookingMasterCustomerSearchInput" class="form-control" type="search" readonly placeholder="Search Customer">
+          </div>
+          <div id="bookingMasterSelectedCustomer" class="booking-master-selected"></div>
+        </form>
+        <div id="bookingMasterLocationPhase"></div>
+    </div>`;
+  renderBookingMasterSelectedCustomer();
+  await ensureBookingMasterAssistantWidget();
+}
+
+async function loadMasters() {
+  const [clusters, categories, deliveryTypes] = await Promise.all([
+    safeApi(BASE_PATH+"/masters/clusters"),
+    safeApi(BASE_PATH+"/masters/categories"),
+    safeApi(BASE_PATH+"/masters/delivery-types")
+  ]);
+  cache.clusters = clusters.data || [];
+
+  const clusterRows = (clusters.data || [])
+    .map((c) => `<tr><td><b>${escapeHtml(c.name)}</b><div class="row-note">${escapeHtml(c.id)}</div></td><td>${escapeHtml(c.code)}</td><td>${status(c.isBookingEnabled ? "booking enabled" : "disabled")}</td></tr>`)
+    .join("");
+  const categoryRows = (categories.data || [])
+    .map((c) => `<tr><td><b>${escapeHtml(c.name)}</b><div class="row-note">${escapeHtml(c.id)}</div></td><td>${escapeHtml(c.code)}</td><td>${escapeHtml(c.description || "-")}</td></tr>`)
+    .join("");
+  const deliveryRows = (deliveryTypes.data || [])
+    .map((d) => `<tr><td><b>${escapeHtml(d.name)}</b><div class="row-note">${escapeHtml(d.id)}</div></td><td>${escapeHtml(d.code)}</td><td>${status(d.isActive ? "active" : "inactive")}</td></tr>`)
+    .join("");
+
+  $("#mastersSection").innerHTML =
+    pageTitleBlock("Masters", "Create basic cluster, category, and delivery type records") +
+    `<div class="master-grid">
+      ${panel("Create Cluster", "Requires existing city UUID from your schema", `<form class="master-form stack" data-form="cluster">
+        <input class="form-control" name="cityId" placeholder="City UUID" required>
+        <input class="form-control" name="zoneId" placeholder="Zone UUID optional">
+        <input class="form-control" name="name" placeholder="Cluster name" required>
+        <input class="form-control" name="code" placeholder="cluster_code" required>
+        <input class="form-control" name="priority" type="number" value="0">
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isBookingEnabled"> Booking Enabled</label>
+        <button class="btn btn-primary">Create Cluster</button>
+      </form>` + table(["Cluster", "Code", "Status"], clusterRows))}
+      ${panel("Create Category", "Parent is optional for top-level categories", `<form class="master-form stack" data-form="category">
+        <input class="form-control" name="parentCategoryId" placeholder="Parent category UUID optional">
+        <input class="form-control" name="name" placeholder="Category name" required>
+        <input class="form-control" name="code" placeholder="category_code" required>
+        <input class="form-control" name="description" placeholder="Description">
+        <input class="form-control" name="sortOrder" type="number" value="0">
+        <button class="btn btn-primary">Create Category</button>
+      </form>` + table(["Category", "Code", "Description"], categoryRows))}
+      ${panel("Create Delivery Type", "Instant, scheduled, or multi-stop options", `<form class="master-form stack" data-form="delivery-type">
+        <input class="form-control" name="name" placeholder="Delivery type name" required>
+        <input class="form-control" name="code" placeholder="instant" required>
+        <input class="form-control" name="description" placeholder="Description">
+        <input class="form-control" name="sortOrder" type="number" value="0">
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <button class="btn btn-primary">Create Delivery Type</button>
+      </form>` + table(["Delivery Type", "Code", "Status"], deliveryRows))}
+    </div>`;
+}
+
+function customerMatchesSearch(customer, searchText = customerSearchText) {
+  const term = String(searchText || "").trim().toLowerCase();
+  if (!term) return true;
+  return [
+    customer.displayName,
+    customer.phone,
+    customer.email,
+    customer.customerCode,
+    customer.id,
+    customer.address,
+    customer.clusterName,
+    customer.zoneName,
+    customer.cityName
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(term));
+}
+
+function customerDefaultLocation(customer = customerAddressSelectedCustomer) {
+  const address = customerAddressRows.find((item) => item.isDefault) || customerAddressRows[0];
+  if (address) return address;
+  return customer?.address || customer?.latitude || customer?.longitude
+    ? {
+        address: customer.address,
+        latitude: customer.latitude,
+        longitude: customer.longitude,
+        clusterName: customer.clusterName,
+        zoneName: customer.zoneName,
+        cityName: customer.cityName,
+        isDefault: customer.isDefaultAddress
+      }
+    : null;
+}
+
+function customerSelectedSummaryHtml() {
+  if (!customerAddressSelectedCustomer) return `<div class="empty-state">Select a customer to view default location and cluster.</div>`;
+  const customer = customerAddressSelectedCustomer;
+  const location = customerDefaultLocation(customer);
+  return `<div class="customer-selected-card">
+    <div class="customer-selected-main">
+      ${profileAvatar(customer.profilePictureUrl, customer.displayName)}
+      <div>
+        <b>${escapeHtml(customer.displayName || "-")}</b>
+        <span>${escapeHtml(customer.phone || "-")} | ${escapeHtml(customer.email || "-")}</span>
+        <span>${escapeHtml(customer.customerCode || customer.id || "-")}</span>
+      </div>
+    </div>
+    <div class="customer-selected-location">
+      <div><span>Default Location</span><b>${escapeHtml(location?.address || "-")}</b></div>
+      <div><span>Coordinates</span><b>${escapeHtml(formatLatLngText(location?.latitude, location?.longitude) || "-")}</b></div>
+      <div><span>Cluster</span><b>${escapeHtml(location?.clusterName || "-")}</b></div>
+      <div><span>Zone</span><b>${escapeHtml(location?.zoneName || "-")}</b></div>
+      <div><span>City</span><b>${escapeHtml(location?.cityName || "-")}</b></div>
+    </div>
+  </div>`;
+}
+
+function customerRowsHtml() {
+  if (!String(customerSearchText || "").trim()) return `<div class="empty-state">Search customer by name, number, or address.</div>`;
+  const rows = customerRows.filter((customer) => customerMatchesSearch(customer));
+  if (!rows.length) return `<div class="empty-state">No customers found.</div>`;
+  return `<div class="customer-record-list">${rows
+    .map((customer) => `<div class="customer-record-card">
+      <div class="customer-record-profile">${profileAvatar(customer.profilePictureUrl, customer.displayName)}</div>
+      <div class="customer-record-details">
+        <b>${escapeHtml(customer.displayName || "-")}</b>
+        <span>${escapeHtml(customer.phone || "-")}</span>
+        <span>${escapeHtml(customer.email || "-")}</span>
+        <span>${escapeHtml(customer.customerCode || customer.id || "-")}</span>
+        <span>${escapeHtml(customer.address || "No default address")}</span>
+      </div>
+      <div class="customer-record-meta">
+        <span>Created on</span>
+        <b>${escapeHtml(formatCustomerDateTime(customer.createdAt))}</b>
+        ${status(customer.status)}
+        ${otpStatusLabel(customer.otpVerificationStatus, customer)}
+      </div>
+      <div class="customer-record-actions">
+        <button class="btn btn-soft btn-xs" data-action="edit-admin-customer" data-id="${escapeHtml(customer.id)}" type="button">Edit</button>
+        <button class="btn btn-soft btn-xs" data-action="select-admin-customer" data-id="${escapeHtml(customer.id)}" type="button">${bookingMasterCustomerPickerActive ? "Choose" : "Select"}</button>
+        <button class="btn btn-primary btn-xs" data-action="open-customer-addresses" data-id="${escapeHtml(customer.id)}" type="button">Addresses</button>
+        ${isSuperAdminUser() ? `<button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/admin-customers" data-id="${escapeHtml(customer.id)}" type="button">Delete</button>` : ""}
+      </div>
+    </div>`)
+    .join("")}</div>`;
+}
+
+function renderCustomerRows() {
+  const target = $("#customerRecords");
+  if (target) target.innerHTML = customerRowsHtml();
+  const selected = $("#customerSelectedSummary");
+  if (selected) selected.innerHTML = customerSelectedSummaryHtml();
+}
+
+async function loadCustomers() {
+  const payload = await api(BASE_PATH+"/admin-customers");
+  customerRows = payload.data || [];
+  if (customerAddressSelectedCustomer?.id) {
+    customerAddressSelectedCustomer = customerRows.find((customer) => customer.id === customerAddressSelectedCustomer.id) || customerAddressSelectedCustomer;
+  }
+  $("#customersSection").innerHTML =
+    pageTitleBlock("Customers", "Search and select customer records") +
+    panel(
+      "Customers",
+      "Search by Name, Number, or Address",
+      `<div class="customer-search-bar">
+        <input id="customerSearchInput" class="form-control" type="search" autocomplete="off" value="${escapeHtml(customerSearchText)}" placeholder="Search by Name, Number, Address">
+      </div>
+      <div id="customerRecords">${customerRowsHtml()}</div>`
+    ) +
+    panel("Selected Customer", "Default location and active cluster details", `<div id="customerSelectedSummary">${customerSelectedSummaryHtml()}</div>`);
+}
+
+async function loadCustomerAddressesScreen() {
+  $("#customerAddressesSection").innerHTML =
+    pageTitleBlock("Customer Addresses", "Save and manage customer locations") +
+    `<div class="mb-3"><button class="btn btn-soft" data-action="${bookingMasterAddressPickerActive ? "back-to-booking-master" : "back-to-customers"}" type="button">${bookingMasterAddressPickerActive ? "Back to Booking Master" : "Back to Customers"}</button></div>
+    <div id="customerAddressManager">${customerAddressManagerHtml()}</div>`;
+}
+
+function customerAddressManagerHtml() {
+  if (!customerAddressSelectedCustomer) {
+    return panel("Customer Saved Addresses", "Save customer locations for booking reuse", `<div class="empty-state">Choose Addresses from a customer row.</div>`);
+  }
+  const customer = customerAddressSelectedCustomer;
+  const editingAddress = customerAddressRows.find((address) => String(address.addressId || "") === String(editingCustomerAddressId || ""));
+  const savingPrevious = customerAddressSaveAsPreviousLocation;
+  const editingMetadata = editingAddress?.metadata || savingPrevious?.metadata || {};
+  const defaultLabel = customerAddressDefaultLabel();
+  const customLabelValue = editingAddress && !["Home", "Work"].includes(editingAddress.label) ? editingAddress.label : "";
+  if (!customerAddressEditorOpen) {
+    return panel(
+      "Customer Saved Addresses",
+      `${customer.displayName || customer.customerCode || "Customer"} | ${customer.phone || customer.email || "-"}`,
+      customerAddressListPanelHtml()
+    );
+  }
+  return panel(
+    "Customer Saved Addresses",
+    `${customer.displayName || customer.customerCode || "Customer"} | ${customer.phone || customer.email || "-"}`,
+    `<div class="customer-address-shell">
+      <div class="customer-address-toolbar">
+        <form class="booking-location-inline" id="customerAddressSearchForm">
+          <input id="customerAddressSearchInput" class="form-control" type="search" autocomplete="off" value="${escapeHtml(customerAddressSearchText)}" placeholder="Search an area or address">
+          <button class="btn btn-primary" type="submit">Search</button>
+        </form>
+        <button class="btn btn-soft" data-action="use-customer-current-location" type="button">Current Location</button>
+        <button class="btn btn-soft" data-action="open-customer-address-map" type="button">Locate on Map</button>
+      </div>
+      <div class="customer-address-grid">
+        <section class="booking-location-section">
+          <div class="booking-location-title">Search Results</div>
+          <div id="customerAddressSearchResults">${customerAddressSearchResultsHtml()}</div>
+          <div class="booking-location-title">Complete Details</div>
+          <form class="customer-address-detail-form" data-form="customer-address" id="customerAddressForm">
+            <div id="customerAddressSelectedPreview">${customerAddressSelectedHtml()}</div>
+            ${priceMasterFloatingField("Flat no. / Floor no.", `<input class="form-control" name="flatNo" autocomplete="off" value="${escapeHtml(editingMetadata.flatNo || "")}">`)}
+            ${priceMasterFloatingField("Building name / Tower name", `<input class="form-control" name="buildingName" autocomplete="off" value="${escapeHtml(editingMetadata.buildingName || "")}">`)}
+            ${priceMasterFloatingField("Additional Detail", `<textarea class="form-control" name="additionalDetail" rows="2">${escapeHtml(editingMetadata.additionalDetail || "")}</textarea>`)}
+            <div class="customer-address-contact-row">
+              ${priceMasterFloatingField("Person Name", `<input class="form-control" name="personName" autocomplete="off" maxlength="150" value="${escapeHtml(editingMetadata.personName || "")}">`)}
+              ${priceMasterFloatingField("Contact Number", `<input class="form-control" name="contactNumber" autocomplete="off" inputmode="tel" maxlength="30" value="${escapeHtml(editingMetadata.contactNumber || "")}">`)}
+            </div>
+            <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="useCustomerContact"> Use Customer Name & Number</label>
+            <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="saveAddress" ${editingAddress || savingPrevious ? "checked disabled" : "checked"}> Save as customer address</label>
+            <div class="customer-address-save-as">
+              <span>Save as</span>
+              ${customerAddressLabelChip("Home", defaultLabel)}
+              ${customerAddressLabelChip("Work", defaultLabel)}
+              ${customerAddressLabelChip("Other", defaultLabel)}
+            </div>
+            <div id="customerAddressOtherLabelWrap" class="d-none">
+              ${priceMasterFloatingField("Other label name", `<input class="form-control" name="customLabel" autocomplete="off" maxlength="80" value="${escapeHtml(customLabelValue)}">`)}
+              <div id="customerAddressCustomLabelError" class="field-error d-none"></div>
+            </div>
+            <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="isDefault" ${editingAddress?.isDefault ? "checked" : ""}> Set as default</label>
+            <div class="actions">
+              <button class="btn btn-primary" type="submit" ${customerAddressSelectedLocation ? "" : "disabled"}>${editingAddress ? "Update Address" : savingPrevious ? "Save Address" : "Confirm Details"}</button>
+              <button class="btn btn-soft" data-action="cancel-customer-address-edit" type="button">Cancel</button>
+            </div>
+          </form>
+        </section>
+        <section class="booking-location-section">
+          <div class="booking-location-title">Choose on Map</div>
+          <div class="booking-map-shell customer-address-map-shell">
+            <div id="customerAddressMap" class="booking-master-map"><div class="empty-state">${customerAddressSelectedLocation ? "Loading selected location on map..." : "Click Locate on Map to visualize and choose location."}</div></div>
+            <div class="booking-map-crosshair customer-address-pin" aria-hidden="true"></div>
+            <button class="btn btn-primary btn-sm booking-map-center-button" data-action="confirm-customer-address-map-pin" type="button">Use pin</button>
+          </div>
+          <div class="booking-location-title">Saved Addresses</div>
+          <div id="customerAddressSavedRows">${customerAddressSavedRows()}</div>
+          <div class="booking-location-title">Previous Used Locations</div>
+          <div id="customerPreviousUsedLocationRows">${customerPreviousUsedLocationRowsHtml()}</div>
+        </section>
+      </div>
+    </div>`
+  );
+}
+
+function renderCustomerAddressManager() {
+  cleanupCustomerAddressMap();
+  const target = $("#customerAddressManager");
+  if (!target) return;
+  target.innerHTML = customerAddressManagerHtml();
+  bindCustomerAddressControls();
+}
+
+function bindCustomerAddressControls() {
+  const form = $("#customerAddressSearchForm");
+  const input = $("#customerAddressSearchInput");
+  if (form) {
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      searchCustomerAddressLocations().catch((error) => showAlert(error.message));
+    };
+  }
+  if (input) {
+    input.oninput = () => {
+      scheduleCustomerAddressLocationSearch(input.value);
+    };
+  }
+  toggleCustomerAddressSaveAs();
+}
+
+function toggleCustomerAddressOtherLabel(form = $("#customerAddressForm")) {
+  if (!form) return;
+  const isOther = form.elements.label?.value === "Other";
+  const wrap = $("#customerAddressOtherLabelWrap");
+  if (wrap) wrap.classList.toggle("d-none", !isOther);
+  if (form.elements.customLabel) {
+    form.elements.customLabel.disabled = !isOther;
+    if (!isOther) form.elements.customLabel.value = "";
+  }
+  validateCustomerAddressCustomLabel(form);
+}
+
+function toggleCustomerAddressSaveAs(form = $("#customerAddressForm")) {
+  if (!form) return;
+  const saveAddress = Boolean(editingCustomerAddressId) || form.elements.saveAddress?.checked !== false;
+  const saveAs = form.querySelector(".customer-address-save-as");
+  const defaultWrap = form.elements.isDefault?.closest?.("label");
+  if (saveAs) saveAs.classList.toggle("d-none", !saveAddress);
+  if (defaultWrap) defaultWrap.classList.toggle("d-none", !saveAddress);
+  if (!saveAddress) {
+    $("#customerAddressOtherLabelWrap")?.classList.add("d-none");
+    if (form.elements.customLabel) {
+      form.elements.customLabel.disabled = true;
+      form.elements.customLabel.value = "";
+    }
+    return;
+  }
+  toggleCustomerAddressOtherLabel(form);
+}
+
+function applyCustomerContactToAddress(form = $("#customerAddressForm")) {
+  if (!form || !customerAddressSelectedCustomer) return;
+  if (form.elements.personName) form.elements.personName.value = customerAddressSelectedCustomer.displayName || "";
+  if (form.elements.contactNumber) form.elements.contactNumber.value = customerAddressSelectedCustomer.phone || "";
+}
+
+function customerAddressCustomLabelMessage(value) {
+  const label = String(value || "").trim();
+  if (!label) return "";
+  if (["home", "work", "other"].includes(label.toLowerCase())) return "This label is already used by default labels, try different.";
+  if (customerAddressLabelExists(label, editingCustomerAddressId || "")) return "Address label already exists, try different.";
+  return "";
+}
+
+function validateCustomerAddressCustomLabel(form = $("#customerAddressForm")) {
+  if (!form) return true;
+  const input = form.elements.customLabel;
+  const error = $("#customerAddressCustomLabelError");
+  const isOther = form.elements.label?.value === "Other";
+  const message = isOther ? customerAddressCustomLabelMessage(input?.value || "") : "";
+  if (input) input.classList.toggle("is-invalid", Boolean(message));
+  if (error) {
+    error.textContent = message;
+    error.classList.toggle("d-none", !message);
+  }
+  return !message;
+}
+
+async function loadCustomerAddresses(customerId = customerAddressSelectedCustomer?.id) {
+  if (!customerId) return;
+  const payload = await api(`/admin-customers/${customerId}/addresses`);
+  customerAddressRows = payload.data || [];
+}
+
+async function loadCustomerPreviousUsedLocations(customerId = customerAddressSelectedCustomer?.id) {
+  if (!customerId) return;
+  const payload = await api(`/admin-customers/${customerId}/previous-used-locations`);
+  customerPreviousUsedLocationRows = payload.data || [];
+}
+
+async function loadCustomerAddressLists(customerId = customerAddressSelectedCustomer?.id) {
+  await Promise.all([loadCustomerAddresses(customerId), loadCustomerPreviousUsedLocations(customerId)]);
+}
+
+async function ensureCustomerAddressMapClusters() {
+  if ((cache.clusters || []).some((cluster) => cluster.polygonDescription && cluster.isBookingEnabled !== false)) return;
+  const payload = await safeApi(BASE_PATH+"/masters/clusters?pageSize=100&status=active");
+  cache.clusters = payload.data || [];
+}
+
+function rememberCustomerAddressCluster(cluster = customerAddressServiceability?.cluster) {
+  if (!cluster) return;
+  const polygon = customerAddressClusterPolygonCoordinates();
+  if (polygon.length < 3) return;
+  const id = cluster.clusterId || cluster.id || cluster.name;
+  if (!id || customerAddressPersistentClusters.some((item) => (item.cluster.clusterId || item.cluster.id || item.cluster.name) === id)) return;
+  customerAddressPersistentClusters.push({ cluster, polygon });
+}
+
+async function selectCustomerAddressCustomer(customer) {
+  customerAddressSelectedCustomer = customer;
+  customerAddressRows = [];
+  customerPreviousUsedLocationRows = [];
+  editingCustomerAddressId = null;
+  customerAddressSaveAsPreviousLocation = null;
+  customerAddressEditorOpen = false;
+  customerAddressSelectedLocation = null;
+  customerAddressServiceability = null;
+  customerAddressPersistentClusters = [];
+  customerAddressSearchResults = [];
+  customerAddressSearchText = "";
+  await loadCustomerAddressLists(customer.id);
+  renderCustomerAddressManager();
+}
+
+async function chooseCustomerOnCustomersPage(customerId) {
+  const customer = customerRows.find((item) => String(item.id) === String(customerId)) || (await api(`/admin-customers/${customerId}`)).data;
+  if (bookingMasterCustomerPickerActive) {
+    await selectBookingMasterCustomer(bookingMasterCustomerFromAdminCustomer(customer));
+    bookingMasterCustomerPickerActive = false;
+    customerSearchText = "";
+    await showSection("bookingMaster");
+    return;
+  }
+  customerAddressSelectedCustomer = customer;
+  editingCustomerAddressId = null;
+  customerAddressSaveAsPreviousLocation = null;
+  customerAddressEditorOpen = false;
+  customerAddressSelectedLocation = null;
+  customerAddressServiceability = null;
+  customerAddressSearchResults = [];
+  customerAddressSearchText = "";
+  await loadCustomerAddressLists(customer.id);
+  renderCustomerRows();
+}
+
+async function openBookingMasterCustomerPicker() {
+  bookingMasterCustomerPickerActive = true;
+  bookingMasterAddressPickerActive = false;
+  customerSearchText = "";
+  await showSection("customers");
+  setTimeout(() => $("#customerSearchInput")?.focus(), 0);
+}
+
+async function openBookingMasterAddressPicker(mode = "primary") {
+  if (!bookingMasterSelectedCustomer?.customerId) throw new Error("Select a customer first.");
+  bookingMasterAddressPickerActive = true;
+  bookingMasterAddressPickerMode = mode === "stop" ? "stop" : "primary";
+  const customer = {
+    id: bookingMasterSelectedCustomer.customerId,
+    customerCode: bookingMasterSelectedCustomer.customerCode,
+    displayName: bookingMasterSelectedCustomer.customerName,
+    profilePictureUrl: bookingMasterSelectedCustomer.profilePictureUrl,
+    phone: bookingMasterSelectedCustomer.phone,
+    email: bookingMasterSelectedCustomer.email,
+    status: bookingMasterSelectedCustomer.status,
+    address: bookingMasterSelectedCustomer.address,
+    latitude: bookingMasterSelectedCustomer.latitude,
+    longitude: bookingMasterSelectedCustomer.longitude,
+    clusterId: bookingMasterSelectedCustomer.clusterId,
+    clusterName: bookingMasterSelectedCustomer.clusterName,
+    zoneName: bookingMasterSelectedCustomer.zoneName,
+    cityName: bookingMasterSelectedCustomer.cityName
+  };
+  await selectCustomerAddressCustomer(customer);
+  await showSection("customerAddresses");
+}
+
+async function openCustomerAddressesPage(customerId) {
+  bookingMasterAddressPickerActive = false;
+  bookingMasterAddressPickerMode = "primary";
+  const customer = customerRows.find((item) => String(item.id) === String(customerId)) || (await api(`/admin-customers/${customerId}`)).data;
+  await selectCustomerAddressCustomer(customer);
+  await showSection("customerAddresses");
+}
+
+function addCustomerAddress() {
+  editingCustomerAddressId = null;
+  customerAddressSaveAsPreviousLocation = null;
+  customerAddressEditorOpen = true;
+  customerAddressSelectedLocation = null;
+  customerAddressServiceability = null;
+  customerAddressSearchResults = [];
+  customerAddressSearchText = "";
+  renderCustomerAddressManager();
+}
+
+async function editAdminCustomer(customerId) {
+  const customer = customerRows.find((item) => String(item.id) === String(customerId)) || (await api(`/admin-customers/${customerId}`)).data;
+  const displayName = prompt("Customer name", customer.displayName || "");
+  if (displayName == null) return;
+  const phone = prompt("Contact number", customer.phone || "");
+  if (phone == null) return;
+  const email = prompt("Email", customer.email || "");
+  if (email == null) return;
+  await api(`/admin-customers/${customerId}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      displayName: displayName.trim() || null,
+      phone: phone.trim() || null,
+      email: email.trim() || null,
+      status: customer.status || "active"
+    })
+  });
+  showAlert("Customer updated.", "success");
+  await loadCustomers();
+}
+
+async function editCustomerAddress(addressId) {
+  const address = customerAddressRows.find((item) => String(item.addressId || "") === String(addressId || ""));
+  if (!address) throw new Error("Customer address not found.");
+  editingCustomerAddressId = address.addressId;
+  customerAddressSaveAsPreviousLocation = null;
+  customerAddressEditorOpen = true;
+  customerAddressSelectedLocation = {
+    label: address.label || "Saved Address",
+    address: address.address || "",
+    latitude: Number(address.latitude),
+    longitude: Number(address.longitude),
+    clusterId: address.clusterId || null,
+    clusterName: address.clusterName || null,
+    source: "saved"
+  };
+  customerAddressServiceability = address.clusterId
+    ? { isServiceable: true, cluster: { clusterId: address.clusterId, name: address.clusterName || "" } }
+    : null;
+  renderCustomerAddressManager();
+}
+
+async function savePreviousUsedLocationAsAddress(addressId) {
+  const address = customerPreviousUsedLocationRows.find((item) => String(item.addressId || "") === String(addressId || ""));
+  if (!address) throw new Error("Previous used location not found.");
+  editingCustomerAddressId = null;
+  customerAddressSaveAsPreviousLocation = address;
+  customerAddressEditorOpen = true;
+  customerAddressSelectedLocation = {
+    label: address.label || "Previous used",
+    address: address.address || "",
+    latitude: Number(address.latitude),
+    longitude: Number(address.longitude),
+    clusterId: address.clusterId || null,
+    clusterName: address.clusterName || null,
+    source: "saved"
+  };
+  customerAddressServiceability = address.clusterId
+    ? { isServiceable: true, cluster: { clusterId: address.clusterId, name: address.clusterName || "" } }
+    : null;
+  customerAddressSearchResults = [];
+  customerAddressSearchText = "";
+  renderCustomerAddressManager();
+}
+
+function resetCustomerAddressEdit() {
+  editingCustomerAddressId = null;
+  customerAddressSaveAsPreviousLocation = null;
+  customerAddressEditorOpen = false;
+  customerAddressSelectedLocation = null;
+  customerAddressServiceability = null;
+  renderCustomerAddressManager();
+}
+
+async function reverseCustomerAddressCoordinates(latitude, longitude, fallback = {}) {
+  const payload = await api(`/admin-customers/locations/reverse?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}`);
+  return {
+    ...fallback,
+    ...(payload.data || {}),
+    latitude: Number(payload.data?.latitude ?? latitude),
+    longitude: Number(payload.data?.longitude ?? longitude),
+    source: fallback.source || payload.data?.source || "reverse"
+  };
+}
+
+async function selectCustomerAddressLocation(location, options = {}) {
+  if (!locationHasCoordinates(location)) throw new Error("Selected location does not have coordinates.");
+  customerAddressSelectedLocation = location.provider === "ola_maps" || location.address ? location : await reverseCustomerAddressCoordinates(Number(location.latitude), Number(location.longitude), location);
+  await validateCustomerAddressSelectedLocation(false);
+  if (options.rerender !== false) {
+    renderCustomerAddressManager();
+    initializeCustomerAddressSimpleMap();
+    return;
+  }
+  if (customerAddressSimpleMap) {
+    setCustomerAddressSimpleMapCenter(customerAddressSelectedLocation.latitude, customerAddressSelectedLocation.longitude, customerAddressSimpleMap.zoom);
+  } else if (customerAddressMapInstance?.flyTo) {
+    customerAddressMapInstance.flyTo({ center: [Number(customerAddressSelectedLocation.longitude), Number(customerAddressSelectedLocation.latitude)], zoom: 18, duration: 400 });
+  }
+}
+
+async function validateCustomerAddressSelectedLocation(render = true) {
+  const coordinates = customerAddressSelectedCoordinates();
+  if (!customerAddressSelectedCustomer?.id || !Number.isFinite(coordinates.latitude) || !Number.isFinite(coordinates.longitude)) {
+    customerAddressServiceability = null;
+    if (render) updateCustomerAddressSelectedPreview();
+    return null;
+  }
+  const payload = await api(`/admin-customers/${customerAddressSelectedCustomer.id}/addresses/validate`, {
+    method: "POST",
+    body: JSON.stringify({
+      address: customerAddressSelectedLocation?.address || customerAddressSelectedLocation?.label || "Selected location",
+      latitude: coordinates.latitude,
+      longitude: coordinates.longitude,
+      source: customerAddressSelectedLocation?.source || "manual"
+    })
+  });
+  customerAddressServiceability = payload.data || null;
+  if (customerAddressServiceability?.isServiceable && customerAddressServiceability.cluster?.name) {
+    customerAddressSelectedLocation = {
+      ...customerAddressSelectedLocation,
+      clusterId: customerAddressServiceability.cluster.clusterId,
+      clusterName: customerAddressServiceability.cluster.name
+    };
+    rememberCustomerAddressCluster(customerAddressServiceability.cluster);
+  }
+  if (customerAddressSimpleMap) renderCustomerAddressSimpleMap();
+  if (render) updateCustomerAddressSelectedPreview();
+  return customerAddressServiceability;
+}
+
+async function searchCustomerAddressLocations() {
+  const input = $("#customerAddressSearchInput");
+  customerAddressSearchText = input?.value?.trim() || "";
+  if (customerAddressSearchText.length < 3) {
+    customerAddressSearchResults = [];
+    renderCustomerAddressSearchResults();
+    return;
+  }
+  const payload = await api(`/admin-customers/locations/search?q=${encodeURIComponent(customerAddressSearchText)}`);
+  customerAddressSearchResults = payload.data || [];
+  renderCustomerAddressSearchResults();
+}
+
+function scheduleCustomerAddressLocationSearch(value) {
+  customerAddressSearchText = String(value || "").trim();
+  if (customerAddressSearchTimer) clearTimeout(customerAddressSearchTimer);
+  if (customerAddressSearchText.length < 3) {
+    customerAddressSearchResults = [];
+    renderCustomerAddressSearchResults();
+    return;
+  }
+  customerAddressSearchTimer = setTimeout(() => {
+    searchCustomerAddressLocations().catch((error) => {
+      customerAddressSearchResults = [];
+      renderCustomerAddressSearchResults();
+      showAlert(error.message);
+    });
+  }, 350);
+}
+
+async function useCustomerCurrentLocation() {
+  if (!navigator.geolocation) throw new Error("Current location is not supported in this browser.");
+  const position = await new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 });
+  });
+  const latitude = Number(position.coords.latitude);
+  const longitude = Number(position.coords.longitude);
+  await selectCustomerAddressLocation(await reverseCustomerAddressCoordinates(latitude, longitude, { label: "Current Location", source: "current" }));
+}
+
+async function applyCustomerAddressPinLocation(latitude, longitude) {
+  customerAddressLivePinLocation = { latitude, longitude };
+  customerAddressSelectedLocation = { label: "Map pin location", address: "Resolving selected area...", latitude, longitude, source: "map" };
+  customerAddressServiceability = null;
+  updateCustomerAddressSelectedPreview();
+  customerAddressSelectedLocation = await reverseCustomerAddressCoordinates(latitude, longitude, { label: "Map pin location", source: "map" });
+  await validateCustomerAddressSelectedLocation(false);
+  updateCustomerAddressSelectedPreview();
+}
+
+async function confirmCustomerAddressMapPin() {
+  if (!customerAddressSimpleMap && !customerAddressMapInstance) initializeCustomerAddressSimpleMap();
+  const pin = customerAddressPinLatLng();
+  const fallback = customerAddressMapCenterLocation();
+  const latitude = Number.isFinite(pin.latitude) ? pin.latitude : Number(fallback.latitude);
+  const longitude = Number.isFinite(pin.longitude) ? pin.longitude : Number(fallback.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) throw new Error("Map pin location is not ready.");
+  await applyCustomerAddressPinLocation(latitude, longitude);
+}
+
+async function loadLocations() {
+  const [states, cities, zones, clusters] = await Promise.all([
+    safeApi(BASE_PATH+"/masters/states"),
+    safeApi(BASE_PATH+"/masters/cities"),
+    safeApi(BASE_PATH+"/masters/zones"),
+    safeApi(BASE_PATH+"/masters/clusters")
+  ]);
+  cache.states = states.data || [];
+  cache.cities = cities.data || [];
+  cache.zones = zones.data || [];
+  cache.clusters = clusters.data || [];
+  const stateOptions = optionRows(activeItems(states.data || []));
+  const cityOptions = optionRows(activeItems(cities.data || []));
+  const zoneOptions = optionRows(activeItems(zones.data || []));
+  $("#locationsSection").innerHTML =
+    pageTitleBlock("Locations", "State, City, Zone, and Cluster masters") +
+    `<div class="master-grid">
+      ${panel("States", "Add and manage states", `<form class="master-form stack" data-form="state" id="stateForm"><input type="hidden" name="id"><input class="form-control" name="name" placeholder="State name" required><input class="form-control" name="code" placeholder="state_code" required><input class="form-control" name="countryName" placeholder="Country" value="India"><label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label><div class="form-actions"><button class="btn btn-primary" id="stateSubmitButton">Create State</button><button class="btn btn-outline-secondary d-none" id="cancelStateEditButton" type="button">Cancel</button></div></form>` + table(["Name", "Code", "Country", "Status", ""], stateRows(states.data || [])))}
+      ${panel("Cities", "Add and manage cities", `<form class="master-form stack" data-form="city" id="cityForm"><input type="hidden" name="id"><select class="form-select" name="stateId"><option value="">State optional</option>${stateOptions}</select><input class="form-control" name="name" placeholder="City name" required><input class="form-control" name="code" placeholder="city_code" required><label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label><div class="form-actions"><button class="btn btn-primary" id="citySubmitButton">Create City</button><button class="btn btn-outline-secondary d-none" id="cancelCityEditButton" type="button">Cancel</button></div></form>` + table(["Name", "Code", "State", "Status", ""], cityRows(cities.data || [])))}
+      ${panel("Zones", "Add and manage zones", `<form class="master-form stack" data-form="zone" id="zoneForm"><input type="hidden" name="id"><select class="form-select" name="stateFilterId"><option value="">State optional</option>${stateOptions}</select><select class="form-select" name="cityId"><option value="">City optional</option>${cityOptions}</select><input class="form-control" name="name" placeholder="Zone name" required><input class="form-control" name="code" placeholder="zone_code" required><label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label><div class="form-actions"><button class="btn btn-primary" id="zoneSubmitButton">Create Zone</button><button class="btn btn-outline-secondary d-none" id="cancelZoneEditButton" type="button">Cancel</button></div></form>` + table(["Name", "Code", "City", "Status", ""], zoneRows(zones.data || [])))}
+      ${panel("Clusters", "Add and manage launch clusters", `<form class="master-form stack" data-form="cluster" id="clusterForm"><input type="hidden" name="id"><select class="form-select" name="stateFilterId"><option value="">State optional</option>${stateOptions}</select><select class="form-select" name="cityId" required><option value="">City</option>${cityOptions}</select><select class="form-select" name="zoneId"><option value="">Zone optional</option>${zoneOptions}</select><input class="form-control" name="name" placeholder="Cluster name" required><input class="form-control" name="code" placeholder="cluster_code" required><textarea class="form-control" name="description" rows="2" placeholder="Cluster description"></textarea><textarea class="form-control" name="areasDescription" rows="2" placeholder="Areas in this cluster"></textarea><textarea class="form-control" name="polygonDescription" rows="2" placeholder="Polygon description / boundary notes"></textarea><div class="master-form compact mb-0"><input class="form-control" name="startTime" type="time" placeholder="Start time"><input class="form-control" name="endTime" type="time" placeholder="End time"><input class="form-control" name="priority" type="number" value="0" placeholder="Priority"></div><label class="form-check"><input class="form-check-input" type="checkbox" name="isPinned"> Pin on top</label><input class="form-control" name="pinPriority" type="number" value="0" placeholder="Pin priority"><label class="form-check"><input class="form-check-input" type="checkbox" name="isBookingEnabled"> Active / Serviceable</label><div class="form-actions"><button class="btn btn-primary" id="clusterSubmitButton">Create Cluster</button><button class="btn btn-outline-secondary d-none" id="cancelClusterEditButton" type="button">Cancel</button></div></form>` + table(["Name", "Code", "City", "Zone", "Description", "Time", "Pin", "Status", ""], clusterRows(clusters.data || [])))}
+    </div>
+    <div id="clusterReportPanel" class="mt-3"></div>`;
+  refreshClusterFormZoneOptions();
+  await loadClusterReport();
+}
+
+async function loadClusterReport(page = clusterReportPage) {
+  clusterReportPage = page;
+  const filterForm = $("#clusterReportFilterForm");
+  const params = filterForm ? new URLSearchParams(new FormData(filterForm)) : new URLSearchParams();
+  params.set("page", String(clusterReportPage));
+  params.set("pageSize", params.get("pageSize") || "10");
+  const payload = await api(`/masters/clusters/report?${params.toString()}`);
+  const reportClusters = (payload.data || []).map((row) => ({
+    ...row,
+    id: row.id || row.clusterId,
+    name: row.name || row.clusterName,
+    areasDescription: row.areasDescription || row.areas
+  }));
+  const clusterMap = new Map((cache.clusters || []).map((cluster) => [cluster.id, cluster]));
+  for (const cluster of reportClusters) clusterMap.set(cluster.id, { ...(clusterMap.get(cluster.id) || {}), ...cluster });
+  cache.clusters = [...clusterMap.values()];
+  const rows = payload.data
+    .map(
+      (row) => `<tr>
+        <td><b>${escapeHtml(row.cityName || "-")}</b><div class="row-note">${escapeHtml(row.cityId || "-")}</div></td>
+        <td><b>${escapeHtml(row.zoneName || "-")}</b><div class="row-note">${escapeHtml(row.zoneId || "-")}</div></td>
+        <td><b>${escapeHtml(row.clusterName || "-")}</b><div class="row-note">${escapeHtml(row.clusterId)}</div></td>
+        <td>${escapeHtml(row.areas || "-")}</td>
+        <td><button class="btn btn-soft btn-xs" data-action="view-report-polygon" data-id="${row.clusterId}" type="button" ${row.polygonDescription ? "" : "disabled"}>View on Map</button></td>
+        <td>${escapeHtml(row.startTime || "-")}</td>
+        <td>${escapeHtml(row.endTime || "-")}</td>
+        <td>${row.isPinned ? status(`pinned ${row.pinPriority || 0}`) : "-"}</td>
+        <td>${status(row.isBookingEnabled ? "active" : "deactive")}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="edit-cluster" data-id="${row.clusterId}" type="button">Edit</button>
+          ${isSuperAdminUser() ? `<button class="btn btn-outline-danger btn-xs" data-action="delete-record" data-endpoint="${BASE_PATH}/masters/clusters" data-id="${row.clusterId}" type="button">Delete</button>` : ""}
+        </td>
+      </tr>`
+    )
+    .join("");
+  const pagination = payload.pagination || { page: 1, totalPages: 1, totalRecords: payload.data.length };
+  const cityOptions = optionRows(activeItems(cache.cities || []));
+  const zoneOptions = optionRows(activeItems(cache.zones || []));
+  $("#clusterReportPanel").innerHTML = panel(
+    "Cluster Report",
+    "Search, filter, pin, edit, delete, and view cluster polygons",
+    `<form id="clusterReportFilterForm" class="master-form mb-3">
+      <input class="form-control" name="search" placeholder="Search city, zone, cluster, ID, areas" value="${escapeHtml(params.get("search") || "")}">
+      <select class="form-select" name="cityId"><option value="">All cities</option>${cityOptions}</select>
+      <select class="form-select" name="zoneId"><option value="">All zones</option>${zoneOptions}</select>
+      <select class="form-select" name="status"><option value="">Any status</option><option value="active">Active</option><option value="inactive">Deactive</option></select>
+      <select class="form-select" name="pageSize"><option value="10">10</option><option value="25">25</option><option value="50">50</option></select>
+      <button class="btn btn-outline-primary">Apply</button>
+    </form>
+    ${table(["City", "Zone", "Cluster", "Areas", "Map", "Start", "End", "Pin", "Status", ""], rows)}
+    <div class="form-actions mt-3">
+      <button class="btn btn-soft btn-sm" data-action="cluster-report-page" data-page="${Math.max(1, pagination.page - 1)}" type="button" ${pagination.page <= 1 ? "disabled" : ""}>Previous</button>
+      <span class="helper-text">Page ${pagination.page} of ${pagination.totalPages} | ${pagination.totalRecords} records</span>
+      <button class="btn btn-soft btn-sm" data-action="cluster-report-page" data-page="${Math.min(pagination.totalPages, pagination.page + 1)}" type="button" ${pagination.page >= pagination.totalPages ? "disabled" : ""}>Next</button>
+    </div>`
+  );
+  if (filterForm) {
+    const nextForm = $("#clusterReportFilterForm");
+    for (const [key, value] of params.entries()) {
+      if (nextForm.elements[key]) nextForm.elements[key].value = value;
+    }
+  }
+}
+
+async function loadServices() {
+  const [services, categories] = await Promise.all([safeApi(BASE_PATH+"/masters/services"), safeApi(BASE_PATH+"/masters/service-categories")]);
+  cache.services = services.data || [];
+  cache.categories = categories.data || [];
+  const serviceOptions = optionRows(activeItems(services.data || []));
+  const categoryOptions = optionRows(activeItems(categories.data || []));
+  $("#servicesSection").innerHTML =
+    pageTitleBlock("Services", "Service and Service-Category masters") +
+    `<div class="master-grid">
+      ${panel("Services", "Add, edit, upload image, recommend, enable, or deactivate services", `<form class="master-form stack" data-form="service" id="serviceForm">
+        <input type="hidden" name="id">
+        <input class="form-control" name="name" placeholder="Service name" required>
+        <input class="form-control" name="code" placeholder="service_code" required>
+        <textarea class="form-control" name="description" rows="2" placeholder="Description"></textarea>
+        ${uploadControl("serviceImage")}
+        <input class="form-control" name="priority" type="number" min="0" value="0" placeholder="Priority">
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isRecommended"> Recommended</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isEnabled" checked> Enable</label>
+        <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <div class="service-location-settings">
+          <label class="form-check module-switch"><input class="form-check-input" type="radio" name="locationMode" value="current" checked> Apply Current Location</label>
+          <label class="form-check module-switch"><input class="form-check-input" type="radio" name="locationMode" value="multi"> Multi Locations</label>
+          <div data-service-location-limit class="d-none">
+            ${priceMasterFloatingField("Max Locations Limit", `<input class="form-control" name="maxLocationsLimit" type="number" min="1" max="50" step="1" value="1">`)}
+          </div>
+        </div>
+        <div class="form-actions"><button class="btn btn-primary" id="serviceSubmitButton">Create Service</button><button class="btn btn-outline-secondary d-none" id="cancelServiceEditButton" type="button">Cancel</button></div>
+      </form>` + table(["Image", "Name", "Code", "Description", "Location", "Priority", "Recommended", "Enabled", "Status", ""], serviceRows(services.data || [])))}
+      ${panel("Service Categories", "Add, edit, upload image, recommend, enable, or deactivate categories", `<form class="master-form stack" data-form="service-category" id="serviceCategoryForm">
+        <input type="hidden" name="id">
+        <select class="form-select" name="serviceId"><option value="">Service optional</option>${serviceOptions}</select>
+        <select class="form-select" name="parentCategoryId"><option value="">Parent optional</option>${categoryOptions}</select>
+        <input class="form-control" name="name" placeholder="Category name" required>
+        <input class="form-control" name="code" placeholder="category_code" required>
+        <textarea class="form-control" name="description" rows="2" placeholder="Description"></textarea>
+        ${uploadControl("categoryImage")}
+        <input class="form-control" name="priority" type="number" min="0" value="0" placeholder="Priority">
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isRecommended"> Recommended</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isEnabled" checked> Enable</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <div class="form-actions"><button class="btn btn-primary" id="serviceCategorySubmitButton">Create Category</button><button class="btn btn-outline-secondary d-none" id="cancelServiceCategoryEditButton" type="button">Cancel</button></div>
+      </form>` + serviceCategoryTableHtml(categories.data || []))}
+    </div>`;
+  renderServiceCategoryTable();
+}
+
+async function loadCategories() {
+  const payload = await safeApi(BASE_PATH+"/masters/categories");
+  cache.categories = payload.data || [];
+  const standaloneCategories = cache.categories.filter((category) => !category.serviceId);
+  $("#categoriesSection").innerHTML =
+    pageTitleBlock("Categories", "Create standalone reusable categories") +
+    `<div class="master-grid single-column">
+      ${panel("Category", "Add, edit, upload picture, recommend, enable, and control location behavior", `<form class="master-form stack" data-form="category-master" id="categoryMasterForm">
+        <input type="hidden" name="id">
+        <input class="form-control" name="name" placeholder="Category name" required>
+        <input class="form-control" name="code" placeholder="Code auto generated if blank">
+        <input class="form-control" name="priority" type="number" min="0" value="0" placeholder="Priority">
+        <textarea class="form-control" name="description" rows="2" placeholder="Description"></textarea>
+        <textarea class="form-control" name="note" rows="3" placeholder="Note"></textarea>
+        <label class="form-label">Category Picture ${uploadControl("categoryMasterImage")}</label>
+        <div class="service-location-settings">
+          <label class="form-check module-switch"><input class="form-check-input" type="radio" name="locationMode" value="current" checked> Apply Current Location</label>
+          <label class="form-check module-switch"><input class="form-check-input" type="radio" name="locationMode" value="multi"> Multiple Locations</label>
+          <div data-category-location-limit class="d-none">
+            ${priceMasterFloatingField("No. of Locations Allowed", `<input class="form-control" name="maxLocationsLimit" type="number" min="1" max="50" step="1" value="1">`)}
+          </div>
+        </div>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="addWithOtherCategory"> Add with Other Category</label>
+        <div class="category-guidance-editor" data-category-guidance-editor></div>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isRecommended"> Recommended</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isEnabled" checked> Enable</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <div class="form-actions"><button class="btn btn-primary" id="categoryMasterSubmitButton">Create Category</button><button class="btn btn-outline-secondary d-none" id="cancelCategoryMasterEditButton" type="button">Cancel</button></div>
+      </form>` + table(["Image", "Name", "Code", "Priority", "Location", "Other Category", "Guidance", "Recommended", "Enabled", "Status", ""], categoryMasterRows(standaloneCategories)))}
+    </div>`;
+  toggleCategoryMasterLocationLimit();
+  renderCategoryMasterGuidance();
+}
+
+async function loadClusterServices() {
+  const [services, categories, clusters, clusterServices, clusterCategories, clusterBookingTypes] = await Promise.all([
+    safeApi(BASE_PATH+"/masters/services"),
+    safeApi(BASE_PATH+"/masters/service-categories"),
+    safeApi(BASE_PATH+"/masters/clusters"),
+    safeApi(BASE_PATH+"/masters/cluster-services"),
+    safeApi(BASE_PATH+"/masters/cluster-categories"),
+    safeApi(BASE_PATH+"/masters/cluster-booking-types")
+  ]);
+  cache.services = services.data || [];
+  cache.categories = categories.data || [];
+  cache.clusters = clusters.data || [];
+  cache.clusterServices = clusterServices.data || [];
+  cache.clusterCategories = clusterCategories.data || [];
+  cache.clusterBookingTypes = clusterBookingTypes.data || [];
+  const serviceOptions = optionRows(activeItems(cache.services));
+  const clusterOptions = optionRows(activeClusters(cache.clusters));
+  $("#clusterServicesSection").innerHTML =
+    pageTitleBlock("Cluster Services", "Manage service and category availability per cluster") +
+    `<div class="master-grid">
+      ${panel("Cluster Services", "Choose which services are visible and enabled for each cluster", `<form class="master-form stack" data-form="cluster-service-setting">
+        <select class="form-select" name="clusterId" required><option value="">Select Cluster</option>${clusterOptions}</select>
+        <select class="form-select" name="serviceId" required><option value="">Select Service</option>${serviceOptions}</select>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isVisible" checked> Visible in cluster</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isEnabled" checked> Enabled for booking</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active mapping</label>
+        <button class="btn btn-primary">Save Cluster Service</button>
+      </form>` + table(["Cluster", "Service", "Visible", "Enabled", "Status", ""], clusterServiceSettingRows(clusterServices.data || [])))}
+      ${panel("Cluster Categories", "Choose which categories are visible and enabled for each cluster", `<form class="master-form stack" data-form="cluster-category-setting">
+        <select class="form-select" id="clusterCategoryClusterSelect" name="clusterId" required><option value="">Select Cluster</option>${clusterOptions}</select>
+        <select class="form-select" id="clusterCategoryServiceSelect" name="serviceId" required><option value="">Select Cluster Service</option></select>
+        <select class="form-select" id="clusterCategoryCategorySelect" name="categoryId" required><option value="">Select Category</option></select>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isVisible" checked> Visible in cluster</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isEnabled" checked> Enabled for booking</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active mapping</label>
+        <button class="btn btn-primary">Save Cluster Category</button>
+      </form>` + table(["Cluster", "Category", "Visible", "Enabled", "Status", ""], clusterCategorySettingRows(clusterCategories.data || [])))}
+      <div class="cluster-booking-type-panel">
+        ${panel("Cluster Booking Type", "Apply booking behavior for cluster services", `<form class="master-form stack" data-form="cluster-booking-type-setting" id="clusterBookingTypeForm">
+          <input type="hidden" name="replaceConfigKey" value="">
+          <div class="cluster-booking-row">
+            ${priceMasterFloatingField("Select Cluster", `<select class="form-select" name="clusterId" required><option value="">Select Cluster</option>${clusterOptions}</select>`)}
+            ${priceMasterFloatingField("Booking Type", `<select class="form-select" name="bookingType"><option value="both">Both</option><option value="instant">Instant</option><option value="schedule">Schedule</option></select>`)}
+            ${priceMasterFloatingField("Booking Assistant", `<select class="form-select" name="instantMode"><option value="both">Select</option><option value="automate">Auto</option><option value="manual">Manual</option></select>`)}
+            ${priceMasterFloatingField("Waiting Time Window Duration (mins)", `<input class="form-control" name="waitWindowMinutes" type="number" min="0" max="1440" step="1" value="0" placeholder=" ">`)}
+            <label class="inline-check cluster-booking-active"><input type="checkbox" name="isActive" checked> Active</label>
+          </div>
+          <div class="cluster-booking-picker-row">
+            <div class="cluster-booking-picker">
+              <span class="cluster-booking-picker-label">Services</span>
+              <label class="inline-check cluster-booking-picker-all"><input type="checkbox" name="serviceAll" checked> All</label>
+              <div class="cluster-booking-checklist" data-cluster-booking-service-list></div>
+            </div>
+          </div>
+          <div class="cluster-booking-individual-settings" data-cluster-booking-individual-settings></div>
+          <div class="form-actions"><button class="btn btn-primary">Apply Cluster Booking Type</button></div>
+        </form>` + table(["Target", "Type", "Booking Type", "Wait Window", "Booking Assistant", "Status", ""], clusterBookingTypeRows(clusterBookingTypes.data || [])))}
+      </div>
+    </div>`;
+  refreshClusterCategoryCascade("cluster");
+  refreshClusterBookingTypeControls();
+}
+
+async function loadBookingTypes() {
+  const payload = await safeApi(BASE_PATH+"/masters/booking-types");
+  cache.bookingTypes = payload.data || [];
+  $("#bookingTypesSection").innerHTML =
+    pageTitleBlock("Booking Type Master", "Default instant and schedule booking options") +
+    panel("Booking Types", "Create default schedule days and reusable time slots", `<form class="master-form stack" data-form="booking-type" id="bookingTypeForm" data-time-slot-builder-form>
+      <input type="hidden" name="id">
+      <input class="form-control" name="name" placeholder="Name e.g. Standard Schedule" required>
+      <input class="form-control" name="code" placeholder="code e.g. standard_schedule" required>
+      <select class="form-select" name="bookingType"><option value="instant">Instant</option><option value="schedule">Schedule</option></select>
+      <div data-booking-type-schedule-fields class="stack d-none">
+        <input class="form-control" name="maxAdvanceDays" type="number" min="1" value="1" placeholder="Allowed days in advance">
+        <input type="hidden" name="timeSlots">
+        <input type="hidden" name="timeCategories" value="[]">
+        <input type="hidden" name="activeTimeCategoryId" value="">
+        <div class="booking-type-time-builder">
+          <div class="master-form compact mb-0">
+            ${priceMasterFloatingField("Time Category", `<input class="form-control" name="timeCategoryName" placeholder="Morning">`)}
+            <button class="btn btn-soft" data-action="add-booking-type-time-category" type="button">Add Time Category</button>
+          </div>
+          <div class="booking-type-time-tabs" data-booking-type-time-tabs></div>
+          <div data-booking-type-time-panel></div>
+        </div>
+      </div>
+      <label class="form-check"><input class="form-check-input" type="checkbox" name="isDefault"> Default for clusters without override</label>
+      <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+      <div class="form-actions"><button class="btn btn-primary" id="bookingTypeSubmitButton">Save Booking Type</button><button class="btn btn-outline-secondary d-none" id="cancelBookingTypeEditButton" type="button">Cancel</button></div>
+    </form>` + table(["Name", "Type", "Max Days", "Time Categories", "Default", "Status", ""], bookingTypeRows(cache.bookingTypes)));
+  toggleBookingTypeScheduleFields();
+}
+
+async function loadSurgeMaster() {
+  const [payload, states, cities, zones, clusters, services, categories] = await Promise.all([
+    safeApi(BASE_PATH+"/masters/surge-rules"),
+    safeApi(BASE_PATH+"/masters/states"),
+    safeApi(BASE_PATH+"/masters/cities"),
+    safeApi(BASE_PATH+"/masters/zones"),
+    safeApi(BASE_PATH+"/masters/clusters"),
+    safeApi(BASE_PATH+"/masters/services"),
+    safeApi(BASE_PATH+"/masters/service-categories")
+  ]);
+  cache.surgeRules = payload.data || [];
+  cache.states = states.data || [];
+  cache.cities = cities.data || [];
+  cache.zones = zones.data || [];
+  cache.clusters = clusters.data || [];
+  cache.services = services.data || [];
+  cache.categories = categories.data || [];
+  $("#surgeMasterSection").innerHTML =
+    pageTitleBlock("Surge Master", "Create and control reusable surge pricing rules") +
+    `<div class="master-grid single-column">
+      ${panel("Surge Rule", "Manage peak hours, holidays, weather, and high-demand pricing", `<form class="master-form stack" data-form="surge-rule" id="surgeRuleForm">
+        <input type="hidden" name="id">
+        <input class="form-control" name="name" placeholder="Rule name" required>
+        <input class="form-control" name="code" placeholder="rule_code" required>
+        <input type="hidden" name="ruleType" value="time">
+        <div class="master-form compact surge-strategy-row mb-0">
+          ${priceMasterFloatingField("Surge Strategy", `<select class="form-select" name="surgeStrategy" required>
+            <option value="positive_flat">+ive Flat</option>
+            <option value="negative_flat">-ive Flat</option>
+            <option value="positive_multiplier">+ive Multiplier</option>
+            <option value="negative_multiplier">-ive Multiplier</option>
+          </select>`)}
+          ${priceMasterFloatingField("Value", `<input class="form-control" name="adjustmentValue" type="number" min="0" step="0.01" value="0" placeholder="Value">`)}
+          <label class="floating-field d-none" data-surge-x-field><span>Surge X</span><input class="form-control" name="surgeX" type="text" value="" readonly placeholder="0x"></label>
+          ${priceMasterFloatingField("Priority", `<input class="form-control" name="priority" type="number" min="0" step="1" value="0" placeholder="Priority">`)}
+        </div>
+        <div class="master-form compact mb-0">
+          ${priceMasterFloatingField("Scope", `<select class="form-select" name="scopeType"><option value="all">All</option><option value="state">State</option><option value="city">City</option><option value="zone">Zone</option><option value="cluster">Cluster</option></select>`)}
+          ${priceMasterFloatingField("State", `<select class="form-select" name="stateId"><option value="">State</option>${optionRows(activeItems(cache.states))}</select>`)}
+          ${priceMasterFloatingField("City", `<select class="form-select" name="cityId"><option value="">City</option>${optionRows(activeItems(cache.cities))}</select>`)}
+          ${priceMasterFloatingField("Zone", `<select class="form-select" name="zoneId"><option value="">Zone</option>${optionRows(activeItems(cache.zones))}</select>`)}
+          ${priceMasterFloatingField("Cluster", `<select class="form-select" name="clusterId"><option value="">Cluster</option>${optionRows(activeClusters(cache.clusters))}</select>`)}
+        </div>
+        <div class="master-form compact mb-0">
+          ${priceMasterFloatingField("Service", `<select class="form-select" name="serviceId"><option value="">All</option>${optionRows(activeItems(cache.services))}</select>`)}
+          ${priceMasterFloatingField("Category", `<select class="form-select" name="categoryId"><option value="">All</option>${optionRows(activeItems(cache.categories))}</select>`)}
+        </div>
+        <div class="surge-schedule-switch">
+          <label><input class="form-check-input" name="scheduleMode" value="weekly" type="radio" checked> Weekly Surge</label>
+          <label><input class="form-check-input" name="scheduleMode" value="date_time" type="radio"> Pick Custom Dates</label>
+        </div>
+        <div data-surge-week-section>
+          <div class="surge-days">
+            ${["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map((day) => `<label class="form-check"><input class="form-check-input" name="days" value="${day}" type="checkbox"> ${day.toUpperCase()}</label>`).join("")}
+          </div>
+          <div class="master-form compact mb-0">
+            ${priceMasterFloatingField("Start Time", `<input class="form-control" name="startTime" type="time" aria-label="Common start time">`)}
+            ${priceMasterFloatingField("End Time", `<input class="form-control" name="endTime" type="time" aria-label="Common end time">`)}
+            <button class="btn btn-soft" data-action="apply-surge-common-time" data-id="new" type="button">Apply To Selected Days</button>
+          </div>
+          <div class="surge-day-times">
+            ${["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map((day) => `<div class="surge-day-time"><span>${day.toUpperCase()}</span><input class="form-control" data-day-start="${day}" type="time" aria-label="${day} start time"><input class="form-control" data-day-end="${day}" type="time" aria-label="${day} end time"></div>`).join("")}
+          </div>
+        </div>
+        <input type="hidden" name="selectedDates" value="">
+        <div class="master-form compact mb-0 surge-date-picker-row" data-surge-date-section>
+          ${priceMasterFloatingField("Holiday Date", `<input class="form-control" id="surgeDatePicker" name="surgeDatePicker" type="date">`)}
+          <button class="btn btn-soft" data-action="add-surge-date" data-id="new" type="button">Add Date</button>
+        </div>
+        <div id="selectedSurgeDates" class="surge-date-list" data-surge-date-section></div>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <div class="form-actions"><button class="btn btn-primary" id="surgeRuleSubmitButton">Create Surge Rule</button><button class="btn btn-outline-secondary d-none" id="cancelSurgeRuleEditButton" type="button">Cancel</button></div>
+      </form>` + table(["Name", "Type", "Days / Dates", "Time", "Status", ""], surgeRuleRows(cache.surgeRules)))}
+    </div>`;
+  refreshSurgeRuleLocationCascade("scope");
+  refreshSurgeRuleTargetCascade("service");
+  toggleSurgeScheduleSections();
+}
+
+async function loadPriceMaster() {
+  const [rules, services, categories, stores, states, cities, zones, clusters] = await Promise.all([
+    safeApi(BASE_PATH+"/masters/price-master"),
+    safeApi(BASE_PATH+"/masters/services"),
+    safeApi(BASE_PATH+"/masters/service-categories"),
+    safeApi(BASE_PATH+"/stores"),
+    safeApi(BASE_PATH+"/masters/states"),
+    safeApi(BASE_PATH+"/masters/cities"),
+    safeApi(BASE_PATH+"/masters/zones"),
+    safeApi(BASE_PATH+"/masters/clusters")
+  ]);
+  cache.priceRules = rules.data || [];
+  cache.services = services.data || [];
+  cache.categories = categories.data || [];
+  cache.stores = stores.data || [];
+  cache.states = states.data || [];
+  cache.cities = cities.data || [];
+  cache.zones = zones.data || [];
+  cache.clusters = clusters.data || [];
+  const priceMasterFormHtml = `<form class="master-form stack" data-form="price-master" id="priceMasterForm">
+        <input type="hidden" name="id">
+        <div class="master-form compact mb-0">
+          ${priceMasterFloatingField("Price Type", `<select class="form-select" name="priceType"><option value="task">Task</option><option value="time">Time</option></select>`)}
+          ${priceMasterFloatingField("Scope", `<select class="form-select" name="scopeType"><option value="all">All</option><option value="state">State</option><option value="city">City</option><option value="zone">Zone</option><option value="cluster">Cluster</option></select>`)}
+          ${priceMasterFloatingField("State", `<select class="form-select" name="stateId"><option value="">State</option>${optionRows(activeItems(cache.states))}</select>`)}
+          ${priceMasterFloatingField("City", `<select class="form-select" name="cityId"><option value="">City</option>${optionRows(activeItems(cache.cities))}</select>`)}
+          ${priceMasterFloatingField("Zone", `<select class="form-select" name="zoneId"><option value="">Zone</option>${optionRows(activeItems(cache.zones))}</select>`)}
+          ${priceMasterFloatingField("Cluster", `<select class="form-select" name="clusterId"><option value="">Cluster</option>${optionRows(activeClusters(cache.clusters))}</select>`)}
+        </div>
+        <div class="master-form compact mb-0">
+          ${priceMasterFloatingField("Service", `<select class="form-select" name="serviceId"><option value="">Service</option>${optionRows(activeItems(cache.services))}</select>`)}
+          <div data-price-category-field>${priceMasterFloatingField("Category", `<select class="form-select" name="categoryId"><option value="">Category</option>${optionRows(activeItems(cache.categories))}</select>`)}</div>
+          <div data-price-task-only data-price-store-mode-only>${priceMasterFloatingField("Store optional", `<select class="form-select" name="storeId"><option value="">Store optional</option>${optionRows(activeItems(cache.stores))}</select>`)}</div>
+        </div>
+        <div class="category-group-editor" data-price-task-only>
+          <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="categoryGroupEnabled"> No Sub-Category / Stores</label>
+          <div class="category-group-panel d-none" data-category-group-editor>
+            <div class="category-group-editor-head">
+              <span>Price Slabs for Categories</span>
+              ${priceMasterFloatingField("Max Categories allowed in a Cart at a Time", `<select class="form-select" name="categoryGroupMaxCategoriesAllowed"><option value="all">All</option></select>`)}
+            </div>
+            <div id="priceMasterCategoryGroupRows" class="category-group-rows"></div>
+          </div>
+        </div>
+        <div class="master-form compact mb-0" data-price-task-only data-price-store-mode-only>
+          ${priceMasterFloatingField("Base Price", `<input class="form-control" name="basePrice" type="number" min="0" step="0.01" value="0" placeholder="Base Price">`)}
+          ${priceMasterFloatingField("Discount Type", `<select class="form-select" name="discountType"><option value="none">No Discount</option><option value="percent">Discount %</option><option value="flat">Flat Discount</option></select>`)}
+          ${priceMasterFloatingField("Discount Value", `<input class="form-control" name="discountValue" type="number" min="0" step="0.01" value="0" placeholder="Discount Value">`)}
+          ${priceMasterFloatingField("Selling Price", `<input class="form-control" name="sellingPrice" type="number" min="0" step="0.01" value="0.00" placeholder="Selling Price" readonly>`)}
+        </div>
+        <div class="master-form compact mb-0" data-price-task-only data-price-store-mode-only>
+          ${priceMasterFloatingField("Complexity Base", `<select class="form-select" name="complexityBase"><option value="selling">Multiplier on Selling</option><option value="base">Multiplier on Base</option></select>`)}
+          ${priceMasterFloatingField("Max Stores Per Category", `<input class="form-control" name="maxStoresPerCategory" type="number" min="1" step="1" value="1" placeholder="Max/category">`)}
+          ${priceMasterFloatingField("Time Duration (mins)", `<input class="form-control" name="taskDurationMinutes" type="number" min="0" max="1440" step="1" placeholder="30">`)}
+        </div>
+        <div class="complexity-slab-editor" data-price-task-only data-price-store-mode-only>
+          <div class="complexity-slab-editor-head">
+            <span>Task Complexity Slabs</span>
+            <button class="btn btn-soft btn-sm" data-action="add-price-complexity-slab" type="button">Add Slab</button>
+          </div>
+          <div id="priceMasterComplexitySlabs" class="complexity-slab-rows"></div>
+        </div>
+        <div class="time-slab-editor" data-price-time-only>
+          <div class="time-slab-editor-head">
+            <span>Time Slabs</span>
+            <button class="btn btn-soft btn-sm" data-action="add-price-time-slab" type="button">Add Slab</button>
+          </div>
+          <div id="priceMasterTimeSlabs" class="time-slab-rows"></div>
+        </div>
+        <div class="allotted-time-editor" data-price-global-allotted-time>
+          <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="allottedTimeEnabled"> Waiting Charges</label>
+          <div class="master-form compact mb-0 d-none" data-allotted-time-fields>
+            ${priceMasterFloatingField("Waiting Charge Amount", `<input class="form-control" name="allottedTimeWaitingCharge" type="number" min="0" step="0.01" placeholder="20" disabled>`)}
+            ${priceMasterFloatingField("Waiting Charge Minutes", `<input class="form-control" name="allottedTimeChargePerMinutes" type="number" min="1" step="1" placeholder="10" disabled>`)}
+          </div>
+        </div>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <div class="form-actions"><button class="btn btn-primary" id="priceRuleSubmitButton">Create Price Rule</button><button class="btn btn-outline-secondary d-none" id="cancelPriceRuleEditButton" type="button">Cancel</button></div>
+      </form>`;
+  $("#priceMasterSection").innerHTML =
+    pageTitleBlock("Price Master", "Configure task/time prices, discounts, store complexity, and cart totals") +
+    `<div class="master-grid single-column">
+      ${panel("Price Rule", "Task and time pricing with store multiplier rules", priceMasterFormHtml + priceMasterSummaryHtml(cache.priceRules))}
+    </div>`;
+  refreshPriceMasterLocationCascade("scope");
+  refreshPriceMasterServiceCascade("service");
+  renderPriceMasterComplexitySlabs();
+  renderPriceMasterTimeSlabs();
+  updatePriceMasterSellingPrice();
+  togglePriceMasterTypeFields();
+  togglePriceMasterAllottedTimeFields();
+}
+
+async function loadCategoryPrice() {
+  const [rules, categories, states, cities, zones, clusters] = await Promise.all([
+    safeApi(BASE_PATH+"/masters/category-prices"),
+    safeApi(BASE_PATH+"/masters/categories"),
+    safeApi(BASE_PATH+"/masters/states"),
+    safeApi(BASE_PATH+"/masters/cities"),
+    safeApi(BASE_PATH+"/masters/zones"),
+    safeApi(BASE_PATH+"/masters/clusters")
+  ]);
+  cache.categoryPrices = rules.data || [];
+  cache.categories = categories.data || [];
+  cache.states = states.data || [];
+  cache.cities = cities.data || [];
+  cache.zones = zones.data || [];
+  cache.clusters = clusters.data || [];
+  const categoryPriceFormHtml = `<form class="master-form stack" data-form="category-price" id="categoryPriceForm">
+    <input type="hidden" name="id">
+    <div class="control-title"><div><p>Scope</p><h3>Category Price Location</h3></div><span>Price rule</span></div>
+    <div class="master-form compact category-price-scope-row mb-0">
+      ${priceMasterFloatingField("Scope", `<select class="form-select" name="scopeType"><option value="all">All</option><option value="state">State</option><option value="city">City</option><option value="zone">Zone</option><option value="cluster">Cluster</option></select>`)}
+      ${priceMasterFloatingField("State", `<select class="form-select" name="stateId"><option value="">State</option>${optionRows(activeItems(cache.states))}</select>`)}
+      ${priceMasterFloatingField("City", `<select class="form-select" name="cityId"><option value="">City</option>${optionRows(activeItems(cache.cities))}</select>`)}
+      ${priceMasterFloatingField("Zone", `<select class="form-select" name="zoneId"><option value="">Zone</option>${optionRows(activeItems(cache.zones))}</select>`)}
+      ${priceMasterFloatingField("Cluster", `<select class="form-select" name="clusterId"><option value="">Cluster</option>${optionRows(activeClusters(cache.clusters))}</select>`)}
+      ${priceMasterFloatingField("Category", `<select class="form-select" name="categoryId" required><option value="">Category</option>${optionRows(categoryPriceCategories())}</select>`)}
+    </div>
+    <div class="category-price-duration-card">
+      <div class="control-title"><div><p>Durations</p><h3>Duration Pricing</h3></div><button class="btn btn-soft btn-sm" data-action="add-category-price-duration" type="button">Add Duration</button></div>
+      <div id="categoryPriceDurationRows" class="category-price-duration-rows"></div>
+    </div>
+    <div class="control-title"><div><p>Waiting Charges</p><h3>Post Slot Overrun</h3></div><span>Optional</span></div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Amount", `<input class="form-control" name="waitingChargeAmount" type="number" min="0" step="0.01" value="0">`)}
+      ${priceMasterFloatingField("Time (mins)", `<input class="form-control" name="waitingChargeTimeMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
+    </div>
+    <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+    <div class="form-actions"><button class="btn btn-primary" id="categoryPriceSubmitButton">Create Category Price</button><button class="btn btn-outline-secondary d-none" id="cancelCategoryPriceEditButton" type="button">Cancel</button></div>
+  </form>`;
+  $("#categoryPriceSection").innerHTML =
+    pageTitleBlock("Category Price", "Configure category durations, discounts, selling price, and waiting charges") +
+    `<div class="master-grid single-column">
+      ${panel("Category Price", "Create duration prices for reusable categories", categoryPriceFormHtml)}
+      ${panel("Reports", "Filter, edit, or delete category duration prices", categoryPriceFilterBar() + `<div id="categoryPriceReport"></div>`)}
+    </div>`;
+  refreshCategoryPriceLocationCascade("scope");
+  renderCategoryPriceDurationRows();
+  updateCategoryPriceSellingPrice();
+  renderCategoryPriceReport();
+}
+
+async function loadBookingEngine() {
+  const [rules, quickReplies, categories, states, cities, zones, clusters] = await Promise.all([
+    safeApi(BASE_PATH+"/masters/booking-engine"),
+    safeApi(BASE_PATH+"/masters/booking-engine/quick-replies"),
+    safeApi(BASE_PATH+"/masters/categories"),
+    safeApi(BASE_PATH+"/masters/states"),
+    safeApi(BASE_PATH+"/masters/cities"),
+    safeApi(BASE_PATH+"/masters/zones"),
+    safeApi(BASE_PATH+"/masters/clusters")
+  ]);
+  cache.bookingEngineRules = rules.data || [];
+  cache.bookingEngineQuickReplies = quickReplies.data || [];
+  cache.categories = categories.data || [];
+  cache.states = states.data || [];
+  cache.cities = cities.data || [];
+  cache.zones = zones.data || [];
+  cache.clusters = clusters.data || [];
+  const bookingEngineFormHtml = `<form class="master-form stack" data-form="booking-engine" id="bookingEngineForm">
+    <input type="hidden" name="id">
+    <div class="control-title"><div><p>Rule Scope</p><h3>Booking Engine Rule</h3></div><span>Demand & supply</span></div>
+    <div class="master-form compact category-price-scope-row mb-0">
+      ${priceMasterFloatingField("Scope", `<select class="form-select" name="scopeType"><option value="all">All</option><option value="state">State</option><option value="city">City</option><option value="zone">Zone</option><option value="cluster">Cluster</option><option value="category">Category</option></select>`)}
+      ${priceMasterFloatingField("State", `<select class="form-select" name="stateId"><option value="">State</option>${optionRows(activeItems(cache.states))}</select>`)}
+      ${priceMasterFloatingField("City", `<select class="form-select" name="cityId"><option value="">City</option>${optionRows(activeItems(cache.cities))}</select>`)}
+      ${priceMasterFloatingField("Zone", `<select class="form-select" name="zoneId"><option value="">Zone</option>${optionRows(activeItems(cache.zones))}</select>`)}
+      ${priceMasterFloatingField("Cluster", `<select class="form-select" name="clusterId"><option value="">Cluster</option>${optionRows(activeClusters(cache.clusters))}</select>`)}
+      ${priceMasterFloatingField("Category", `<select class="form-select" name="categoryId"><option value="">Category</option>${optionRows(categoryPriceCategories())}</select>`)}
+    </div>
+    <div class="control-title"><div><p>Service Calendar</p><h3>Start / Stop Control</h3></div><span>Manual or Auto</span></div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Mode", `<select class="form-select" name="serviceControlMode"><option value="manual">Manual</option><option value="auto">Auto</option></select>`)}
+      <div data-booking-engine-manual-calendar>
+        ${priceMasterFloatingField("Manual", `<select class="form-select" name="manualServiceStatus"><option value="start">Start Service</option><option value="stop" selected>Stop Service</option></select>`)}
+      </div>
+      <div class="master-form compact mb-0 d-none" data-booking-engine-auto-calendar>
+        ${priceMasterFloatingField("Start Calendar", `<input class="form-control" name="autoStartAt" type="datetime-local">`)}
+        ${priceMasterFloatingField("End Calendar", `<input class="form-control" name="autoEndAt" type="datetime-local">`)}
+      </div>
+    </div>
+    <div class="booking-engine-rule-grid">
+      <div class="category-price-duration-card">
+        <div class="control-title"><div><p>Instant</p><h3>Instant Booking Timing</h3></div><span>Minutes</span></div>
+        <div class="master-form compact mb-0">
+          ${priceMasterFloatingField("ETA value", `<input class="form-control" name="instantEtaMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
+          ${priceMasterFloatingField("Booking Wrap-Up Time", `<input class="form-control" name="instantWrapUpMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
+          ${priceMasterFloatingField("Travel Time To Reach", `<input class="form-control" name="instantTravelMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
+        </div>
+      </div>
+      <div class="category-price-duration-card">
+        <div class="control-title"><div><p>Schedule</p><h3>Schedule Booking Timing</h3></div><span>Minutes</span></div>
+        <div class="master-form compact mb-0">
+          ${priceMasterFloatingField("ETA value", `<input class="form-control" name="scheduleEtaMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
+          ${priceMasterFloatingField("Booking Wrap-Up Time", `<input class="form-control" name="scheduleWrapUpMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
+          ${priceMasterFloatingField("Travel Time To Reach", `<input class="form-control" name="scheduleTravelMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
+        </div>
+      </div>
+    </div>
+    <div class="control-title"><div><p>Assistant Assignment</p><h3>Assignment Mode</h3></div><span>Auto / Manual</span></div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Assistant Assignment", `<select class="form-select" name="assistantAssignmentMode"><option value="manual">Manual - booking confirmed & admin assigns assistant</option><option value="auto">Auto - assign as per availability</option></select>`)}
+    </div>
+    <textarea class="form-control" name="note" rows="3" placeholder="Note"></textarea>
+    ${uploadControl("bookingEngineImage")}
+    <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+    <div class="form-actions"><button class="btn btn-primary" id="bookingEngineSubmitButton">Create Booking Engine Rule</button><button class="btn btn-outline-secondary d-none" id="cancelBookingEngineEditButton" type="button">Cancel</button></div>
+  </form>`;
+  const quickReplyFormHtml = `<form class="master-form stack" data-form="booking-engine-quick-reply" id="bookingEngineQuickReplyForm">
+    <input type="hidden" name="id">
+    <div class="control-title"><div><p>Quick Replies</p><h3>Stage Communication Template</h3></div><span>Customer / Assistant / Admin</span></div>
+    <div class="master-form compact category-price-scope-row mb-0">
+      ${priceMasterFloatingField("Scope", `<select class="form-select" name="scopeType"><option value="all">All</option><option value="state">State</option><option value="city">City</option><option value="zone">Zone</option><option value="cluster">Cluster</option><option value="category">Category</option></select>`)}
+      ${priceMasterFloatingField("State", `<select class="form-select" name="stateId"><option value="">State</option>${optionRows(activeItems(cache.states))}</select>`)}
+      ${priceMasterFloatingField("City", `<select class="form-select" name="cityId"><option value="">City</option>${optionRows(activeItems(cache.cities))}</select>`)}
+      ${priceMasterFloatingField("Zone", `<select class="form-select" name="zoneId"><option value="">Zone</option>${optionRows(activeItems(cache.zones))}</select>`)}
+      ${priceMasterFloatingField("Cluster", `<select class="form-select" name="clusterId"><option value="">Cluster</option>${optionRows(activeClusters(cache.clusters))}</select>`)}
+      ${priceMasterFloatingField("Category", `<select class="form-select" name="categoryId"><option value="">Category</option>${optionRows(categoryPriceCategories())}</select>`)}
+    </div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Actor", `<select class="form-select" name="actor"><option value="admin">Admin</option><option value="customer">Customer</option><option value="assistant" selected>Assistant</option></select>`)}
+      ${priceMasterFloatingField("Audience", `<select class="form-select" name="audience"><option value="admin">Admin</option><option value="customer" selected>Customer</option><option value="assistant">Assistant</option></select>`)}
+      ${priceMasterFloatingField("Booking Stage", `<select class="form-select" name="bookingStage">${bookingEngineStageOptions("working")}</select>`)}
+      ${priceMasterFloatingField("Action Type", `<select class="form-select" name="actionType">${bookingEngineActionOptions("message")}</select>`)}
+      ${priceMasterFloatingField("Sort", `<input class="form-control" name="sortOrder" type="number" min="0" step="1" value="0">`)}
+    </div>
+    <input class="form-control" name="title" placeholder="Title" required>
+    <textarea class="form-control" name="message" rows="3" placeholder="Message / action copy" required></textarea>
+    <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+    <div class="form-actions"><button class="btn btn-primary" id="bookingEngineQuickReplySubmitButton">Create Quick Reply</button><button class="btn btn-outline-secondary d-none" id="cancelBookingEngineQuickReplyEditButton" type="button">Cancel</button></div>
+  </form>`;
+  $("#bookingEngineSection").innerHTML =
+    pageTitleBlock("Booking Engine", "Scoped booking timing, service calendar, and assistant assignment rules") +
+    `<div class="master-grid single-column">
+      ${panel("Rules", "Scope, service start/stop calendar, instant timing, schedule timing, and assignment mode", bookingEngineFormHtml)}
+      ${panel("Availability Controls", "ETA, wrap-up buffer, travel buffer, SLA grace, and capacity behavior are resolved by scoped rules and system settings.", `<div class="empty-state compact"><b>Smart availability engine</b><span>Cluster, service, address, assistant eligibility, ETA, wrap-up, travel, reservations, and scheduled overlaps are validated by backend availability APIs.</span></div>`)}
+      ${panel("Assistant Eligibility", "The engine filters same cluster, active account, online/working status, category eligibility, suspension state, and assistant capacity.", `<div class="empty-state compact"><b>Eligibility source of truth</b><span>Future assigned tasks reserve capacity but do not mark an assistant Working until the assistant taps Start.</span></div>`)}
+      ${panel("Quick Replies", "Create communication templates for every actor, audience, stage, and action", quickReplyFormHtml)}
+      ${panel("Reports", "Filter, edit, or delete Booking Engine rules", bookingEngineFilterBar() + `<div id="bookingEngineReport"></div>`)}
+      ${panel("Quick Reply Reports", "Filter, edit, or delete stage-based quick replies", bookingEngineQuickReplyFilterBar() + `<div id="bookingEngineQuickReplyReport"></div>`)}
+    </div>`;
+  refreshBookingEngineLocationCascade("scope");
+  toggleBookingEngineCalendarFields();
+  renderBookingEngineReport();
+  renderBookingEngineQuickReplyReport();
+}
+
+async function loadStores() {
+  const [stores, services, categories, storeCategories, storeKeywords, states, cities, zones, clusters, categoryStores, storeCategoryMaps] = await Promise.all([
+    safeApi(BASE_PATH+"/stores"),
+    safeApi(BASE_PATH+"/masters/services"),
+    safeApi(BASE_PATH+"/masters/service-categories"),
+    safeApi(BASE_PATH+"/stores/store-categories"),
+    safeApi(BASE_PATH+"/stores/store-keywords"),
+    safeApi(BASE_PATH+"/masters/states"),
+    safeApi(BASE_PATH+"/masters/cities"),
+    safeApi(BASE_PATH+"/masters/zones"),
+    safeApi(BASE_PATH+"/masters/clusters"),
+    safeApi(BASE_PATH+"/stores/category-stores"),
+    safeApi(BASE_PATH+"/stores/store-category-maps")
+  ]);
+  cache.stores = stores.data || [];
+  cache.services = services.data || [];
+  cache.storeCategories = storeCategories.data || [];
+  cache.storeKeywords = storeKeywords.data || [];
+  cache.categories = categories.data || [];
+  cache.states = states.data || [];
+  cache.cities = cities.data || [];
+  cache.zones = zones.data || [];
+  cache.clusters = clusters.data || [];
+  const serviceOptions = optionRows(activeItems(cache.services));
+  const clusterOptions = optionRows(activeClusters(clusters.data || []));
+  $("#storesSection").innerHTML =
+    pageTitleBlock("Stores", "Store Categories, Stores, and Store Cluster mappings") +
+    `<div class="master-grid">
+      ${panel("Store Categories", "Add, update, delete, and view store categories", `<form class="master-form stack" data-form="store-category" id="storeCategoryForm">
+        <input type="hidden" name="id">
+        <input class="form-control" name="name" placeholder="Store category name" required>
+        <input class="form-control" name="code" placeholder="store_category_code" required>
+        <select class="form-select" id="storeCategoryServiceSelect" name="serviceId" required><option value="">Select Service</option>${serviceOptions}</select>
+        <select class="form-select" id="storeCategoryServiceCategorySelect" name="serviceCategoryId" required><option value="">Select Service Category</option></select>
+        ${uploadControl("storeCategoryImage")}
+        <textarea class="form-control" name="description" rows="2" placeholder="Description"></textarea>
+        <input class="form-control" name="priority" type="number" min="0" value="0" placeholder="Priority">
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <div class="form-actions"><button class="btn btn-primary" id="storeCategorySubmitButton">Create Store Category</button><button class="btn btn-outline-secondary d-none" id="cancelStoreCategoryEditButton" type="button">Cancel</button></div>
+      </form>` + table(["Image", "Name", "Code", "Service", "Service Category", "Description", "Priority", "Status", ""], storeCategoryRows(storeCategories.data || [])))}
+      ${panel("Store Keywords", "Create keywords related to Service and Service Category", `<form class="master-form stack" data-form="store-keyword" id="storeKeywordForm">
+        <input type="hidden" name="id">
+        <input class="form-control" name="name" placeholder="Keyword name" required>
+        <input class="form-control" name="code" placeholder="Code auto generated if blank">
+        <select class="form-select" id="storeKeywordServiceSelect" name="serviceId" required><option value="">Select Service</option>${serviceOptions}</select>
+        <select class="form-select" id="storeKeywordServiceCategorySelect" name="serviceCategoryId" required><option value="">Select Service Category</option></select>
+        <textarea class="form-control" name="description" rows="2" placeholder="Description"></textarea>
+        <input class="form-control" name="priority" type="number" min="0" value="0" placeholder="Priority">
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <div class="form-actions"><button class="btn btn-primary" id="storeKeywordSubmitButton">Create Store Keyword</button><button class="btn btn-outline-secondary d-none" id="cancelStoreKeywordEditButton" type="button">Cancel</button></div>
+      </form>` + table(["Keyword", "Code", "Service", "Service Category", "Description", "Priority", "Status", ""], storeKeywordRows(storeKeywords.data || [])))}
+      ${panel("Stores", "Add, edit, map categories/clusters, set weekly hours, and manage images", `<form class="master-form stack" data-form="store" id="storeForm" novalidate>
+        <div class="alert d-none" id="storeFormAlert" role="alert"></div>
+        <input type="hidden" name="id">
+        <input type="hidden" id="storeImageUrls" name="imageUrls" value="[]">
+        <input class="form-control" name="name" placeholder="Store name" required>
+        <input class="form-control" name="code" placeholder="Store code auto generated if blank">
+        <textarea class="form-control" name="description" rows="2" placeholder="Description"></textarea>
+        <textarea class="form-control" name="address" rows="2" placeholder="Address"></textarea>
+        <input class="form-control" name="contact" placeholder="Contact number">
+        <input class="form-control" name="website" placeholder="Website">
+        <div class="master-form compact mb-0"><input class="form-control" name="longitude" placeholder="Longitude"><input class="form-control" name="latitude" placeholder="Latitude"><input class="form-control" name="priority" type="number" min="0" value="0" placeholder="Priority"></div>
+        ${uploadControl("storeImages")}
+        <div id="storeImageGallery" class="store-image-gallery"></div>
+        <label class="form-label">Service Categories ${checkboxPicker("serviceCategoryIds", activeItems(categories.data || []), [], "Search service categories")}</label>
+        <label class="form-label">Store Categories ${checkboxPicker("storeCategoryIds", activeItems(storeCategories.data || []), [], "Search store categories")}</label>
+        <label class="form-label">Store Keywords ${checkboxPicker("storeKeywordIds", activeItems(storeKeywords.data || []), [], "Search store keywords")}</label>
+        <div class="master-form compact mb-0">
+          <select class="form-select" id="storeClusterStateSelect" name="clusterStateId"><option value="">Select State</option>${optionRows(activeItems(cache.states))}</select>
+          <select class="form-select" id="storeClusterCitySelect" name="clusterCityId"><option value="">Select City</option></select>
+          <select class="form-select" id="storeClusterZoneSelect" name="clusterZoneId"><option value="">Select Zone</option></select>
+        </div>
+        <label class="form-label">Clusters <select class="form-select" name="clusterIds" multiple size="4">${clusterOptions}</select></label>
+        <div><p class="helper-text mb-2">Weekly schedule</p>${weeklyScheduleFields()}</div>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <div class="form-actions"><button class="btn btn-primary" id="storeSubmitButton" type="submit">Create Store</button><button class="btn btn-outline-secondary d-none" id="cancelStoreEditButton" type="button">Cancel</button></div>
+      </form>` + table(["Image", "Name", "Code", "Contact", "Address", "Longitude, Latitude", "Priority", "Status", ""], storeRows(stores.data || [])))}
+      ${panel("Service Category Stores", "Review legacy Service Category to Store mappings", table(["Category", "Store", "Status", ""], basicRows(categoryStores.data || [], [{ key: "categoryName" }, { key: "storeName" }, { key: "isActive", render: (x) => status(x.isActive ? "active" : "inactive") }], BASE_PATH+"/stores/category-stores")))}
+      ${panel("Store Category Mappings", "Review Store Category to Store mappings", table(["Store Category", "Store", "Status", ""], basicRows(storeCategoryMaps.data || [], [{ key: "storeCategoryName" }, { key: "storeName" }, { key: "isActive", render: (x) => status(x.isActive ? "active" : "inactive") }], BASE_PATH+"/stores/store-category-maps")))}
+    </div>`;
+  refreshStoreCategoryParentSelect();
+  refreshStoreKeywordParentSelect();
+  initializeStoreClusterCascade({});
+}
+
+async function loadVehicles() {
+  const [payload, states, cities, zones, clusters] = await Promise.all([
+    api(BASE_PATH+"/vehicle-master"),
+    safeApi(BASE_PATH+"/masters/states"),
+    safeApi(BASE_PATH+"/masters/cities"),
+    safeApi(BASE_PATH+"/masters/zones"),
+    safeApi(BASE_PATH+"/masters/clusters")
+  ]);
+  cache.vehicleMasters = payload.data || [];
+  cache.states = states.data || [];
+  cache.cities = cities.data || [];
+  cache.zones = zones.data || [];
+  cache.clusters = clusters.data || [];
+  $("#vehiclesSection").innerHTML =
+    pageTitleBlock("Vehicle Master", "Create and manage ZIGO vehicles, rental details, and pictures") +
+    `<div class="master-grid single-column">
+      ${panel("Vehicle Master", "Add, edit, view, activate/deactivate vehicles. Delete is Super Admin only.", `<form class="master-form stack" data-form="vehicle-master" id="vehicleMasterForm">
+        <input type="hidden" name="id">
+        <input type="hidden" id="vehiclePictureUrls" name="pictureUrls" value="[]">
+        <input class="form-control" name="vehicleName" placeholder="Vehicle Name" required>
+        <div class="master-form compact mb-0">
+          <select class="form-select" id="vehicleMasterStateSelect" name="stateId" required><option value="">Select State</option>${optionRows(activeItems(cache.states))}</select>
+          <select class="form-select" id="vehicleMasterCitySelect" name="cityId" required><option value="">Select City</option></select>
+          <select class="form-select" id="vehicleMasterZoneSelect" name="zoneId"><option value="">Select Zone</option></select>
+          <select class="form-select" id="vehicleMasterClusterSelect" name="clusterId" required><option value="">Select Cluster</option></select>
+        </div>
+        <input class="form-control" name="company" placeholder="Company">
+        <input class="form-control" name="vehicleNumber" placeholder="Vehicle Number">
+        <input class="form-control" name="model" placeholder="Model">
+        <select class="form-select" name="fuelType" required>
+          <option value="EV">EV</option>
+          <option value="Petrol">Petrol</option>
+          <option value="Diesel">Diesel</option>
+        </select>
+        <input class="form-control" name="color" placeholder="Color">
+        ${uploadControl("vehiclePictures")}
+        <div id="vehiclePictureGallery" class="store-image-gallery"></div>
+        <select class="form-select" id="vehicleOwnerType" name="ownerType" required>
+          <option value="Own">Own</option>
+          <option value="Rent">Rent</option>
+          <option value="ZIGO">ZIGO</option>
+        </select>
+        <div id="vehicleRentalFields" class="rental-fields d-none">
+          <input class="form-control" name="rentalCompanyName" placeholder="Rental Company Name">
+          <textarea class="form-control" name="rentalCompanyAddress" rows="2" placeholder="Rental Company Address"></textarea>
+          <input class="form-control" name="rentalCompanyNumber" placeholder="Rental Company Number">
+          <select class="form-select" name="rentSlab">
+            <option value="">Rent Slab</option>
+            <option value="Hourly">Hourly</option>
+            <option value="Daily">Daily</option>
+            <option value="Weekly">Weekly</option>
+            <option value="Monthly">Monthly</option>
+          </select>
+          <input class="form-control" name="rentCharges" type="number" min="0" step="0.01" placeholder="Rent Charges">
+        </div>
+        <div id="vehicleZigoFields" class="rental-fields d-none">
+          <select class="form-select" name="zigoSlab">
+            <option value="">ZIGO Slab</option>
+            <option value="Hourly">Hourly</option>
+            <option value="Daily">Daily</option>
+            <option value="Weekly">Weekly</option>
+            <option value="Monthly">Monthly</option>
+          </select>
+          <input class="form-control" name="zigoCharges" type="number" min="0" step="0.01" placeholder="ZIGO Charges">
+        </div>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+        <div class="form-actions"><button class="btn btn-primary" id="vehicleMasterSubmitButton">Create Vehicle</button><button class="btn btn-outline-secondary d-none" id="cancelVehicleMasterEditButton" type="button">Cancel</button></div>
+      </form>` + table(["Pictures", "Vehicle", "Cluster", "Company", "Number", "Model", "Fuel", "Color", "Owner / Rent", "Allot / Unallot", "Status", ""], vehicleMasterRows(cache.vehicleMasters)))}
+    </div>`;
+  initializeVehicleMasterClusterCascade({});
+  toggleVehicleRentalFields();
+}
+
+async function loadVerification() {
+  const [assistants, documents, vehicles, clusters] = await Promise.all([
+    api(BASE_PATH+"/verification/assistants"),
+    safeApi(BASE_PATH+"/verification/document-types"),
+    safeApi(BASE_PATH+"/verification/assistant-vehicles"),
+    safeApi(BASE_PATH+"/masters/clusters")
+  ]);
+  cache.assistants = assistants.data;
+  cache.clusters = clusters.data || [];
+  const assistantOptions = optionRows(cache.assistants, "assistantCode");
+  const clusterOptions = optionRows(activeItems(cache.clusters));
+  const documentRows = (documents.data || []).map((d) => `<tr><td>${escapeHtml(d.name)}</td><td>${escapeHtml(d.code)}</td><td>${escapeHtml(d.entityType)}</td></tr>`).join("");
+  const vehicleRows = (vehicles.data || []).map((v) => `<tr><td>${escapeHtml(v.assistantCode)}</td><td>${escapeHtml(v.registrationNumber)}</td><td>${escapeHtml(v.vehicleType)}</td><td>${status(v.verificationStatus)}</td></tr>`).join("");
+  const assistantRows = assistants.data
+    .map(
+      (a) => `<tr>
+        <td><b>${escapeHtml(a.displayName)}</b><div class="row-note">${escapeHtml(a.id)}</div></td>
+        <td>${escapeHtml(a.assistantCode)}</td>
+        <td>${escapeHtml(a.phone || a.email || "-")}</td>
+        <td>${escapeHtml(a.currentClusterName || "-")}</td>
+        <td>${status(a.verificationStatus)}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" data-action="approve-assistant" data-id="${a.id}" type="button">Approve</button>
+          <button class="btn btn-outline-danger btn-xs" data-action="reject-assistant" data-id="${a.id}" type="button">Reject</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+
+  $("#verificationSection").innerHTML =
+    pageTitleBlock("Assistant Verification", "Create assistants, map clusters, approve documents, and register vehicles") +
+    `<div class="master-grid">
+      ${panel("Create Assistant", "Creates user, assistant profile, and assistant role", `<form class="master-form stack" data-form="assistant">
+        <input class="form-control" name="displayName" placeholder="Assistant name" required>
+        <input class="form-control" name="assistantCode" placeholder="AST-001" required>
+        <input class="form-control" name="phone" placeholder="Phone">
+        <input class="form-control" name="email" placeholder="Email optional">
+        <input class="form-control" name="password" type="password" placeholder="Password" required>
+        <button class="btn btn-primary">Create Assistant</button>
+      </form>`)}
+      ${panel("Map Assistant To Cluster", "Sets primary operating cluster", `<form class="master-form stack" data-form="assistant-cluster">
+        <select class="form-select" name="assistantId" required><option value="">Assistant</option>${assistantOptions}</select>
+        <select class="form-select" name="clusterId" required><option value="">Cluster</option>${clusterOptions}</select>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isPrimary" checked> Primary cluster</label>
+        <button class="btn btn-primary">Map Cluster</button>
+      </form>`)}
+      ${panel("Assistant Document", "Attach document URL or verify a submitted document", `<form class="master-form stack" data-form="assistant-document">
+        <select class="form-select" name="assistantId" required><option value="">Assistant</option>${assistantOptions}</select>
+        <select class="form-select" name="documentTypeId" required><option value="">Document Type</option>${optionRows(documents.data || [])}</select>
+        <input class="form-control" name="originalName" placeholder="Original file name" required>
+        <input class="form-control" name="mimeType" placeholder="image/jpeg">
+        <input class="form-control" name="previewUrl" placeholder="Preview URL" required>
+        <button class="btn btn-primary">Attach Document</button>
+      </form>
+      <form class="master-form stack mt-3" data-form="document-verify">
+        <select class="form-select" name="assistantId" required><option value="">Assistant</option>${assistantOptions}</select>
+        <input class="form-control" name="documentId" placeholder="Assistant document UUID" required>
+        <select class="form-select" name="status">
+          <option value="verified">Verified</option>
+          <option value="pending_document">Pending Document</option>
+          <option value="invalid_document">Invalid Document</option>
+          <option value="rejected">Rejected</option>
+          <option value="verifying">Verifying</option>
+        </select>
+        <input class="form-control" name="remarks" placeholder="Verification remarks">
+        <button class="btn btn-primary">Verify Document</button>
+      </form>`)}
+      ${panel("Assistants", "Approve or reject assistant verification", table(["Name", "Code", "Contact", "Cluster", "Status", ""], assistantRows))}
+      ${panel("Vehicle", "Register assistant vehicle", `<form class="master-form stack" data-form="vehicle">
+        <select class="form-select" name="assistantId" required><option value="">Assistant</option>${assistantOptions}</select>
+        <input class="form-control" name="vehicleType" placeholder="Bike / Car" required>
+        <input class="form-control" name="registrationNumber" placeholder="Registration number" required>
+        <input class="form-control" name="make" placeholder="Make">
+        <input class="form-control" name="model" placeholder="Model">
+        <input class="form-control" name="color" placeholder="Color">
+        <button class="btn btn-primary">Save Vehicle</button>
+      </form>` + table(["Assistant", "Registration", "Type", "Status"], vehicleRows))}
+      ${panel("Document Types", "Configured verification documents", table(["Name", "Code", "Entity"], documentRows))}
+    </div>`;
+}
+
+async function loadModules() {
+  const payload = await api(BASE_PATH+"/access/modules");
+  cache.modules = payload.data;
+  const activeCount = payload.data.filter((module) => module.IsActive).length;
+  const rows = payload.data
+    .map(
+      (module) => `<tr>
+        <td><b>${escapeHtml(module.Name)}</b><div class="row-note">${escapeHtml(module.ModuleId)}</div></td>
+        <td>${escapeHtml(module.Description || "-")}</td>
+        <td>${status(module.IsActive ? "active" : "inactive")}</td>
+        <td>${formatDate(module.CreatedOn)}</td>
+        <td class="text-end">
+          <button class="btn btn-soft btn-xs" type="button" data-action="edit-module" data-id="${module.ModuleId}">Edit</button>
+          <button class="btn btn-soft btn-xs" type="button" data-action="toggle-module" data-id="${module.ModuleId}" data-active="${module.IsActive ? "false" : "true"}">${module.IsActive ? "Deactivate" : "Activate"}</button>
+          <button class="btn btn-outline-danger btn-xs" type="button" data-action="delete-module" data-id="${module.ModuleId}">Delete</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+
+  $("#modulesSection").innerHTML =
+    pageTitleBlock("Modules", "System control modules used by permissions") +
+    `<div class="module-layout">
+      <div class="module-form-card">
+        <div class="control-title"><div><p>Module</p><h3 id="moduleFormTitle">Add Module</h3></div><span>${activeCount}/${payload.data.length} active</span></div>
+        <form id="moduleForm" class="module-form" data-form="module">
+          <input type="hidden" name="ModuleId" />
+          <label class="form-label">Name <input class="form-control" name="Name" required /></label>
+          <label class="form-label">Description <textarea class="form-control" name="Description" rows="4"></textarea></label>
+          <label class="form-check form-switch module-switch"><input class="form-check-input" type="checkbox" name="IsActive" checked /><span class="form-check-label">Active module</span></label>
+          <div class="form-actions"><button class="btn btn-primary" type="submit">Save Module</button><button id="cancelModuleEditButton" class="btn btn-light d-none" type="button">Cancel Edit</button></div>
+        </form>
+      </div>
+      ${panel("Modules", "Create, edit, activate, deactivate, and soft delete", table(["Name", "Description", "Status", "Created", ""], rows))}
+    </div>`;
+}
+
+async function loadRoles() {
+  const [roles, permissions] = await Promise.all([api(BASE_PATH+"/access/roles"), safeApi(BASE_PATH+"/access/permissions")]);
+  cache.roles = roles.data;
+  const roleRows = roles.data.map((r) => `<tr><td><b>${escapeHtml(r.code)}</b></td><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.description || "-")}</td></tr>`).join("");
+  const permissionRows = (permissions.data || []).map((p) => `<tr><td>${escapeHtml(p.code)}</td><td>${escapeHtml(p.name)}</td><td>${escapeHtml(p.module)}</td></tr>`).join("");
+  $("#rolesSection").innerHTML =
+    pageTitleBlock("Roles & Permissions", "Create roles and view permission catalogue") +
+    `<div class="master-grid">
+      ${panel("Add Role", "Create admin, support, dispatcher, or custom roles", `<form class="master-form stack" data-form="role"><input class="form-control" name="code" placeholder="role_code" required><input class="form-control" name="name" placeholder="Role name" required><input class="form-control" name="description" placeholder="Description"><button class="btn btn-primary">Add Role</button></form>` + table(["Code", "Name", "Description"], roleRows))}
+      ${panel("Permissions", "Create permission master records", `<form class="master-form stack" data-form="permission"><input class="form-control" name="code" placeholder="users.view" required><input class="form-control" name="name" placeholder="View Users" required><input class="form-control" name="module" placeholder="users" required><input class="form-control" name="description" placeholder="Description"><button class="btn btn-primary">Add Permission</button></form>` + table(["Code", "Name", "Module"], permissionRows))}
+    </div>`;
+}
+
+async function loadUsers() {
+  cache.roles = (await safeApi(BASE_PATH+"/users/assignable-roles")).data || [];
+  if (!cache.documentTypes.length) cache.documentTypes = (await safeApi(BASE_PATH+"/verification/document-types")).data || [];
+  const filterForm = document.querySelector("#userFilterForm");
+  const params = filterForm ? new URLSearchParams(new FormData(filterForm)) : new URLSearchParams();
+  const query = params.toString();
+  const payload = await api(`/users${query ? `?${query}` : ""}`);
+  cache.users = payload.data || [];
+  const roleOptions = optionRows(cache.roles);
+  const addUserRoleOptions = optionRows(cache.roles);
+  const userRows = payload.data
+    .map(
+      (u) => {
+        const isSuperAdminRow = (u.roles || []).includes("super_admin");
+        return `<tr>
+        <td>${profileCircle(u.profilePictureUrl, u.displayName)}</td>
+        <td><b>${escapeHtml(u.displayName || "-")}</b><div class="row-note">${escapeHtml(u.id)}</div></td>
+        <td>
+          ${contactVerificationLine(u, "mobile", u.phone)}
+          ${contactVerificationLine(u, "email", u.email)}
+        </td>
+        <td>${u.hasPassword ? `xxxxxxx ${isSuperAdminUser() ? `<button class="icon-action-btn" data-action="share-user-password" data-id="${u.id}" type="button" title="Reset and share password to email" aria-label="Reset and share password to email">${iconSvg("share")}</button>` : ""}` : "-"}</td>
+        <td>${(u.roles || []).map((role) => status(role)).join(" ") || "-"}</td>
+        <td>${documentLinks(u.aadhaarDocuments || [])}</td>
+        <td>${documentLinks(u.panDocuments || [])}</td>
+        <td>${status(u.accountStatus)}</td>
+        <td class="text-end">
+          <button class="icon-action-btn" data-action="edit-user" data-id="${u.id}" type="button" title="Edit user" aria-label="Edit user">${iconSvg("edit")}</button>
+          ${isSuperAdminRow ? "" : `<button class="btn btn-soft btn-xs" data-action="activate-user" data-id="${u.id}" type="button">Activate</button>
+          <button class="btn btn-soft btn-xs" data-action="deactivate-user" data-id="${u.id}" type="button">Deactivate</button>`}
+        </td>
+        <td class="text-end">${isSuperAdminUser() && !isSuperAdminRow ? `<button class="btn btn-outline-danger btn-xs" data-action="delete-user" data-id="${u.id}" type="button">Delete</button>` : "-"}</td>
+      </tr>`;
+      }
+    )
+    .join("");
+
+  $("#usersSection").innerHTML =
+    pageTitleBlock("Users", "Create admins, support users, and operators") +
+    `<div class="module-layout">
+      <div class="module-form-card">
+        <div class="control-title"><div><p>User</p><h3 id="userFormTitle">Add User</h3></div><span>${payload.data.length} shown</span></div>
+        <form class="module-form" data-form="user" id="userForm">
+          <input class="form-control" name="displayName" placeholder="Name" required>
+          <input class="form-control" name="email" placeholder="Email optional">
+          <input class="form-control" name="phone" placeholder="Mobile Number">
+          <input class="form-control" name="password" type="password" placeholder="Password optional">
+          <label class="form-label">Profile Picture ${uploadControl("userProfilePicture")}</label>
+          <select class="form-select" name="roleId" id="userRoleSelect" required><option value="">Select Role</option>${addUserRoleOptions}<option value="__super_admin_display" data-display-only="true" class="d-none">Super Admin</option><option value="__admin_display" data-display-only="true" class="d-none">Admin</option></select>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+          <div class="verification-channel-group">
+            <span>Verify by</span>
+            <label class="form-check"><input class="form-check-input" type="checkbox" name="otpVerifyChannels" value="email"> Email</label>
+            <label class="form-check"><input class="form-check-input" type="checkbox" name="otpVerifyChannels" value="mobile"> Mobile Number</label>
+          </div>
+          <div id="assistantUserFields" class="assistant-user-fields d-none">
+            <select class="form-select" name="assistantStatus">
+              <option value="verifying">Verifying</option>
+              <option value="verified">Verified</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <p class="helper-text mb-2">Upload assistant documents as PDF or image.</p>
+            <div id="assistantCurrentDocuments"></div>
+            ${assistantDocumentUploadFields()}
+          </div>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="isLoginWithOtp"> Login with OTP</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="isLoginWithPassword" checked> Login with Password</label>
+          <div class="form-actions"><button class="btn btn-primary" id="userSubmitButton">Create User</button><button class="btn btn-outline-secondary d-none" id="cancelUserEditButton" type="button">Cancel</button></div>
+        </form>
+      </div>
+      ${panel("Users", "Filter, activate, deactivate, or soft delete", `<form id="userFilterForm" class="master-form stack mb-3">
+        <input class="form-control" name="name" placeholder="Search name">
+        <input class="form-control" name="email" placeholder="Search email">
+        <input class="form-control" name="mobileNo" placeholder="Search mobile">
+        <select class="form-select" name="role"><option value="">Any role</option>${roleOptions}</select>
+        <select class="form-select" name="status"><option value="">Any status</option><option value="active">Active</option><option value="inactive">Inactive</option><option value="verifying">Verifying</option><option value="verified">Verified</option><option value="pending_document">Pending Document</option><option value="invalid_document">Invalid Document</option><option value="rejected">Rejected</option></select>
+        <button class="btn btn-outline-primary">Apply Filters</button>
+      </form>` + table(["Profile", "Name / ID", "Mobile / Email", "Password", "Role", "Aadhaar Documents/Images", "PAN Documents/Images", "Status", "Edit", "Delete"], userRows) + `<p class="helper-text">${payload.pagination?.totalRecords ?? payload.data.length} total records</p>`)}
+    </div>`;
+  toggleAssistantUserFields();
+  updateOtpVerifyChannelState();
+}
+
+async function loadUserRoles() {
+  if (!cache.roles.length) cache.roles = (await safeApi(BASE_PATH+"/access/roles")).data || [];
+  const payload = await api(BASE_PATH+"/access/user-roles?pageSize=100");
+  const roleOptions = optionRows(cache.roles);
+  const rows = payload.data
+    .map(
+      (row) => `<tr>
+        <td><b>${escapeHtml(row.displayName || "-")}</b><div class="row-note">${escapeHtml(row.userId)}</div></td>
+        <td>${escapeHtml(row.email || "-")}</td>
+        <td>${escapeHtml(row.phone || "-")}</td>
+        <td>${escapeHtml(row.roleName)}<div class="row-note">${escapeHtml(row.roleCode)}</div></td>
+        <td>${status(row.isActive ? "active" : "inactive")}</td>
+        <td class="text-end"><button class="btn btn-outline-danger btn-xs" data-action="delete-user-role" data-id="${row.id}" type="button">Delete</button></td>
+      </tr>`
+    )
+    .join("");
+
+  $("#userRolesSection").innerHTML =
+    pageTitleBlock("User Roles", "Assign roles to users and review mappings") +
+    `<div class="module-layout">
+      <div class="module-form-card">
+        <div class="control-title"><div><p>Mapping</p><h3>Assign Role</h3></div><span>${payload.pagination?.totalRecords ?? payload.data.length} mappings</span></div>
+        <form class="module-form" data-form="user-role">
+          <input class="form-control" name="userId" placeholder="User UUID" required>
+          <select class="form-select" name="roleId" required><option value="">Select Role</option>${roleOptions}</select>
+          <input class="form-control" name="scopeType" placeholder="Scope type optional">
+          <input class="form-control" name="scopeId" placeholder="Scope UUID optional">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="isPrimary"> Primary role</label>
+          <button class="btn btn-primary">Assign Role</button>
+        </form>
+      </div>
+      ${panel("Mappings", "Admin cannot delete mappings or assign Super Admin", table(["User", "Email", "Mobile", "Role", "Status", ""], rows))}
+    </div>`;
+}
+
+async function loadSettings() {
+  const [mediaPayload, cartMixPayload, automationPayload, liveSyncPayload, otpPayload, servicesPayload] = await Promise.all([
+    api(BASE_PATH+"/settings/media-paths"),
+    api(BASE_PATH+"/settings/booking-cart-mix"),
+    api(BASE_PATH+"/settings/booking-type-automation"),
+    api(BASE_PATH+"/settings/booking-live-sync"),
+    api(BASE_PATH+"/settings/otp-providers"),
+    safeApi(BASE_PATH+"/masters/services")
+  ]);
+  const paths = mediaPayload.data || {};
+  const cartMix = cartMixPayload.data || { personalAssistantServiceId: null, allowedWithMode: "none", allowedServiceIds: [] };
+  const automation = automationPayload.data || { maxReachMinutes: 30, freeSoonMinutes: 15, averageReachMinutes: 20 };
+  const liveSync = liveSyncPayload.data || defaultBookingRealtimeSettings();
+  const otpProviders = otpPayload.data || { smsProviders: [], emailProviders: [] };
+  const activeSmsProvider = (otpProviders.smsProviders || []).find((provider) => provider.isActive !== false) || otpProviders.smsProviders?.[0] || null;
+  const activeEmailProvider = (otpProviders.emailProviders || []).find((provider) => provider.isActive !== false) || otpProviders.emailProviders?.[0] || null;
+  const services = activeItems(servicesPayload.data || []);
+  const personalAssistantServiceOptions = optionRows(services);
+  const selectedAllowedServiceIds = (cartMix.allowedServiceIds || []).filter((serviceId) => serviceId !== cartMix.personalAssistantServiceId);
+  const allowedServiceOptions = multiOptionRows(services.filter((service) => service.id !== cartMix.personalAssistantServiceId), selectedAllowedServiceIds);
+
+  $("#settingsSection").innerHTML =
+    pageTitleBlock("Settings", "Configure admin-wide booking and media settings") +
+    `<div class="module-layout">
+      <div class="module-form-card">
+        <div class="control-title"><div><p>Booking Master</p><h3>Personal Assistant Cart Mix</h3></div><span>Cart setting</span></div>
+        <form class="module-form" data-form="booking-cart-mix">
+          <label class="form-label">Personal Assistant Service
+            <select class="form-select" name="personalAssistantServiceId">
+              <option value="">Select Personal Assistant Service</option>
+              ${personalAssistantServiceOptions}
+            </select>
+          </label>
+          <label class="form-label">Allowed With
+            <select class="form-select" name="allowedWithMode">
+              <option value="none">Single service only</option>
+              <option value="all">All services</option>
+              <option value="selected">Selected services</option>
+            </select>
+          </label>
+          <label class="form-label">Selected Services
+            <select class="form-select" name="allowedServiceIds" multiple size="5">${allowedServiceOptions}</select>
+          </label>
+          <button class="btn btn-primary">Save Booking Setting</button>
+        </form>
+      </div>
+      <div class="module-form-card">
+        <div class="control-title"><div><p>Booking Type</p><h3>Instant Automation</h3></div><span>Global</span></div>
+        <form class="module-form" data-form="booking-type-automation">
+          <label class="form-label">Max Reach Minutes
+            <input class="form-control" name="maxReachMinutes" type="number" min="1" max="240" value="${escapeHtml(automation.maxReachMinutes || 30)}" required>
+          </label>
+          <label class="form-label">Free Soon Minutes
+            <input class="form-control" name="freeSoonMinutes" type="number" min="1" max="240" value="${escapeHtml(automation.freeSoonMinutes || 15)}" required>
+          </label>
+          <label class="form-label">Average Reach Minutes
+            <input class="form-control" name="averageReachMinutes" type="number" min="1" max="240" value="${escapeHtml(automation.averageReachMinutes || 20)}" required>
+          </label>
+          <button class="btn btn-primary">Save Automation</button>
+        </form>
+      </div>
+      <div class="module-form-card">
+        <div class="control-title"><div><p>Live Booking Sync</p><h3>Realtime Controls</h3></div><span>${escapeHtml(liveSync.isEnabled ? liveSync.transport.toUpperCase() : "OFF")}</span></div>
+        <form class="module-form" data-form="booking-live-sync">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="isEnabled" ${liveSync.isEnabled ? "checked" : ""}> Enable live booking sync</label>
+          <label class="form-label">Transport
+            <select class="form-select" name="transport">
+              <option value="sse">Server-Sent Events</option>
+              <option value="polling">Fallback Polling</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="refreshOnEvent" ${liveSync.refreshOnEvent ? "checked" : ""}> Refresh bookings when event arrives</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="showBell" ${liveSync.showBell ? "checked" : ""}> Show bell count</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="playSound" ${liveSync.playSound ? "checked" : ""}> Ring bell sound</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="showToast" ${liveSync.showToast ? "checked" : ""}> Show notification popup</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="fallbackPollingEnabled" ${liveSync.fallbackPollingEnabled ? "checked" : ""}> Allow polling mode when selected manually</label>
+          <label class="form-label">Fallback Polling Seconds
+            <input class="form-control" name="fallbackPollingSeconds" type="number" min="10" max="3600" value="${escapeHtml(liveSync.fallbackPollingSeconds || 60)}">
+          </label>
+          <label class="form-label">Reconnect Seconds
+            <input class="form-control" name="reconnectSeconds" type="number" min="2" max="300" value="${escapeHtml(liveSync.reconnectSeconds || 5)}">
+          </label>
+          <button class="btn btn-primary">Save Live Sync</button>
+        </form>
+      </div>
+      <div class="module-form-card">
+        <div class="control-title"><div><p>Media Storage</p><h3>Save Paths</h3></div><span>Path config only</span></div>
+        <form class="module-form" data-form="media-paths">
+          <label class="form-label">Image Save Path
+            <input class="form-control" name="imageSavePath" value="${escapeHtml(paths.imageSavePath || "")}" placeholder="/uploads/images" required>
+          </label>
+          <label class="form-label">Document Save Path
+            <input class="form-control" name="documentSavePath" value="${escapeHtml(paths.documentSavePath || "")}" placeholder="/uploads/documents" required>
+          </label>
+          <button class="btn btn-primary">Save Settings</button>
+        </form>
+      </div>
+      <div class="module-form-card otp-provider-card">
+        <div class="control-title"><div><p>Code</p><h3>SMS API Providers</h3></div><span>Dynamic</span></div>
+        <form class="module-form" data-form="otp-providers">
+          <label class="form-label">SMS Companies / APIs
+            <textarea class="form-control code-textarea" name="smsProviders" rows="15">${escapeHtml(JSON.stringify(otpProviders.smsProviders || [], null, 2))}</textarea>
+          </label>
+          <label class="form-label">Email SMTP Companies
+            <textarea class="form-control code-textarea" name="emailProviders" rows="12">${escapeHtml(JSON.stringify(otpProviders.emailProviders || [], null, 2))}</textarea>
+          </label>
+          <button class="btn btn-primary">Save Code Providers</button>
+        </form>
+      </div>
+      ${panel(
+        "Current Behavior",
+        "Existing URL-based document handling remains active",
+        `<div class="settings-summary">
+          <p><b>Image path:</b> ${escapeHtml(paths.imageSavePath || "-")}</p>
+          <p><b>Document path:</b> ${escapeHtml(paths.documentSavePath || "-")}</p>
+          <p><b>Personal Assistant cart mix:</b> ${escapeHtml(cartMix.allowedWithMode === "all" ? "Allowed with all services" : cartMix.allowedWithMode === "selected" ? `Allowed with ${selectedAllowedServiceIds.length} selected services` : "Single service only")}</p>
+          <p><b>Instant automation:</b> ${escapeHtml(`${automation.maxReachMinutes || 30} min reach, ${automation.freeSoonMinutes || 15} min free-soon, ${automation.averageReachMinutes || 20} min fallback`)}</p>
+          <p><b>Live booking sync:</b> ${escapeHtml(liveSync.isEnabled ? `${String(liveSync.transport || "sse").toUpperCase()} active, fallback ${liveSync.fallbackPollingEnabled ? `${liveSync.fallbackPollingSeconds}s` : "off"}` : "Disabled")}</p>
+          <p><b>Active SMS Code:</b> ${escapeHtml(activeSmsProvider?.name || activeSmsProvider?.id || "Not configured")}</p>
+          <p><b>Active Email Code:</b> ${escapeHtml(activeEmailProvider?.name || activeEmailProvider?.id || "Not configured")}</p>
+          <p class="helper-text">Assistant and vehicle document metadata will use the document path for new records. Existing records are not moved.</p>
+          <p class="helper-text">Verification code providers are selected by the first active item in each JSON list. Set one provider to <b>isActive: true</b> and others to false to switch companies instantly.</p>
+          <p class="helper-text">Last updated: ${escapeHtml(formatDate(paths.updatedAt))}</p>
+        </div>`
+      )}
+    </div>`;
+  const form = document.querySelector('[data-form="booking-cart-mix"]');
+  if (form) {
+    form.elements.personalAssistantServiceId.value = cartMix.personalAssistantServiceId || "";
+    form.elements.allowedWithMode.value = ["all", "selected"].includes(cartMix.allowedWithMode) ? cartMix.allowedWithMode : "none";
+    setSelectedOptions(form.elements.allowedServiceIds, selectedAllowedServiceIds);
+  }
+  const liveSyncForm = document.querySelector('[data-form="booking-live-sync"]');
+  if (liveSyncForm) liveSyncForm.elements.transport.value = liveSync.transport || "sse";
+}
+
+function bookingRealtimeStatusHtml(statusPayload = null) {
+  const settings = statusPayload?.settings || bookingRealtimeSettings || defaultBookingRealtimeSettings();
+  const stats = statusPayload?.stats || {};
+  return `<div class="settings-summary live-sync-status">
+    <p><b>Mode:</b> ${escapeHtml(bookingRealtimeStatus.mode || "stopped")}</p>
+    <p><b>Message:</b> ${escapeHtml(bookingRealtimeStatus.message || "-")}</p>
+    <p><b>Enabled:</b> ${escapeHtml(settings.isEnabled ? "Yes" : "No")}</p>
+    <p><b>Transport:</b> ${escapeHtml(String(settings.transport || "sse").toUpperCase())}</p>
+    <p><b>Connected Admin Panels:</b> ${escapeHtml(stats.connectedClients ?? "-")}</p>
+    <p><b>Total Events Published:</b> ${escapeHtml(stats.totalEventsPublished ?? "-")}</p>
+    <p><b>Connected At:</b> ${escapeHtml(formatDate(bookingRealtimeStatus.connectedAt))}</p>
+    <p><b>Last Event:</b> ${escapeHtml(bookingRealtimeStatus.lastEventType || stats.lastEvent?.type || "-")} ${bookingRealtimeStatus.lastEventAt ? `at ${escapeHtml(formatDate(bookingRealtimeStatus.lastEventAt))}` : ""}</p>
+    <p><b>Last Error:</b> ${escapeHtml(formatDate(bookingRealtimeStatus.lastErrorAt))}</p>
+    <p class="helper-text">No booking list API is called every second. In SSE mode, the browser waits on one open stream and refreshes only after a booking event arrives.</p>
+  </div>`;
+}
+
+function renderSystemControlStatus(statusPayload = null) {
+  const host = $("#bookingLiveSyncStatus");
+  if (!host) return;
+  host.innerHTML = bookingRealtimeStatusHtml(statusPayload);
+}
+
+function bookingRealtimePillHtml() {
+  const connected = bookingRealtimeStatus.mode === "connected";
+  const connecting = bookingRealtimeStatus.mode === "connecting";
+  const label = connected ? "SSE - Connected" : connecting ? "SSE - Connecting" : "SSE - Disconnected";
+  const tone = connected ? "connected" : connecting ? "connecting" : "disconnected";
+  return `<div id="bookingRealtimePill" class="booking-realtime-pill ${tone}" title="${escapeHtml(bookingRealtimeStatus.message || label)}">${escapeHtml(label)}</div>`;
+}
+
+function updateBookingRealtimePill() {
+  const pill = $("#bookingRealtimePill");
+  if (!pill) return;
+  const connected = bookingRealtimeStatus.mode === "connected";
+  const connecting = bookingRealtimeStatus.mode === "connecting";
+  const label = connected ? "SSE - Connected" : connecting ? "SSE - Connecting" : "SSE - Disconnected";
+  pill.className = `booking-realtime-pill ${connected ? "connected" : connecting ? "connecting" : "disconnected"}`;
+  pill.textContent = label;
+  pill.title = bookingRealtimeStatus.message || label;
+}
+
+async function checkBookingRealtimeCatchup() {
+  if (bookingRealtimeCatchupBusy || !bookingRealtimeLastSeenAt) return;
+  bookingRealtimeCatchupBusy = true;
+  try {
+    const payload = await api(`/operations/bookings/realtime/check?since=${encodeURIComponent(bookingRealtimeLastSeenAt)}`);
+    const data = payload.data || {};
+    bookingRealtimeLastSeenAt = data.serverTime || new Date().toISOString();
+    if (Number(data.changedCount || 0) > 0) {
+      bookingRealtimeStatus = {
+        ...bookingRealtimeStatus,
+        message: `${data.changedCount} booking change${Number(data.changedCount) === 1 ? "" : "s"} found after reconnect.`
+      };
+      updateBookingRealtimePill();
+      if (state.section === "bookings") await loadBookings(bookingActiveTab, { realtime: true });
+      else if (bookingRealtimeSettings?.showBell !== false) ringBookingBell(Number(data.changedCount || 1));
+      if (bookingRealtimeSettings?.showToast !== false) showAlert(bookingRealtimeStatus.message, "warning");
+    }
+  } catch {
+    bookingRealtimeStatus = { ...bookingRealtimeStatus, message: "Reconnect catch-up check failed." };
+    updateBookingRealtimePill();
+  } finally {
+    bookingRealtimeCatchupBusy = false;
+    renderSystemControlStatus();
+  }
+}
+
+async function loadSystemControl() {
+  const [liveSyncPayload, realtimePayload] = await Promise.all([
+    api(BASE_PATH+"/settings/booking-live-sync"),
+    safeApi(BASE_PATH+"/operations/bookings/realtime/status")
+  ]);
+  bookingRealtimeSettings = liveSyncPayload.data || defaultBookingRealtimeSettings();
+  const liveSync = bookingRealtimeSettings;
+  const realtime = realtimePayload.data || { settings: liveSync, stats: {} };
+  $("#systemControlSection").innerHTML = `<div class="module-layout">
+    <div class="module-form-card">
+      <div class="control-title"><div><p>System Control</p><h3>Booking Live Sync</h3></div><span>${escapeHtml(liveSync.isEnabled ? String(liveSync.transport || "sse").toUpperCase() : "OFF")}</span></div>
+      <form class="module-form" data-form="booking-live-sync">
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isEnabled" ${liveSync.isEnabled ? "checked" : ""}> Enable live booking sync</label>
+        <label class="form-label">Sync Transport
+          <select class="form-select" name="transport">
+            <option value="sse">Server-Sent Events - recommended</option>
+            <option value="polling">Fallback polling only</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="refreshOnEvent" ${liveSync.refreshOnEvent ? "checked" : ""}> Refresh booking rows only when event arrives</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="showBell" ${liveSync.showBell ? "checked" : ""}> Show global bell notification</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="playSound" ${liveSync.playSound ? "checked" : ""}> Play bell sound</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="showToast" ${liveSync.showToast ? "checked" : ""}> Show yellow popup notification</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="fallbackPollingEnabled" ${liveSync.fallbackPollingEnabled ? "checked" : ""}> Allow polling mode when selected manually</label>
+        <div class="master-form compact mb-0">
+          <label class="form-label">Fallback Polling Seconds
+            <input class="form-control" name="fallbackPollingSeconds" type="number" min="10" max="3600" value="${escapeHtml(liveSync.fallbackPollingSeconds || 60)}">
+          </label>
+          <label class="form-label">Reconnect Seconds
+            <input class="form-control" name="reconnectSeconds" type="number" min="2" max="300" value="${escapeHtml(liveSync.reconnectSeconds || 5)}">
+          </label>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary">Save Sync Control</button>
+          <button class="btn btn-soft" data-action="restart-booking-live-sync" type="button">Restart Sync</button>
+        </div>
+      </form>
+    </div>
+    ${panel("Live Status", "See current sync mode, connected clients, and last event", `<div id="bookingLiveSyncStatus">${bookingRealtimeStatusHtml(realtime)}</div>`)}
+  </div>`;
+  const form = document.querySelector('#systemControlSection [data-form="booking-live-sync"]');
+  if (form) form.elements.transport.value = liveSync.transport || "sse";
+}
+
+function bookingEngineHurdleRow(key, label, config = {}) {
+  const action = config.action || "warn_only";
+  return `<div class="booking-engine-hurdle-row">
+    <label class="form-check"><input class="form-check-input" type="checkbox" name="${key}Enabled" ${config.enabled !== false ? "checked" : ""}> ${escapeHtml(label)}</label>
+    <select class="form-select" name="${key}Action">
+      <option value="warn_only">Warn only</option>
+      <option value="auto_reassign">Auto reassign</option>
+      <option value="warn_then_reassign">Warn then reassign</option>
+      <option value="recalculate_supply">Recalculate supply</option>
+      <option value="manual_dispatch">Manual dispatch</option>
+    </select>
+    <input class="form-control" name="${key}EscalationMinutes" type="number" min="0" max="1440" value="${escapeHtml(config.escalationMinutes ?? 0)}" placeholder="Escalation mins">
+  </div>`.replace(`value="${escapeHtml(action)}"`, `value="${escapeHtml(action)}" selected`);
+}
+
+function setBookingEngineSelectValues(form, engine) {
+  if (!form) return;
+  form.elements.businessModel.value = engine.businessModel || "managed_supply";
+  const hurdles = engine.hurdles || {};
+  Object.entries({
+    assistantOffline: hurdles.assistantOffline,
+    previousTaskDelay: hurdles.previousTaskDelay,
+    customerExtension: hurdles.customerExtension,
+    waitingTimeExtend: hurdles.waitingTimeExtend,
+    vehicleIssue: hurdles.vehicleIssue,
+    locationIssue: hurdles.locationIssue
+  }).forEach(([key, config]) => {
+    if (form.elements[`${key}Action`]) form.elements[`${key}Action`].value = config?.action || "warn_only";
+  });
+}
+
+function collectBookingEngineHurdle(form, key) {
+  return {
+    enabled: Boolean(form.elements[`${key}Enabled`]?.checked),
+    action: form.elements[`${key}Action`]?.value || "warn_only",
+    escalationMinutes: Number(form.elements[`${key}EscalationMinutes`]?.value || 0)
+  };
+}
+
+function checkedAttr(value, fallback = true) {
+  return value ?? fallback ? "checked" : "";
+}
+
+async function loadBookingEngineSettings() {
+  const payload = await api(BASE_PATH+"/settings/booking-engine");
+  const engine = payload.data || {};
+  const hurdles = engine.hurdles || {};
+  const customerPortal = engine.customerPortal || {};
+  const assistantPortal = engine.assistantPortal || {};
+  const adminOverride = engine.adminOverride || {};
+  const communication = engine.communication || {};
+  $("#bookingEngineSettingsSection").innerHTML = `<div class="booking-engine-settings-grid">
+    <div class="module-form-card">
+      <div class="control-title"><div><p>Booking Engine</p><h3>Demand & Supply Control</h3></div><span>${escapeHtml(engine.isEnabled ? "ON" : "OFF")}</span></div>
+      <form class="module-form" data-form="booking-engine-settings">
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="isEnabled" ${engine.isEnabled !== false ? "checked" : ""}> Enable booking engine</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="orchestrationWorkerEnabled" ${engine.orchestrationWorkerEnabled !== false ? "checked" : ""}> Enable orchestration worker</label>
+        <label class="form-label">Business Model
+          <select class="form-select" name="businessModel">
+            <option value="managed_supply">Managed supply</option>
+            <option value="marketplace">Marketplace</option>
+            <option value="hybrid">Hybrid</option>
+          </select>
+        </label>
+        <div class="master-form compact mb-0">
+          <label class="form-label">Worker Interval Seconds<input class="form-control" name="orchestrationIntervalSeconds" type="number" min="5" max="3600" value="${escapeHtml(engine.orchestrationIntervalSeconds || 30)}"></label>
+          <label class="form-label">Batch Size<input class="form-control" name="batchSize" type="number" min="10" max="500" value="${escapeHtml(engine.batchSize || 100)}"></label>
+        </div>
+        <div class="control-title mt-3"><div><p>SLA</p><h3>Promise & Risk Windows</h3></div><span>Dynamic</span></div>
+        <div class="master-form compact mb-0">
+          <label class="form-label">Risk Lookahead Minutes<input class="form-control" name="riskLookaheadMinutes" type="number" min="1" max="1440" value="${escapeHtml(engine.riskLookaheadMinutes || 15)}"></label>
+          <label class="form-label">SLA Grace Minutes<input class="form-control" name="slaGraceMinutes" type="number" min="0" max="1440" value="${escapeHtml(engine.slaGraceMinutes ?? 10)}"></label>
+          <label class="form-label">Manual Assign Before Start<input class="form-control" name="manualAssignBeforeStartMinutes" type="number" min="0" max="1440" value="${escapeHtml(engine.manualAssignBeforeStartMinutes ?? 15)}"></label>
+        </div>
+        <div class="control-title mt-3"><div><p>Supply</p><h3>Capacity & Assignment</h3></div><span>Live</span></div>
+        <div class="master-form compact mb-0">
+          <label class="form-label">Auto Instant Max Wait<input class="form-control" name="instantAutoMaxWaitMinutes" type="number" min="1" max="240" value="${escapeHtml(engine.instantAutoMaxWaitMinutes || 45)}"></label>
+          <label class="form-label">Default Wait Window<input class="form-control" name="defaultWaitWindowMinutes" type="number" min="0" max="240" value="${escapeHtml(engine.defaultWaitWindowMinutes ?? 0)}"></label>
+          <label class="form-label">Capacity Hold Minutes<input class="form-control" name="capacityHoldMinutes" type="number" min="1" max="240" value="${escapeHtml(engine.capacityHoldMinutes || 10)}"></label>
+          <label class="form-label">Payment Hold Minutes<input class="form-control" name="paymentHoldMinutes" type="number" min="1" max="240" value="${escapeHtml(engine.paymentHoldMinutes || 10)}"></label>
+          <label class="form-label">Acceptance Timeout Sec<input class="form-control" name="assignmentAcceptanceTimeoutSeconds" type="number" min="10" max="3600" value="${escapeHtml(engine.assignmentAcceptanceTimeoutSeconds || 120)}"></label>
+          <label class="form-label">Auto Reassign After Sec<input class="form-control" name="autoReassignAfterSeconds" type="number" min="10" max="3600" value="${escapeHtml(engine.autoReassignAfterSeconds || 120)}"></label>
+        </div>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="autoReassignEnabled" ${engine.autoReassignEnabled !== false ? "checked" : ""}> Enable auto reassign</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="allowManualInstantWhenNoSupply" ${engine.allowManualInstantWhenNoSupply !== false ? "checked" : ""}> Allow manual instant when no supply</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="releaseCapacityOnPaymentFailure" ${engine.releaseCapacityOnPaymentFailure !== false ? "checked" : ""}> Release capacity on payment failure</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="releaseCapacityOnCancel" ${engine.releaseCapacityOnCancel !== false ? "checked" : ""}> Release capacity on cancel</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="notifyOnRiskChange" ${engine.notifyOnRiskChange !== false ? "checked" : ""}> Publish live risk notifications</label>
+        <div class="control-title mt-3"><div><p>Customer Link</p><h3>Customer Portal</h3></div><span>${escapeHtml(customerPortal.isEnabled !== false ? "Enabled" : "Off")}</span></div>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="customerPortalIsEnabled" ${checkedAttr(customerPortal.isEnabled)}> Enable customer share link</label>
+        <label class="form-label">Customer Link Path<input class="form-control" name="customerPortalShareUrlPath" value="${escapeHtml(customerPortal.shareUrlPath || "/customer")}"></label>
+        <div class="master-form compact mb-0">
+          <label class="form-label">Link Expiry Minutes<input class="form-control" name="customerPortalLinkExpiryMinutes" type="number" min="5" max="10080" value="${escapeHtml(customerPortal.linkExpiryMinutes || 1440)}"></label>
+        </div>
+        <div class="booking-engine-toggle-grid">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="customerPortalAllowSelfRegistration" ${checkedAttr(customerPortal.allowSelfRegistration)}> Register/Login</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="customerPortalLoginWithMobileOtp" ${checkedAttr(customerPortal.loginWithMobileOtp)}> Mobile OTP</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="customerPortalAllowBookService" ${checkedAttr(customerPortal.allowBookService)}> Book service</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="customerPortalAllowOnlinePayment" ${checkedAttr(customerPortal.allowOnlinePayment)}> Pay online</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="customerPortalAllowLiveTracking" ${checkedAttr(customerPortal.allowLiveTracking)}> Track live</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="customerPortalAllowTextUpdates" ${checkedAttr(customerPortal.allowTextUpdates)}> Text updates</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="customerPortalAllowImageUpdates" ${checkedAttr(customerPortal.allowImageUpdates)}> Image updates</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="customerPortalAllowVoiceUpdates" ${checkedAttr(customerPortal.allowVoiceUpdates)}> Voice updates</label>
+        </div>
+        <div class="control-title mt-3"><div><p>Assistant Link</p><h3>Assistant Portal</h3></div><span>${escapeHtml(assistantPortal.isEnabled !== false ? "Enabled" : "Off")}</span></div>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalIsEnabled" ${checkedAttr(assistantPortal.isEnabled)}> Enable assistant share link</label>
+        <label class="form-label">Assistant Link Path<input class="form-control" name="assistantPortalShareUrlPath" value="${escapeHtml(assistantPortal.shareUrlPath || BASE_PATH+"/assistant")}"></label>
+        <div class="booking-engine-toggle-grid">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalLoginWithMobileOtp" ${checkedAttr(assistantPortal.loginWithMobileOtp)}> Mobile OTP</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalLoginWithPassword" ${checkedAttr(assistantPortal.loginWithPassword)}> Password login</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalAllowGoOnline" ${checkedAttr(assistantPortal.allowGoOnline)}> Go online/offline</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalAllowTaskExecution" ${checkedAttr(assistantPortal.allowTaskExecution)}> Execute tasks</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalAllowTextUpdates" ${checkedAttr(assistantPortal.allowTextUpdates)}> Text updates</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalAllowImageUpdates" ${checkedAttr(assistantPortal.allowImageUpdates)}> Image updates</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalAllowVoiceUpdates" ${checkedAttr(assistantPortal.allowVoiceUpdates)}> Voice updates</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalAllowDailyReport" ${checkedAttr(assistantPortal.allowDailyReport)}> Daily reports</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="assistantPortalRequireClusterVehicleDocuments" ${checkedAttr(assistantPortal.requireClusterVehicleDocuments)}> Require cluster/vehicle/docs</label>
+        </div>
+        <div class="control-title mt-3"><div><p>Admin Override</p><h3>Operate On Behalf</h3></div><span>Fallback control</span></div>
+        <div class="booking-engine-toggle-grid">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="adminCanBookForCustomer" ${checkedAttr(adminOverride.canBookForCustomer)}> Book for customer</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="adminCanAssignForAssistant" ${checkedAttr(adminOverride.canAssignForAssistant)}> Assign for assistant</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="adminCanRespondForCustomer" ${checkedAttr(adminOverride.canRespondForCustomer)}> Respond for customer</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="adminCanRespondForAssistant" ${checkedAttr(adminOverride.canRespondForAssistant)}> Respond for assistant</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="adminCanForceCompleteTask" ${checkedAttr(adminOverride.canForceCompleteTask)}> Force complete</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="adminCanSwitchInstantToSchedule" ${checkedAttr(adminOverride.canSwitchInstantToSchedule)}> Switch instant to schedule</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="adminOverrideReasonRequired" ${checkedAttr(adminOverride.overrideReasonRequired)}> Require reason</label>
+        </div>
+        <label class="form-label">Auto escalate no-response minutes<input class="form-control" name="adminAutoEscalateNoResponseMinutes" type="number" min="1" max="1440" value="${escapeHtml(adminOverride.autoEscalateNoResponseMinutes || 5)}"></label>
+        <div class="control-title mt-3"><div><p>Realtime Response</p><h3>Customer, Assistant & Admin Updates</h3></div><span>Timeline</span></div>
+        <div class="booking-engine-toggle-grid">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="communicationRealtimeUpdatesEnabled" ${checkedAttr(communication.realtimeUpdatesEnabled)}> Realtime updates</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="communicationCustomerNotifyOnAssignment" ${checkedAttr(communication.customerNotifyOnAssignment)}> Customer assignment alert</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="communicationCustomerNotifyOnDelay" ${checkedAttr(communication.customerNotifyOnDelay)}> Customer delay alert</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="communicationAssistantNotifyOnAssignment" ${checkedAttr(communication.assistantNotifyOnAssignment)}> Assistant assignment alert</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="communicationAdminNotifyOnNoResponse" ${checkedAttr(communication.adminNotifyOnNoResponse)}> Admin no-response alert</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="communicationAllowCustomerAssistantChat" ${checkedAttr(communication.allowCustomerAssistantChat)}> Customer-assistant chat</label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="communicationStoreTaskMediaInTimeline" ${checkedAttr(communication.storeTaskMediaInTimeline)}> Store task media timeline</label>
+        </div>
+        <div class="control-title mt-3"><div><p>Hurdles</p><h3>Real-World Complications</h3></div><span>Action policy</span></div>
+        <div class="booking-engine-hurdles">
+          ${bookingEngineHurdleRow("assistantOffline", "Assistant offline", hurdles.assistantOffline)}
+          ${bookingEngineHurdleRow("previousTaskDelay", "Previous task delay", hurdles.previousTaskDelay)}
+          ${bookingEngineHurdleRow("customerExtension", "Customer extends task", hurdles.customerExtension)}
+          ${bookingEngineHurdleRow("waitingTimeExtend", "Waiting time extends", hurdles.waitingTimeExtend)}
+          ${bookingEngineHurdleRow("vehicleIssue", "Vehicle issue", hurdles.vehicleIssue)}
+          ${bookingEngineHurdleRow("locationIssue", "Location issue", hurdles.locationIssue)}
+        </div>
+        <div class="form-actions"><button class="btn btn-primary">Save Booking Engine Settings</button></div>
+      </form>
+    </div>
+    ${panel("Engine Meaning", "These controls drive booking promises, supply reservation, and live risk signals", `<div class="settings-summary">
+      <p><b>Engine:</b> ${escapeHtml(engine.isEnabled ? "Active" : "Disabled")}</p>
+      <p><b>Worker:</b> ${escapeHtml(engine.orchestrationWorkerEnabled ? `Runs every ${engine.orchestrationIntervalSeconds || 30}s` : "Stopped")}</p>
+      <p><b>Instant auto cap:</b> Auto instant can be blocked after ${escapeHtml(engine.instantAutoMaxWaitMinutes || 45)} mins. Manual instant can stay open for dispatch control.</p>
+      <p><b>SLA risk:</b> Bookings become at-risk ${escapeHtml(engine.riskLookaheadMinutes || 15)} mins before promised start and delayed after SLA grace.</p>
+      <p><b>Capacity:</b> Assistant capacity is held during payment/assignment windows and released by cancel/failure rules.</p>
+      <p><b>Customer link:</b> ${escapeHtml(customerPortal.isEnabled !== false ? `${customerPortal.shareUrlPath || "/customer"} active` : "Disabled")} for login/register, booking, payment, and tracking.</p>
+      <p><b>Assistant link:</b> ${escapeHtml(assistantPortal.isEnabled !== false ? `${assistantPortal.shareUrlPath || BASE_PATH+"/assistant"} active` : "Disabled")} for login, online status, task execution, updates, and reports.</p>
+      <p><b>Admin override:</b> Admin can act on behalf of users when response is delayed, with reason ${escapeHtml(adminOverride.overrideReasonRequired !== false ? "required" : "optional")}.</p>
+      <p><b>Hurdles:</b> Real-world issues can warn, recalculate supply, request manual dispatch, or trigger reassignment.</p>
+      <p class="helper-text">Changing these values does not require backend code changes. The orchestration worker reads them on each cycle.</p>
+      <p class="helper-text">Last updated: ${escapeHtml(formatDate(engine.updatedAt))}</p>
+    </div>`)}
+  </div>`;
+  setBookingEngineSelectValues(document.querySelector('[data-form="booking-engine-settings"]'), engine);
+}
+
+const loaders = {
+  dashboard: loadDashboard,
+  operations: loadOperations,
+  bookings: loadBookings,
+  bookingMaster: loadBookingMaster,
+  customers: loadCustomers,
+  customerAddresses: loadCustomerAddressesScreen,
+  masters: loadMasters,
+  locations: loadLocations,
+  services: loadServices,
+  categories: loadCategories,
+  categoryPrice: loadCategoryPrice,
+  bookingEngine: loadBookingEngine,
+  clusterServices: loadClusterServices,
+  bookingTypes: loadBookingTypes,
+  surgeMaster: loadSurgeMaster,
+  priceMaster: loadPriceMaster,
+  stores: loadStores,
+  assistant: loadAssistant,
+  vehicles: loadVehicles,
+  verification: loadVerification,
+  users: loadUsers,
+  userRoles: loadUserRoles,
+  systemControl: loadSystemControl,
+  bookingEngineSettings: loadBookingEngineSettings,
+  roles: loadRoles,
+  modules: loadModules,
+  settings: loadSettings
+};
+
+const titles = {
+  dashboard: "Dashboard",
+  operations: "Operations",
+  bookings: "Bookings",
+  bookingMaster: "Booking Master",
+  customers: "Customers",
+  customerAddresses: "Customer Addresses",
+  masters: "Masters",
+  locations: "Locations",
+  services: "Services",
+  categories: "Categories",
+  categoryPrice: "Category Price",
+  bookingEngine: "Booking Engine",
+  clusterServices: "Cluster Services",
+  bookingTypes: "Booking Type Master",
+  surgeMaster: "Surge Master",
+  priceMaster: "Price Master",
+  stores: "Stores",
+  assistant: "Assistant",
+  vehicles: "Vehicle Master",
+  verification: "Verification",
+  users: "Users",
+  userRoles: "User Roles",
+  systemControl: "System Control",
+  bookingEngineSettings: "Booking Engine Settings",
+  roles: "Roles",
+  modules: "Modules",
+  settings: "Settings"
+};
+
+function setNavGroupOpen(group, isOpen) {
+  if (!group) return;
+  group.classList.toggle("open", Boolean(isOpen));
+  const toggle = group.querySelector("[data-nav-toggle]");
+  if (toggle) toggle.setAttribute("aria-expanded", String(Boolean(isOpen)));
+  const chevron = group.querySelector(".nav-chevron");
+  if (chevron) chevron.textContent = isOpen ? "▴" : "▾";
+}
+
+async function showSection(section) {
+  clearAlert();
+  const nextSection = loaders[section] && $(`#${section}Section`) ? section : "dashboard";
+  state.section = nextSection;
+  pageTitle.textContent = titles[nextSection] || nextSection;
+  document.querySelectorAll(".page-section").forEach((sectionEl) => sectionEl.classList.add("d-none"));
+  $(`#${nextSection}Section`).classList.remove("d-none");
+  document.querySelectorAll("[data-section]").forEach((button) => button.classList.toggle("active", button.dataset.section === nextSection));
+  document.querySelectorAll(".nav-collapsible").forEach((group) => {
+    if (group.querySelector(`[data-section="${CSS.escape(nextSection)}"]`)) setNavGroupOpen(group, true);
+  });
+  await loaders[nextSection]();
+  $("#bookingMasterAssistantWidget")?.classList.toggle("d-none", nextSection !== "bookingMaster");
+  startBookingRealtime();
+  updateBookingBell();
+}
+
+function saveSession(data) {
+  state.token = data.token;
+  state.refreshToken = data.refreshToken || state.refreshToken || "";
+  state.user = data.user;
+  state.roles = data.roles || [];
+  localStorage.setItem("zigoAdminToken", data.token);
+  if (state.refreshToken) localStorage.setItem("zigoAdminRefreshToken", state.refreshToken);
+  localStorage.setItem("zigoAdminUser", JSON.stringify(data.user));
+  localStorage.setItem("zigoAdminRoles", JSON.stringify(state.roles));
+}
+
+async function refreshSignedInUser() {
+  if (!state.token) return;
+  const result = await api(BASE_PATH+"/users/me");
+  syncSignedInUser(result.data);
+}
+
+function resetModuleForm() {
+  editingModuleId = null;
+  const form = $("#moduleForm");
+  if (!form) return;
+  form.reset();
+  form.elements.IsActive.checked = true;
+  form.elements.ModuleId.value = "";
+  $("#moduleFormTitle").textContent = "Add Module";
+  $("#cancelModuleEditButton").classList.add("d-none");
+}
+
+function resetStateForm() {
+  editingStateId = null;
+  const form = $("#stateForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.countryName.value = "India";
+  form.elements.isActive.checked = true;
+  $("#stateSubmitButton").textContent = "Create State";
+  $("#cancelStateEditButton").classList.add("d-none");
+}
+
+function resetCityForm() {
+  editingCityId = null;
+  const form = $("#cityForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.isActive.checked = true;
+  $("#citySubmitButton").textContent = "Create City";
+  $("#cancelCityEditButton").classList.add("d-none");
+}
+
+function resetZoneForm() {
+  editingZoneId = null;
+  const form = $("#zoneForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.isActive.checked = true;
+  refreshZoneFormCityOptions();
+  $("#zoneSubmitButton").textContent = "Create Zone";
+  $("#cancelZoneEditButton").classList.add("d-none");
+}
+
+function resetClusterForm() {
+  editingClusterId = null;
+  const form = $("#clusterForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.priority.value = "0";
+  form.elements.pinPriority.value = "0";
+  form.elements.isPinned.checked = false;
+  form.elements.isBookingEnabled.checked = false;
+  refreshClusterFormLocationCascade("state");
+  $("#clusterSubmitButton").textContent = "Create Cluster";
+  $("#cancelClusterEditButton").classList.add("d-none");
+}
+
+function resetServiceForm() {
+  editingServiceId = null;
+  const form = $("#serviceForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.imageUrl.value = "";
+  form.elements.locationMode.value = "current";
+  form.elements.maxLocationsLimit.value = "1";
+  form.elements.priority.value = "0";
+  form.elements.isActive.checked = true;
+  form.elements.isEnabled.checked = true;
+  form.elements.isRecommended.checked = false;
+  $("#serviceSubmitButton").textContent = "Create Service";
+  $("#cancelServiceEditButton").classList.add("d-none");
+  const preview = form.querySelector(".upload-preview");
+  if (preview) preview.innerHTML = "";
+  toggleServiceLocationLimit(form);
+}
+
+function toggleServiceLocationLimit(form = $("#serviceForm")) {
+  if (!form) return;
+  const isMulti = (form.elements.locationMode?.value || "current") === "multi";
+  const limitWrap = form.querySelector("[data-service-location-limit]");
+  if (limitWrap) limitWrap.classList.toggle("d-none", !isMulti);
+  if (form.elements.maxLocationsLimit) {
+    form.elements.maxLocationsLimit.disabled = !isMulti;
+    if (!isMulti) form.elements.maxLocationsLimit.value = "1";
+  }
+}
+
+function resetServiceCategoryForm() {
+  editingCategoryId = null;
+  const form = $("#serviceCategoryForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.imageUrl.value = "";
+  form.elements.priority.value = "0";
+  form.elements.isActive.checked = true;
+  form.elements.isEnabled.checked = true;
+  form.elements.isRecommended.checked = false;
+  $("#serviceCategorySubmitButton").textContent = "Create Category";
+  $("#cancelServiceCategoryEditButton").classList.add("d-none");
+  const preview = form.querySelector(".upload-preview");
+  if (preview) preview.innerHTML = "";
+}
+
+function resetCategoryMasterForm() {
+  editingCategoryMasterId = null;
+  const form = $("#categoryMasterForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.imageUrl.value = "";
+  form.elements.priority.value = "0";
+  form.elements.locationMode.value = "current";
+  form.elements.maxLocationsLimit.value = "1";
+  form.elements.addWithOtherCategory.checked = false;
+  form.elements.isRecommended.checked = false;
+  form.elements.isEnabled.checked = true;
+  form.elements.isActive.checked = true;
+  $("#categoryMasterSubmitButton").textContent = "Create Category";
+  $("#cancelCategoryMasterEditButton").classList.add("d-none");
+  const preview = form.querySelector(".upload-preview");
+  if (preview) preview.innerHTML = "";
+  toggleCategoryMasterLocationLimit(form);
+  renderCategoryMasterGuidance(form);
+}
+
+function toggleCategoryMasterLocationLimit(form = $("#categoryMasterForm")) {
+  if (!form) return;
+  const isMulti = (form.elements.locationMode?.value || "current") === "multi";
+  const limitWrap = form.querySelector("[data-category-location-limit]");
+  if (limitWrap) limitWrap.classList.toggle("d-none", !isMulti);
+  if (form.elements.maxLocationsLimit) {
+    form.elements.maxLocationsLimit.disabled = !isMulti;
+    if (!isMulti) form.elements.maxLocationsLimit.value = "1";
+  }
+}
+
+function resetBookingTypeForm() {
+  editingBookingTypeId = null;
+  const form = $("#bookingTypeForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.bookingType.value = "instant";
+  if (form.elements.waitWindowMinutes) form.elements.waitWindowMinutes.value = "0";
+  if (form.elements.waitWindowNote) form.elements.waitWindowNote.value = "";
+  form.elements.maxAdvanceDays.value = "1";
+  form.elements.timeSlots.value = "";
+  if (form.elements.timeCategories) form.elements.timeCategories.value = "[]";
+  if (form.elements.activeTimeCategoryId) form.elements.activeTimeCategoryId.value = "";
+  if (form.elements.timeCategoryName) form.elements.timeCategoryName.value = "";
+  form.elements.isDefault.checked = false;
+  form.elements.isActive.checked = true;
+  $("#bookingTypeSubmitButton").textContent = "Save Booking Type";
+  $("#cancelBookingTypeEditButton").classList.add("d-none");
+  toggleBookingTypeScheduleFields(form);
+}
+
+function resetSurgeRuleForm() {
+  editingSurgeRuleId = null;
+  const form = $("#surgeRuleForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  if (form.elements.scheduleMode) form.elements.scheduleMode.value = "weekly";
+  if (form.elements.surgeStrategy) form.elements.surgeStrategy.value = "positive_flat";
+  if (form.elements.adjustmentValue) form.elements.adjustmentValue.value = 0;
+  if (form.elements.priority) form.elements.priority.value = 0;
+  form.elements.selectedDates.value = "";
+  setSurgeDayTimes({}, form);
+  setSurgeDateTimes([], form);
+  if (form.elements.scopeType) form.elements.scopeType.value = "all";
+  if (form.elements.serviceId) form.elements.serviceId.value = "";
+  refreshSurgeRuleLocationCascade("scope");
+  refreshSurgeRuleTargetCascade("service");
+  updateSurgeX(form);
+  toggleSurgeScheduleSections(form);
+  form.elements.isActive.checked = true;
+  $("#surgeRuleSubmitButton").textContent = "Create Surge Rule";
+  $("#cancelSurgeRuleEditButton").classList.add("d-none");
+}
+
+function resetStoreCategoryForm() {
+  editingStoreCategoryId = null;
+  const form = $("#storeCategoryForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.imageUrl.value = "";
+  form.elements.priority.value = "0";
+  form.elements.isActive.checked = true;
+  refreshStoreCategoryParentSelect();
+  $("#storeCategorySubmitButton").textContent = "Create Store Category";
+  $("#cancelStoreCategoryEditButton").classList.add("d-none");
+  const preview = form.querySelector(".upload-preview");
+  if (preview) preview.innerHTML = "";
+}
+
+function refreshStoreCategoryParentSelect(selectedCategoryId = "") {
+  const form = $("#storeCategoryForm");
+  if (!form) return;
+  const serviceId = form.elements.serviceId?.value || "";
+  const categories = activeItems(cache.categories || []).filter((category) => !serviceId || category.serviceId === serviceId);
+  form.elements.serviceCategoryId.innerHTML = `<option value="">Select Service Category</option>${optionRows(categories)}`;
+  form.elements.serviceCategoryId.value = selectedCategoryId || "";
+}
+
+function resetStoreKeywordForm() {
+  editingStoreKeywordId = null;
+  const form = $("#storeKeywordForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.priority.value = "0";
+  form.elements.isActive.checked = true;
+  refreshStoreKeywordParentSelect();
+  $("#storeKeywordSubmitButton").textContent = "Create Store Keyword";
+  $("#cancelStoreKeywordEditButton").classList.add("d-none");
+}
+
+function refreshStoreKeywordParentSelect(selectedCategoryId = "") {
+  const form = $("#storeKeywordForm");
+  if (!form) return;
+  const serviceId = form.elements.serviceId?.value || "";
+  const categories = activeItems(cache.categories || []).filter((category) => !serviceId || category.serviceId === serviceId);
+  form.elements.serviceCategoryId.innerHTML = `<option value="">Select Service Category</option>${optionRows(categories)}`;
+  form.elements.serviceCategoryId.value = selectedCategoryId || "";
+}
+
+function storeClusterOptions(stateId = "", cityId = "", zoneId = "") {
+  return activeClusters(cache.clusters || []).filter((cluster) => {
+    const clusterCity = cache.cities.find((city) => city.id === cluster.cityId);
+    const stateOk = !stateId || clusterCity?.stateId === stateId;
+    const cityOk = !cityId || cluster.cityId === cityId;
+    const zoneOk = !zoneId || cluster.zoneId === zoneId;
+    return stateOk && cityOk && zoneOk;
+  });
+}
+
+function refreshStoreClusterCascade(level = "state", selectedClusterIds = null) {
+  const form = $("#storeForm");
+  if (!form) return;
+  const stateId = form.elements.clusterStateId?.value || "";
+  const cityId = form.elements.clusterCityId?.value || "";
+  const zoneId = form.elements.clusterZoneId?.value || "";
+  const selected = selectedClusterIds || selectedValues(form.elements.clusterIds);
+  const cities = activeItems(cache.cities || []).filter((city) => !stateId || city.stateId === stateId);
+  const zones = activeItems(cache.zones || []).filter((zone) => !cityId || zone.cityId === cityId);
+  if (level === "state") {
+    setSelectOptions(form.elements.clusterCityId, "Select City", cities);
+    setSelectOptions(form.elements.clusterZoneId, "Select Zone", []);
+    setMultiSelectOptions(form.elements.clusterIds, storeClusterOptions(stateId, "", ""), selected);
+  }
+  if (level === "city") {
+    setSelectOptions(form.elements.clusterZoneId, "Select Zone", zones);
+    setMultiSelectOptions(form.elements.clusterIds, storeClusterOptions(stateId, cityId, ""), selected);
+  }
+  if (level === "zone") {
+    setMultiSelectOptions(form.elements.clusterIds, storeClusterOptions(stateId, cityId, zoneId), selected);
+  }
+}
+
+function initializeStoreClusterCascade(store = {}) {
+  const form = $("#storeForm");
+  if (!form) return;
+  const clusterIds = store.clusterIds || [];
+  const firstCluster = cache.clusters.find((cluster) => clusterIds.includes(cluster.id));
+  const city = cache.cities.find((item) => item.id === firstCluster?.cityId);
+  const stateId = city?.stateId || "";
+  const cityId = city?.id || "";
+  const zoneId = firstCluster?.zoneId || "";
+  form.elements.clusterStateId.value = stateId;
+  setSelectOptions(form.elements.clusterCityId, "Select City", activeItems(cache.cities || []).filter((item) => !stateId || item.stateId === stateId), cityId);
+  setSelectOptions(form.elements.clusterZoneId, "Select Zone", activeItems(cache.zones || []).filter((item) => !cityId || item.cityId === cityId), zoneId);
+  setMultiSelectOptions(form.elements.clusterIds, storeClusterOptions(stateId, cityId, zoneId), clusterIds);
+}
+
+function setStoreFormAlert(message = "", tone = "danger") {
+  const alert = $("#storeFormAlert");
+  if (!alert) return;
+  alert.className = `alert alert-${tone}${message ? "" : " d-none"}`;
+  alert.textContent = message;
+}
+
+function parseStoreImageUrls(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function resetStoreForm() {
+  editingStoreId = null;
+  const form = $("#storeForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.priority.value = "0";
+  form.elements.isActive.checked = true;
+  $("#storeImageUrls").value = "[]";
+  $("#storeImageGallery").innerHTML = "";
+  refreshPicker("serviceCategoryIds");
+  refreshPicker("storeCategoryIds");
+  refreshPicker("storeKeywordIds");
+  initializeStoreClusterCascade({});
+  setStoreFormAlert();
+  $("#storeSubmitButton").textContent = "Create Store";
+  $("#storeSubmitButton").disabled = false;
+  $("#cancelStoreEditButton").classList.add("d-none");
+}
+
+function normalizedVehicleOwnerType(value) {
+  if (value === "Self") return "Own";
+  if (value === "Rented") return "Rent";
+  return value || "Own";
+}
+
+function toggleVehicleRentalFields() {
+  const form = $("#vehicleMasterForm");
+  if (!form) return;
+  const ownerType = normalizedVehicleOwnerType(form.elements.ownerType.value);
+  $("#vehicleRentalFields")?.classList.toggle("d-none", ownerType !== "Rent");
+  $("#vehicleZigoFields")?.classList.toggle("d-none", ownerType !== "ZIGO");
+}
+
+function resetVehicleMasterForm() {
+  editingVehicleMasterId = null;
+  const form = $("#vehicleMasterForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  initializeVehicleMasterClusterCascade({});
+  form.elements.fuelType.value = "EV";
+  form.elements.ownerType.value = "Own";
+  form.elements.rentSlab.value = "";
+  form.elements.rentCharges.value = "";
+  form.elements.zigoSlab.value = "";
+  form.elements.zigoCharges.value = "";
+  form.elements.pictureUrls.value = "[]";
+  form.elements.isActive.checked = true;
+  $("#vehiclePictureGallery").innerHTML = "";
+  $("#vehicleMasterSubmitButton").textContent = "Create Vehicle";
+  $("#cancelVehicleMasterEditButton").classList.add("d-none");
+  toggleVehicleRentalFields();
+  const preview = form.querySelector(".upload-preview");
+  if (preview) preview.innerHTML = "";
+}
+
+function resetUserForm() {
+  editingUserId = null;
+  const form = $("#userForm");
+  if (!form) return;
+  form.reset();
+  form.elements.roleId.disabled = false;
+  form.elements.isActive.disabled = false;
+  form.elements.isLoginWithOtp.disabled = false;
+  form.elements.isLoginWithPassword.disabled = false;
+  form.elements.isActive.checked = true;
+  form.elements.isLoginWithPassword.checked = true;
+  form.elements.imageUrl.value = "";
+  form.querySelectorAll('input[name="otpVerifyChannels"]').forEach((input) => {
+    input.checked = false;
+  });
+  updateOtpVerifyChannelState(form);
+  assistantUserDocumentFields.forEach((field) => {
+    if (form.elements[field.key]) form.elements[field.key].value = "";
+  });
+  form.querySelectorAll(".upload-preview").forEach((preview) => {
+    preview.innerHTML = "";
+  });
+  setCurrentAssistantDocumentSummary(null);
+  toggleAssistantUserFields();
+  $("#userFormTitle").textContent = "Add User";
+  $("#userSubmitButton").textContent = "Create User";
+  $("#cancelUserEditButton").classList.add("d-none");
+}
+
+function showAdmin() {
+  $("#loginView").classList.add("d-none");
+  $("#adminView").classList.remove("d-none");
+  renderSignedInProfile();
+  startBookingRealtime();
+}
+
+$("#loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    $("#loginAlert").classList.add("d-none");
+    const payload = await api(BASE_PATH+"/auth/login", { method: "POST", body: JSON.stringify(formObject(event.currentTarget)) });
+    saveSession(payload.data);
+    showAdmin();
+    await showSection("dashboard");
+  } catch (error) {
+    $("#loginAlert").textContent = error.message;
+    $("#loginAlert").classList.remove("d-none");
+  }
+});
+
+document.addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (form instanceof HTMLFormElement && form.id === "adminBookingForm") {
+    event.preventDefault();
+    try {
+      const data = formObject(form);
+      await api(BASE_PATH+"/operations/bookings", {
+        method: "POST",
+        body: JSON.stringify({
+          customerId: data.customerId,
+          clusterId: data.clusterId,
+          categoryId: data.categoryId || null,
+          address: data.address,
+          latitude: data.latitude ? Number(data.latitude) : null,
+          longitude: data.longitude ? Number(data.longitude) : null,
+          estimatedAmountPaise: Number(data.estimatedAmountPaise || 0),
+          durationMinutes: Number(data.durationMinutes || 30),
+          notes: data.notes || null
+        })
+      });
+      $("#bookingModal").classList.add("d-none");
+      await loadBookings("pending_assign");
+    } catch (error) {
+      $("#bookingModalAlert").textContent = error.message;
+      $("#bookingModalAlert").classList.remove("d-none");
+    }
+    return;
+  }
+  if (form instanceof HTMLFormElement && form.id === "assignBookingForm") {
+    event.preventDefault();
+    const data = formObject(form);
+    try {
+      if (!data.assistantId) throw new Error("Select an available assistant.");
+      await api(`/operations/bookings/${data.serviceRequestId}/assign`, {
+        method: "POST",
+        body: JSON.stringify({
+          assistantId: data.assistantId,
+          reason: data.reason,
+          forceMultiTaskAssignment: form.dataset.forceMultiTaskAssignment === "true"
+        })
+      });
+      $("#assignBookingModal").classList.add("d-none");
+      await loadBookings("assigned");
+    } catch (error) {
+      const message = error.message || "Unable to assign assistant.";
+      if (data.assistantId && form.dataset.forceMultiTaskAssignment !== "true" && /multi-task|already has a task|not available/i.test(message)) {
+        const confirmed = await appConfirmAction({
+          title: "Assign as multi-task?",
+          message: `${message} Do you still want to assign as a multi-task at the same time?`,
+          acceptLabel: "Yes, Assign",
+          cancelLabel: "No"
+        });
+        if (confirmed) {
+          form.dataset.forceMultiTaskAssignment = "true";
+          form.requestSubmit();
+          return;
+        }
+      }
+      $("#assignBookingModalAlert").textContent = message;
+      $("#assignBookingModalAlert").classList.remove("d-none");
+    }
+    return;
+  }
+  if (form instanceof HTMLFormElement && form.id === "otpVerifyForm") {
+    event.preventDefault();
+    try {
+      const data = formObject(form);
+      const channels = [];
+      if (data.emailOtp) channels.push("email");
+      if (data.mobileOtp) channels.push("mobile");
+      await verifyOtpChannels(channels, form);
+    } catch (error) {
+      setOtpVerifyModalAlert(error.message, "danger");
+    }
+    return;
+  }
+  if (form instanceof HTMLFormElement && form.id === "passwordShareForm") {
+    event.preventDefault();
+    try {
+      const data = formObject(form);
+      if (!data.userId) throw new Error("User is required.");
+      if (!data.superAdminPassword) throw new Error("Super Admin password is required.");
+      if (!data.newPassword || data.newPassword.length < 8) throw new Error("Password must be at least 8 characters.");
+      const targetUser = cache.users.find((user) => user.id === data.userId);
+      if (!userEmailIsVerified(targetUser)) throw new Error("Verify Email before resetting and sharing password.");
+      $("#passwordShareSubmitButton").disabled = true;
+      setPasswordShareModalAlert("Resetting and sharing password to Email...", "warning");
+      const result = await api(`/users/${data.userId}/password/share`, {
+        method: "POST",
+        body: JSON.stringify({
+          superAdminPassword: data.superAdminPassword,
+          newPassword: data.newPassword,
+          channels: ["email"]
+        })
+      });
+      const deliveries = result.data?.deliveries || {};
+      const hasWarning = Boolean(result.data?.sendWarning) || Object.values(deliveries).some((delivery) => delivery?.status === "failed" || delivery?.skipped);
+      const summary = passwordDeliverySummary(deliveries);
+      setPasswordShareModalAlert(`${hasWarning ? "Password reset, but Email delivery needs attention." : "Password reset and shared to Email."} ${summary}`, hasWarning ? "warning" : "success");
+      if (!hasWarning) {
+        setTimeout(() => closePasswordShareModal(), 1200);
+      }
+      await showSection("users");
+    } catch (error) {
+      setPasswordShareModalAlert(error.message, "danger");
+    } finally {
+      const targetUser = cache.users.find((user) => user.id === form.elements.userId.value);
+      $("#passwordShareSubmitButton").disabled = !userEmailIsVerified(targetUser);
+    }
+    return;
+  }
+  if (form instanceof HTMLFormElement && form.id === "profilePictureForm") {
+    event.preventDefault();
+    try {
+      const data = formObject(form);
+      if (!data.imageUrl) throw new Error("Profile picture is required.");
+      setProfileModalAlert("Updating profile picture...", "warning");
+      const result = await api(BASE_PATH+"/users/me/profile-picture", {
+        method: "PATCH",
+        body: JSON.stringify({ profilePictureUrl: data.imageUrl })
+      });
+      syncSignedInUser(result.data);
+      setProfileModalAlert("Profile picture updated successfully.", "success");
+      await showSection(state.section);
+    } catch (error) {
+      setProfileModalAlert(error.message, "danger");
+    }
+    return;
+  }
+  if (form instanceof HTMLFormElement && form.id === "profilePasswordForm") {
+    event.preventDefault();
+    try {
+      const data = formObject(form);
+      if (!data.currentPassword) throw new Error("Current password is required.");
+      if (!data.newPassword || data.newPassword.length < 8) throw new Error("New password must be at least 8 characters.");
+      setProfileModalAlert("Resetting password...", "warning");
+      const result = await api(BASE_PATH+"/users/me/password", {
+        method: "PATCH",
+        body: JSON.stringify({ currentPassword: data.currentPassword, newPassword: data.newPassword })
+      });
+      syncSignedInUser(result.data);
+      form.reset();
+      setProfileModalAlert("Password reset successfully.", "success");
+    } catch (error) {
+      setProfileModalAlert(error.message, "danger");
+    }
+    return;
+  }
+  if (form instanceof HTMLFormElement && form.id === "assistantProfilePictureForm") {
+    event.preventDefault();
+    const button = $("#assistantProfilePictureSubmitButton");
+    const originalText = button?.textContent || "Update Profile Picture";
+    try {
+      const data = formObject(form);
+      const assistantId = data.assistantId;
+      if (!assistantId) throw new Error("Assistant is required.");
+      const upload = collectAssistantDocumentUploads(form, assistantUserDocumentFields.filter((field) => field.key === "profilePictureDocument"))[0];
+      if (!upload) throw new Error("Please upload a profile picture.");
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Updating...";
+      }
+      setAssistantProfilePictureModalAlert("Updating profile picture...", "warning");
+      const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+      for (const document of assistantProfilePictureDocuments(assistant)) {
+        if (document.id) {
+          await api(`/verification/assistants/${assistantId}/documents/${document.id}`, { method: "DELETE" });
+        }
+      }
+      await api(`/verification/assistants/${assistantId}/documents`, {
+        method: "POST",
+        body: JSON.stringify(upload)
+      });
+      updateAssistantProfilePictureCache(assistantId, upload);
+      renderAssistantRecords();
+      $("#assistantProfilePictureModal").classList.add("d-none");
+      showAlert("Assistant profile picture updated successfully.", "success");
+    } catch (error) {
+      setAssistantProfilePictureModalAlert(error.message, "danger");
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    }
+    return;
+  }
+  if (form instanceof HTMLFormElement && form.id === "clusterReportFilterForm") {
+    event.preventDefault();
+    await loadClusterReport(1);
+    return;
+  }
+  if (form instanceof HTMLFormElement && form.id === "userFilterForm") {
+    event.preventDefault();
+    await loadUsers();
+    return;
+  }
+  if (!(form instanceof HTMLFormElement) || !form.dataset.form) return;
+  event.preventDefault();
+  try {
+    const data = formObject(form);
+    const formName = form.dataset.form;
+    if (formName === "module") {
+      const body = { Name: data.Name, Description: data.Description || null, IsActive: form.elements.IsActive.checked };
+      if (editingModuleId) await api(`/access/modules/${editingModuleId}`, { method: "PUT", body: JSON.stringify(body) });
+      else await api(BASE_PATH+"/access/modules", { method: "POST", body: JSON.stringify(body) });
+      resetModuleForm();
+    }
+    if (formName === "role") await api(BASE_PATH+"/access/roles", { method: "POST", body: JSON.stringify(data) });
+    if (formName === "permission") await api(BASE_PATH+"/access/permissions", { method: "POST", body: JSON.stringify({ ...data, description: data.description || null }) });
+    if (formName === "user") {
+      const isAssistantRole = selectedRoleCode(form) === "assistant";
+      const otpChannels = selectedOtpVerifyChannels(form);
+      const editingUser = editingUserId ? cache.users.find((user) => user.id === editingUserId) : null;
+      const isSuperAdminEdit = editingUser?.roles?.includes("super_admin") === true;
+      const profilePictureUrl = data.imageUrl || "";
+      if (!profilePictureUrl) throw new Error("Profile picture is required.");
+      const isEditingUser = Boolean(editingUserId);
+      const isActiveChecked = Boolean(form.elements.isActive.checked);
+      const accountStatus = isSuperAdminEdit
+        ? editingUser.accountStatus
+        : isEditingUser
+          ? isActiveChecked
+            ? "active"
+            : "inactive"
+        : otpChannels.length
+          ? "inactive"
+        : isAssistantRole
+          ? data.assistantStatus || "verifying"
+          : isActiveChecked
+            ? "active"
+            : "inactive";
+      const userPath = editingUserId ? `/users/${editingUserId}` : BASE_PATH+"/users";
+      const userMethod = editingUserId ? "PUT" : "POST";
+      const selectedRoleId = data.roleId && !String(data.roleId).startsWith("__") ? data.roleId : null;
+      if (!selectedRoleId && !isSuperAdminEdit) throw new Error("Role is required.");
+      const roleLabel = isSuperAdminEdit
+        ? "Super Admin"
+        : cache.roles.find((role) => role.id === selectedRoleId)?.name || cache.roles.find((role) => role.id === selectedRoleId)?.code || "User";
+      const saved = await api(userPath, {
+        method: userMethod,
+        body: JSON.stringify({
+          displayName: data.displayName,
+          email: data.email || null,
+          phone: data.phone || null,
+          password: data.password || null,
+          profilePictureUrl,
+          roleId: selectedRoleId,
+          accountStatus,
+          isActive: isSuperAdminEdit ? Boolean(editingUser.metadata?.isActive ?? true) : isActiveChecked,
+          isLoginWithOtp: isSuperAdminEdit ? Boolean(editingUser.metadata?.isLoginWithOtp) : Boolean(data.isLoginWithOtp),
+          isLoginWithPassword: isSuperAdminEdit ? Boolean(editingUser.metadata?.isLoginWithPassword) : Boolean(data.isLoginWithPassword),
+          isDocumentRequired: false
+        })
+      });
+      if (isAssistantRole && saved.data?.assistantId) {
+        for (const document of collectAssistantDocumentUploads(form)) {
+          await api(`/verification/assistants/${saved.data.assistantId}/documents`, {
+            method: "POST",
+            body: JSON.stringify(document)
+          });
+        }
+      }
+      if (!editingUserId && otpChannels.length && saved.data?.id) {
+        const channelStatus = Object.fromEntries(otpChannels.map((channel) => [channel, "pending"]));
+        openOtpVerifyModal(saved.data.id, otpChannels, { channels: otpChannels, channelStatus, sending: true, roleLabel });
+        sendCodeAndUpdateOtpModal(saved.data.id, otpChannels);
+      } else if (!editingUserId && saved.data?.id) {
+        showAlert(`Successfully created ${saved.data.displayName || data.displayName || "User"} as ${roleLabel}.`, "success");
+      }
+      resetUserForm();
+    }
+    if (formName === "cluster") {
+      const method = editingClusterId ? "PUT" : "POST";
+      const path = editingClusterId ? `/masters/clusters/${editingClusterId}` : BASE_PATH+"/masters/clusters";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          ...data,
+          zoneId: data.zoneId || null,
+          description: data.description || null,
+          areasDescription: data.areasDescription || null,
+          polygonDescription: data.polygonDescription || null,
+          startTime: data.startTime || null,
+          endTime: data.endTime || null,
+          isPinned: Boolean(data.isPinned),
+          pinPriority: Number(data.pinPriority || 0),
+          priority: Number(data.priority || 0),
+          isBookingEnabled: Boolean(data.isBookingEnabled)
+        })
+      });
+      resetClusterForm();
+    }
+    if (formName === "state") {
+      const method = editingStateId ? "PUT" : "POST";
+      const path = editingStateId ? `/masters/states/${editingStateId}` : BASE_PATH+"/masters/states";
+      await api(path, {
+        method,
+        body: JSON.stringify({ ...data, isActive: Boolean(data.isActive) })
+      });
+      resetStateForm();
+    }
+    if (formName === "city") {
+      const method = editingCityId ? "PUT" : "POST";
+      const path = editingCityId ? `/masters/cities/${editingCityId}` : BASE_PATH+"/masters/cities";
+      await api(path, {
+        method,
+        body: JSON.stringify({ ...data, stateId: data.stateId || null, isActive: Boolean(data.isActive) })
+      });
+      resetCityForm();
+    }
+    if (formName === "zone") {
+      const method = editingZoneId ? "PUT" : "POST";
+      const path = editingZoneId ? `/masters/zones/${editingZoneId}` : BASE_PATH+"/masters/zones";
+      await api(path, {
+        method,
+        body: JSON.stringify({ ...data, cityId: data.cityId || null, isActive: Boolean(data.isActive) })
+      });
+      resetZoneForm();
+    }
+    if (formName === "service") {
+      const method = editingServiceId ? "PUT" : "POST";
+      const path = editingServiceId ? `/masters/services/${editingServiceId}` : BASE_PATH+"/masters/services";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          ...data,
+          description: data.description || null,
+          imageUrl: data.imageUrl || null,
+          locationMode: data.locationMode === "multi" ? "multi" : "current",
+          maxLocationsLimit: data.locationMode === "multi" ? Math.max(1, Number(data.maxLocationsLimit || 1)) : 1,
+          priority: Number(data.priority || 0),
+          sortOrder: Number(data.priority || 0),
+          isRecommended: Boolean(data.isRecommended),
+          isEnabled: Boolean(data.isEnabled),
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetServiceForm();
+    }
+    if (formName === "service-category") {
+      const method = editingCategoryId ? "PUT" : "POST";
+      const path = editingCategoryId ? `/masters/service-categories/${editingCategoryId}` : BASE_PATH+"/masters/service-categories";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          ...data,
+          serviceId: data.serviceId || null,
+          parentCategoryId: data.parentCategoryId || null,
+          description: data.description || null,
+          imageUrl: data.imageUrl || null,
+          priority: Number(data.priority || 0),
+          sortOrder: Number(data.priority || 0),
+          isRecommended: Boolean(data.isRecommended),
+          isEnabled: Boolean(data.isEnabled),
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetServiceCategoryForm();
+    }
+    if (formName === "category-master") {
+      const method = editingCategoryMasterId ? "PUT" : "POST";
+      const path = editingCategoryMasterId ? `/masters/categories/${editingCategoryMasterId}` : BASE_PATH+"/masters/categories";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          name: data.name,
+          code: data.code || null,
+          serviceId: null,
+          parentCategoryId: null,
+          description: data.description || null,
+          note: data.note || null,
+          imageUrl: data.imageUrl || null,
+          priority: Number(data.priority || 0),
+          sortOrder: Number(data.priority || 0),
+          locationMode: data.locationMode === "multi" ? "multi" : "current",
+          maxLocationsLimit: data.locationMode === "multi" ? Math.max(1, Number(data.maxLocationsLimit || 1)) : 1,
+          addWithOtherCategory: Boolean(data.addWithOtherCategory),
+          ...collectCategoryMasterGuidance(form),
+          isRecommended: Boolean(data.isRecommended),
+          isEnabled: Boolean(data.isEnabled),
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetCategoryMasterForm();
+    }
+    if (formName === "category-price") {
+      updateCategoryPriceSellingPrice(form);
+      const scopeType = data.scopeType || "all";
+      const durations = collectCategoryPriceDurations(form);
+      const commonPayload = {
+        scopeType,
+        stateId: scopeType === "state" ? data.stateId || null : null,
+        cityId: scopeType === "city" ? data.cityId || null : null,
+        zoneId: scopeType === "zone" ? data.zoneId || null : null,
+        clusterId: scopeType === "cluster" ? data.clusterId || null : null,
+        waitingChargeAmount: Number(data.waitingChargeAmount || 0),
+        waitingChargeTimeMinutes: Number(data.waitingChargeTimeMinutes || 0),
+        isActive: Boolean(data.isActive)
+      };
+      if (editingCategoryPriceId) {
+        const [firstDuration, ...extraDurations] = durations;
+        await api(`/masters/category-prices/${editingCategoryPriceId}`, {
+          method: "PUT",
+          body: JSON.stringify({ ...commonPayload, ...firstDuration })
+        });
+        for (const duration of extraDurations) {
+          await api(BASE_PATH+"/masters/category-prices", {
+            method: "POST",
+            body: JSON.stringify({ ...commonPayload, ...duration })
+          });
+        }
+      } else {
+        for (const duration of durations) {
+          await api(BASE_PATH+"/masters/category-prices", {
+            method: "POST",
+            body: JSON.stringify({ ...commonPayload, ...duration })
+          });
+        }
+      }
+      resetCategoryPriceForm();
+      await loadCategoryPrice();
+      return;
+    }
+    if (formName === "booking-engine") {
+      const scopeType = data.scopeType || "all";
+      const serviceControlMode = data.serviceControlMode || "manual";
+      const method = editingBookingEngineRuleId ? "PUT" : "POST";
+      const path = editingBookingEngineRuleId ? `/masters/booking-engine/${editingBookingEngineRuleId}` : BASE_PATH+"/masters/booking-engine";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          scopeType,
+          stateId: scopeType === "state" ? data.stateId || null : null,
+          cityId: scopeType === "city" ? data.cityId || null : null,
+          zoneId: scopeType === "zone" ? data.zoneId || null : null,
+          clusterId: scopeType === "cluster" ? data.clusterId || null : null,
+          categoryId: scopeType === "category" ? data.categoryId || null : null,
+          serviceControlMode,
+          manualServiceStatus: data.manualServiceStatus || "stop",
+          autoStartAt: serviceControlMode === "auto" ? data.autoStartAt || null : null,
+          autoEndAt: serviceControlMode === "auto" ? data.autoEndAt || null : null,
+          instantEtaMinutes: Number(data.instantEtaMinutes || 0),
+          instantWrapUpMinutes: Number(data.instantWrapUpMinutes || 0),
+          instantTravelMinutes: Number(data.instantTravelMinutes || 0),
+          scheduleEtaMinutes: Number(data.scheduleEtaMinutes || 0),
+          scheduleWrapUpMinutes: Number(data.scheduleWrapUpMinutes || 0),
+          scheduleTravelMinutes: Number(data.scheduleTravelMinutes || 0),
+          assistantAssignmentMode: data.assistantAssignmentMode || "manual",
+          note: data.note || null,
+          imageUrl: data.imageUrl || null,
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetBookingEngineForm();
+      await loadBookingEngine();
+      return;
+    }
+    if (formName === "booking-engine-quick-reply") {
+      const scopeType = data.scopeType || "all";
+      const method = editingBookingEngineQuickReplyId ? "PUT" : "POST";
+      const path = editingBookingEngineQuickReplyId ? `/masters/booking-engine/quick-replies/${editingBookingEngineQuickReplyId}` : BASE_PATH+"/masters/booking-engine/quick-replies";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          scopeType,
+          stateId: scopeType === "state" ? data.stateId || null : null,
+          cityId: scopeType === "city" ? data.cityId || null : null,
+          zoneId: scopeType === "zone" ? data.zoneId || null : null,
+          clusterId: scopeType === "cluster" ? data.clusterId || null : null,
+          categoryId: scopeType === "category" ? data.categoryId || null : null,
+          actor: data.actor || "assistant",
+          audience: data.audience || "customer",
+          bookingStage: data.bookingStage || "working",
+          actionType: data.actionType || "message",
+          title: data.title || "",
+          message: data.message || "",
+          sortOrder: Number(data.sortOrder || 0),
+          metadata: {},
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetBookingEngineQuickReplyForm();
+      await loadBookingEngine();
+      return;
+    }
+    if (formName === "cluster-service-setting") {
+      await api(BASE_PATH+"/masters/cluster-services", {
+        method: "POST",
+        body: JSON.stringify({
+          clusterId: data.clusterId,
+          serviceId: data.serviceId,
+          isVisible: Boolean(data.isVisible),
+          isEnabled: Boolean(data.isEnabled),
+          isActive: Boolean(data.isActive)
+        })
+      });
+    }
+    if (formName === "cluster-booking-type-setting") {
+      const waitWindowMinutes = Number(data.waitWindowMinutes || 0);
+      const serviceIds = data.serviceAll ? [] : checkedDatasetValues(form, "[data-cluster-booking-service]");
+      const individualSettings = collectClusterBookingTypeIndividualSettings(form);
+      if (!data.clusterId) throw new Error("Select cluster before applying Cluster Booking Type.");
+      if (!Number.isInteger(waitWindowMinutes) || waitWindowMinutes < 0 || waitWindowMinutes > 1440) throw new Error("Waiting Time Window Duration must be a whole number between 0 and 1440.");
+      if (individualSettings.some((setting) => !Number.isInteger(setting.waitWindowMinutes) || setting.waitWindowMinutes < 0 || setting.waitWindowMinutes > 1440)) throw new Error("Each individual Waiting Time Window Duration must be a whole number between 0 and 1440.");
+      if (!data.serviceAll && !serviceIds.length) throw new Error("Select at least one service or choose All Services.");
+      await api(BASE_PATH+"/masters/cluster-booking-types", {
+        method: "POST",
+        body: JSON.stringify({
+          clusterId: data.clusterId,
+          bookingType: data.bookingType || "both",
+          serviceScope: data.serviceAll ? "all" : "select",
+          serviceIds,
+          waitWindowMinutes,
+          instantMode: data.instantMode || "both",
+          isActive: Boolean(data.isActive),
+          individualSettings,
+          replaceConfigKey: data.replaceConfigKey || undefined
+        })
+      });
+    }
+    if (formName === "booking-type") {
+      const method = editingBookingTypeId ? "PUT" : "POST";
+      const path = editingBookingTypeId ? `/masters/booking-types/${editingBookingTypeId}` : BASE_PATH+"/masters/booking-types";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          code: data.code,
+          name: data.name,
+          bookingType: data.bookingType || "instant",
+          maxAdvanceDays: Number(data.maxAdvanceDays || 1),
+          allowedDays: data.bookingType === "schedule" ? Array.from({ length: Number(data.maxAdvanceDays || 1) + 1 }, (_, index) => index === 0 ? "today" : index === 1 ? "tomorrow" : `next_${index}`) : [],
+          timeCategories: data.bookingType === "schedule" ? bookingTypeTimeCategories(form) : [],
+          timeSlots: data.bookingType === "schedule" ? csvValues(data.timeSlots) : [],
+          isDefault: Boolean(data.isDefault),
+          isActive: Boolean(data.isActive)
+        })
+      });
+      editingBookingTypeId = null;
+    }
+    if (formName === "cluster-category-setting") {
+      await api(BASE_PATH+"/masters/cluster-categories", {
+        method: "POST",
+        body: JSON.stringify({
+          clusterId: data.clusterId,
+          categoryId: data.categoryId,
+          isVisible: Boolean(data.isVisible),
+          isEnabled: Boolean(data.isEnabled),
+          isActive: Boolean(data.isActive)
+        })
+      });
+    }
+    if (formName === "surge-rule") {
+      const method = editingSurgeRuleId ? "PUT" : "POST";
+      const path = editingSurgeRuleId ? `/masters/surge-rules/${editingSurgeRuleId}` : BASE_PATH+"/masters/surge-rules";
+      const surgeAdjustment = surgeAdjustmentFromStrategy(data);
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          name: data.name,
+          code: data.code,
+          ruleType: data.ruleType,
+          scheduleMode: data.scheduleMode || "weekly",
+          days: checkedValues(form.elements.days),
+          selectedDates: (data.selectedDates || "").split(",").filter(Boolean),
+          dateTimes: collectSurgeDateTimes(form),
+          dayTimes: collectSurgeDayTimes(form),
+          scope: {
+            scopeType: data.scopeType || "all",
+            stateId: data.scopeType === "state" ? data.stateId || null : null,
+            cityId: data.scopeType === "city" ? data.cityId || null : null,
+            zoneId: data.scopeType === "zone" ? data.zoneId || null : null,
+            clusterId: data.scopeType === "cluster" ? data.clusterId || null : null,
+            serviceId: data.serviceId || null,
+            categoryId: data.categoryId || null
+          },
+          startTime: data.startTime || null,
+          endTime: data.endTime || null,
+          adjustmentType: surgeAdjustment.adjustmentType,
+          adjustmentValue: surgeAdjustment.adjustmentValue,
+          priority: data.priority || 0,
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetSurgeRuleForm();
+    }
+    if (formName === "price-master") {
+      updatePriceMasterSellingPrice(form);
+      const categoryGroupPricing = collectPriceMasterCategoryGroupPricing(form);
+      if (!validatePriceMasterCategoryGroupPricing(form, categoryGroupPricing)) return;
+      if (!categoryGroupPricing.enabled && !validatePriceMasterComplexityLimit(form)) return;
+      data.sellingPrice = form.elements.sellingPrice.value;
+      const method = editingPriceRuleId ? "PUT" : "POST";
+      const path = editingPriceRuleId ? `/masters/price-master/${editingPriceRuleId}` : BASE_PATH+"/masters/price-master";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          priceType: data.priceType || "task",
+          scopeType: data.scopeType || "all",
+          stateId: data.stateId || null,
+          cityId: data.cityId || null,
+          zoneId: data.zoneId || null,
+          clusterId: data.clusterId || null,
+          serviceId: data.serviceId || null,
+          categoryId: categoryGroupPricing.enabled ? null : data.categoryId || null,
+          storeId: data.priceType === "task" && !categoryGroupPricing.enabled ? data.storeId || null : null,
+          basePrice: data.priceType === "task" && !categoryGroupPricing.enabled ? Number(data.basePrice || 0) : 0,
+          discountType: data.priceType === "task" && !categoryGroupPricing.enabled ? data.discountType || "none" : "none",
+          discountValue: data.priceType === "task" && !categoryGroupPricing.enabled ? Number(data.discountValue || 0) : 0,
+          sellingPrice: data.priceType === "task" && !categoryGroupPricing.enabled ? Number(data.sellingPrice || 0) : 0,
+          complexityBase: data.complexityBase || "selling",
+          complexityMultiplier: 0,
+          complexitySlabs: data.priceType === "task" && !categoryGroupPricing.enabled ? collectPriceMasterComplexitySlabs(form) : [],
+          maxStoresPerCategory: Number(data.maxStoresPerCategory || 1),
+          maxStoresTotal: 9999,
+          timeSlabs: data.priceType === "time" ? collectPriceMasterTimeSlabs(form) : [],
+          description: data.description || null,
+          metadata: {
+            taskDurationMinutes: data.priceType === "task" ? Math.max(0, Number(data.taskDurationMinutes || 0)) : 0,
+            allottedTime: collectPriceMasterAllottedTime(form),
+            categoryGroupPricing: data.priceType === "task" ? categoryGroupPricing : { enabled: false, maxCategoriesAllowed: "all", slabs: [] }
+          },
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetPriceMasterForm();
+    }
+    if (formName === "store") {
+      const wasEditingStore = Boolean(editingStoreId);
+      const method = wasEditingStore ? "PUT" : "POST";
+      const path = wasEditingStore ? `/stores/${editingStoreId}` : BASE_PATH+"/stores";
+      const submitButton = $("#storeSubmitButton");
+      const originalLabel = submitButton?.textContent || (wasEditingStore ? "Update Store" : "Create Store");
+      setStoreFormAlert();
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = wasEditingStore ? "Updating..." : "Creating...";
+      }
+      const clusterIds = selectedValues(form.elements.clusterIds);
+      try {
+        if (!String(data.name || "").trim()) throw new Error("Store name is required.");
+        if (!clusterIds.length) throw new Error("Select at least one Cluster for this Store.");
+        await api(path, {
+          method,
+          body: JSON.stringify({
+            ...data,
+            name: String(data.name || "").trim(),
+            code: data.code || null,
+            description: data.description || null,
+            address: data.address || null,
+            contact: data.contact || null,
+            website: data.website || null,
+            latitude: data.latitude ? Number(data.latitude) : null,
+            longitude: data.longitude ? Number(data.longitude) : null,
+            priority: Number(data.priority || 0),
+            operatingHours: collectWeeklySchedule(form),
+            serviceCategoryIds: scopedPickerValues(form, "serviceCategoryIds"),
+            storeCategoryIds: scopedPickerValues(form, "storeCategoryIds"),
+            storeKeywordIds: scopedPickerValues(form, "storeKeywordIds"),
+            clusterIds,
+            imageUrls: parseStoreImageUrls(data.imageUrls),
+            isActive: Boolean(data.isActive)
+          })
+        });
+        showAlert(wasEditingStore ? "Store updated successfully." : "Store created successfully.");
+        resetStoreForm();
+      } catch (error) {
+        setStoreFormAlert(error.message);
+        throw error;
+      } finally {
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = originalLabel;
+        }
+      }
+    }
+    if (formName === "store-category") {
+      const method = editingStoreCategoryId ? "PUT" : "POST";
+      const path = editingStoreCategoryId ? `/stores/store-categories/${editingStoreCategoryId}` : BASE_PATH+"/stores/store-categories";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          ...data,
+          serviceId: data.serviceId,
+          serviceCategoryId: data.serviceCategoryId,
+          imageUrl: data.imageUrl || null,
+          description: data.description || null,
+          priority: Number(data.priority || 0),
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetStoreCategoryForm();
+    }
+    if (formName === "store-keyword") {
+      const method = editingStoreKeywordId ? "PUT" : "POST";
+      const path = editingStoreKeywordId ? `/stores/store-keywords/${editingStoreKeywordId}` : BASE_PATH+"/stores/store-keywords";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          code: data.code || null,
+          name: data.name,
+          serviceId: data.serviceId,
+          serviceCategoryId: data.serviceCategoryId,
+          description: data.description || null,
+          priority: Number(data.priority || 0),
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetStoreKeywordForm();
+    }
+    if (formName === "vehicle-master") {
+      const method = editingVehicleMasterId ? "PUT" : "POST";
+      const path = editingVehicleMasterId ? `/vehicle-master/${editingVehicleMasterId}` : BASE_PATH+"/vehicle-master";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          vehicleName: data.vehicleName,
+          clusterId: data.clusterId || null,
+          company: data.company || null,
+          vehicleNumber: data.vehicleNumber || null,
+          model: data.model || null,
+          fuelType: data.fuelType,
+          color: data.color || null,
+          pictureUrls: JSON.parse(data.pictureUrls || "[]"),
+          ownerType: data.ownerType,
+          rentalCompanyName: data.rentalCompanyName || null,
+          rentalCompanyAddress: data.rentalCompanyAddress || null,
+          rentalCompanyNumber: data.rentalCompanyNumber || null,
+          rentSlab: data.rentSlab || null,
+          rentCharges: data.rentCharges ? Number(data.rentCharges) : null,
+          zigoSlab: data.zigoSlab || null,
+          zigoCharges: data.zigoCharges ? Number(data.zigoCharges) : null,
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetVehicleMasterForm();
+    }
+    if (formName === "customer-address") {
+      if (!customerAddressSelectedCustomer?.id) throw new Error("Select a customer first.");
+      const coordinates = customerAddressSelectedCoordinates();
+      if (!Number.isFinite(coordinates.latitude) || !Number.isFinite(coordinates.longitude)) throw new Error("Choose a location first.");
+      if (customerAddressSelectedLocation) {
+        customerAddressSelectedLocation = {
+          ...customerAddressSelectedLocation,
+          latitude: coordinates.latitude,
+          longitude: coordinates.longitude
+        };
+      }
+      const serviceability = await validateCustomerAddressSelectedLocation(false);
+      if (serviceability?.isServiceable !== true) throw new Error(serviceability?.message || "Selected location is outside active working clusters.");
+      const isEditingAddress = Boolean(editingCustomerAddressId);
+      const isSavingPreviousLocation = Boolean(customerAddressSaveAsPreviousLocation?.addressId);
+      const saveAddress = isEditingAddress || isSavingPreviousLocation || data.saveAddress === "on";
+      const finalLabel = data.label === "Other" ? String(data.customLabel || "").trim() : data.label || "Home";
+      if (saveAddress) {
+        if (!finalLabel) throw new Error("Enter address label name.");
+        if (data.label === "Other" && ["home", "work", "other"].includes(finalLabel.toLowerCase())) {
+          throw new Error("This label is already used by default labels, try different.");
+        }
+        if (customerAddressRows.some((address) => String(address.addressId || "") !== String(editingCustomerAddressId || "") && String(address.label || "").toLowerCase() === finalLabel.toLowerCase())) {
+          throw new Error("Address label already exists, try different.");
+        }
+      }
+      const savedAddressId = editingCustomerAddressId || customerAddressSaveAsPreviousLocation?.addressId || "";
+      const addressBody = {
+        address: customerAddressSelectedLocation?.address || customerAddressSelectedLocation?.label || "Selected location",
+        latitude: coordinates.latitude,
+        longitude: coordinates.longitude,
+        flatNo: data.flatNo || null,
+        buildingName: data.buildingName || null,
+        additionalDetail: data.additionalDetail || null,
+        personName: data.personName || null,
+        contactNumber: data.contactNumber || null,
+        source: customerAddressSelectedLocation?.source || "manual"
+      };
+      const savePath = isSavingPreviousLocation
+        ? `/admin-customers/${customerAddressSelectedCustomer.id}/previous-used-locations/${customerAddressSaveAsPreviousLocation.addressId}/save-as`
+        : saveAddress
+          ? `/admin-customers/${customerAddressSelectedCustomer.id}/addresses${isEditingAddress ? `/${editingCustomerAddressId}` : ""}`
+          : `/admin-customers/${customerAddressSelectedCustomer.id}/previous-used-locations`;
+      const savedPayload = await api(savePath, {
+        method: isEditingAddress ? "PUT" : "POST",
+        body: JSON.stringify({
+          ...addressBody,
+          label: data.label || "Home",
+          customLabel: data.label === "Other" ? data.customLabel || null : null,
+          isDefault: saveAddress ? Boolean(data.isDefault) : false
+        })
+      });
+      await loadCustomerAddressLists(customerAddressSelectedCustomer.id);
+      editingCustomerAddressId = null;
+      customerAddressSaveAsPreviousLocation = null;
+      customerAddressEditorOpen = false;
+      customerAddressSelectedLocation = null;
+      customerAddressServiceability = null;
+      customerAddressSearchResults = [];
+      customerAddressSearchText = "";
+      showAlert(saveAddress ? (isEditingAddress ? "Customer address updated." : isSavingPreviousLocation ? "Previous used location saved as customer address." : "Customer address saved.") : "Location used and saved in previous used locations.", "success");
+      if (bookingMasterAddressPickerActive) {
+        if (saveAddress) await refreshBookingMasterCustomerFromAddresses(savedPayload.data?.addressId || savedAddressId || "");
+        else {
+          const previousLocation = customerPreviousUsedLocationRows.find((address) => String(address.addressId || "") === String(savedPayload.data?.addressId || "")) || {
+            ...addressBody,
+            addressId: savedPayload.data?.addressId || null,
+            label: "Previous used",
+            clusterId: serviceability.cluster?.clusterId || null,
+            clusterName: serviceability.cluster?.name || null
+          };
+          await chooseBookingMasterAddress(previousLocation);
+        }
+        return;
+      }
+      renderCustomerAddressManager();
+      return;
+    }
+    if (formName === "category-store") await api(BASE_PATH+"/stores/category-stores", { method: "POST", body: JSON.stringify(data) });
+    if (formName === "cluster-store") await api(BASE_PATH+"/stores/cluster-stores", { method: "POST", body: JSON.stringify(data) });
+    if (formName === "category") {
+      await api(BASE_PATH+"/masters/categories", {
+        method: "POST",
+        body: JSON.stringify({ ...data, parentCategoryId: data.parentCategoryId || null, description: data.description || null, sortOrder: Number(data.sortOrder || 0), isActive: true })
+      });
+    }
+    if (formName === "delivery-type") {
+      await api(BASE_PATH+"/masters/delivery-types", {
+        method: "POST",
+        body: JSON.stringify({ ...data, description: data.description || null, sortOrder: Number(data.sortOrder || 0), isActive: Boolean(data.isActive) })
+      });
+    }
+    if (formName === "assistant") await api(BASE_PATH+"/verification/assistants", { method: "POST", body: JSON.stringify({ ...data, email: data.email || null, phone: data.phone || null }) });
+    if (formName === "assistant-cluster") await api(`/verification/assistants/${data.assistantId}/clusters`, { method: "POST", body: JSON.stringify({ clusterId: data.clusterId, isPrimary: Boolean(data.isPrimary) }) });
+    if (formName === "assistant-document") {
+      await api(`/verification/assistants/${data.assistantId}/documents`, {
+        method: "POST",
+        body: JSON.stringify({
+          documentTypeId: data.documentTypeId,
+          originalName: data.originalName,
+          mimeType: data.mimeType || null,
+          previewUrl: data.previewUrl
+        })
+      });
+    }
+    if (formName === "document-verify") {
+      await api(`/verification/assistants/${data.assistantId}/documents/${data.documentId}/verify`, {
+        method: "POST",
+        body: JSON.stringify({ status: data.status, remarks: data.remarks || null })
+      });
+    }
+    if (formName === "vehicle") await api(BASE_PATH+"/verification/assistant-vehicles", { method: "POST", body: JSON.stringify({ ...data, make: data.make || null, model: data.model || null, color: data.color || null }) });
+    if (formName === "user-role") {
+      await api(BASE_PATH+"/access/user-roles", {
+        method: "POST",
+        body: JSON.stringify({
+          userId: data.userId,
+          roleId: data.roleId,
+          scopeType: data.scopeType || null,
+          scopeId: data.scopeId || null,
+          isPrimary: Boolean(data.isPrimary)
+        })
+      });
+    }
+    if (formName === "operation-assign") {
+      const submitter = event.submitter;
+      const mode = submitter?.value || "assign";
+      await api(`/operations/bookings/${data.serviceRequestId}/${mode}`, {
+        method: "POST",
+        body: JSON.stringify({ assistantId: data.assistantId, reason: data.reason })
+      });
+    }
+    if (formName === "media-paths") {
+      await api(BASE_PATH+"/settings/media-paths", {
+        method: "PUT",
+        body: JSON.stringify({
+          imageSavePath: data.imageSavePath,
+          documentSavePath: data.documentSavePath
+        })
+      });
+    }
+    if (formName === "otp-providers") {
+      let smsProviders = [];
+      let emailProviders = [];
+      try {
+        smsProviders = JSON.parse(data.smsProviders || "[]");
+        emailProviders = JSON.parse(data.emailProviders || "[]");
+      } catch (error) {
+        throw new Error("OTP provider JSON is invalid.");
+      }
+      if (!Array.isArray(smsProviders) || !Array.isArray(emailProviders)) throw new Error("OTP providers must be JSON arrays.");
+      await api(BASE_PATH+"/settings/otp-providers", {
+        method: "PUT",
+        body: JSON.stringify({ smsProviders, emailProviders })
+      });
+    }
+    if (formName === "booking-cart-mix") {
+      await api(BASE_PATH+"/settings/booking-cart-mix", {
+        method: "PUT",
+        body: JSON.stringify({
+          personalAssistantServiceId: data.personalAssistantServiceId || null,
+          allowedWithMode: data.allowedWithMode || "none",
+          allowedServiceIds: data.allowedWithMode === "selected"
+            ? selectedValues(form.elements.allowedServiceIds).filter((serviceId) => serviceId !== data.personalAssistantServiceId)
+            : []
+        })
+      });
+    }
+    if (formName === "booking-type-automation") {
+      await api(BASE_PATH+"/settings/booking-type-automation", {
+        method: "PUT",
+        body: JSON.stringify({
+          maxReachMinutes: Number(data.maxReachMinutes || 30),
+          freeSoonMinutes: Number(data.freeSoonMinutes || 15),
+          averageReachMinutes: Number(data.averageReachMinutes || 20)
+        })
+      });
+    }
+    if (formName === "booking-live-sync") {
+      const payload = await api(BASE_PATH+"/settings/booking-live-sync", {
+        method: "PUT",
+        body: JSON.stringify({
+          isEnabled: Boolean(data.isEnabled),
+          transport: data.transport || "sse",
+          refreshOnEvent: Boolean(data.refreshOnEvent),
+          playSound: Boolean(data.playSound),
+          showBell: Boolean(data.showBell),
+          showToast: Boolean(data.showToast),
+          fallbackPollingEnabled: Boolean(data.fallbackPollingEnabled),
+          fallbackPollingSeconds: Number(data.fallbackPollingSeconds || 60),
+          reconnectSeconds: Number(data.reconnectSeconds || 5)
+        })
+      });
+      bookingRealtimeSettings = payload.data || defaultBookingRealtimeSettings();
+      await startBookingRealtime(true);
+    }
+    if (formName === "booking-engine-settings") {
+      await api(BASE_PATH+"/settings/booking-engine", {
+        method: "PUT",
+        body: JSON.stringify({
+          isEnabled: Boolean(data.isEnabled),
+          orchestrationWorkerEnabled: Boolean(data.orchestrationWorkerEnabled),
+          orchestrationIntervalSeconds: Number(data.orchestrationIntervalSeconds || 30),
+          batchSize: Number(data.batchSize || 100),
+          businessModel: data.businessModel || "managed_supply",
+          riskLookaheadMinutes: Number(data.riskLookaheadMinutes || 15),
+          slaGraceMinutes: Number(data.slaGraceMinutes || 10),
+          manualAssignBeforeStartMinutes: Number(data.manualAssignBeforeStartMinutes || 15),
+          instantAutoMaxWaitMinutes: Number(data.instantAutoMaxWaitMinutes || 45),
+          defaultWaitWindowMinutes: Number(data.defaultWaitWindowMinutes || 0),
+          capacityHoldMinutes: Number(data.capacityHoldMinutes || 10),
+          paymentHoldMinutes: Number(data.paymentHoldMinutes || 10),
+          assignmentAcceptanceTimeoutSeconds: Number(data.assignmentAcceptanceTimeoutSeconds || 120),
+          autoReassignEnabled: Boolean(data.autoReassignEnabled),
+          autoReassignAfterSeconds: Number(data.autoReassignAfterSeconds || 120),
+          allowManualInstantWhenNoSupply: Boolean(data.allowManualInstantWhenNoSupply),
+          releaseCapacityOnPaymentFailure: Boolean(data.releaseCapacityOnPaymentFailure),
+          releaseCapacityOnCancel: Boolean(data.releaseCapacityOnCancel),
+          notifyOnRiskChange: Boolean(data.notifyOnRiskChange),
+          customerPortal: {
+            isEnabled: Boolean(data.customerPortalIsEnabled),
+            shareUrlPath: data.customerPortalShareUrlPath || "/customer",
+            allowSelfRegistration: Boolean(data.customerPortalAllowSelfRegistration),
+            loginWithMobileOtp: Boolean(data.customerPortalLoginWithMobileOtp),
+            allowBookService: Boolean(data.customerPortalAllowBookService),
+            allowOnlinePayment: Boolean(data.customerPortalAllowOnlinePayment),
+            allowLiveTracking: Boolean(data.customerPortalAllowLiveTracking),
+            allowTextUpdates: Boolean(data.customerPortalAllowTextUpdates),
+            allowImageUpdates: Boolean(data.customerPortalAllowImageUpdates),
+            allowVoiceUpdates: Boolean(data.customerPortalAllowVoiceUpdates),
+            linkExpiryMinutes: Number(data.customerPortalLinkExpiryMinutes || 1440)
+          },
+          assistantPortal: {
+            isEnabled: Boolean(data.assistantPortalIsEnabled),
+            shareUrlPath: data.assistantPortalShareUrlPath || BASE_PATH+"/assistant",
+            loginWithMobileOtp: Boolean(data.assistantPortalLoginWithMobileOtp),
+            loginWithPassword: Boolean(data.assistantPortalLoginWithPassword),
+            allowGoOnline: Boolean(data.assistantPortalAllowGoOnline),
+            allowTaskExecution: Boolean(data.assistantPortalAllowTaskExecution),
+            allowTextUpdates: Boolean(data.assistantPortalAllowTextUpdates),
+            allowImageUpdates: Boolean(data.assistantPortalAllowImageUpdates),
+            allowVoiceUpdates: Boolean(data.assistantPortalAllowVoiceUpdates),
+            allowDailyReport: Boolean(data.assistantPortalAllowDailyReport),
+            requireClusterVehicleDocuments: Boolean(data.assistantPortalRequireClusterVehicleDocuments)
+          },
+          adminOverride: {
+            canBookForCustomer: Boolean(data.adminCanBookForCustomer),
+            canAssignForAssistant: Boolean(data.adminCanAssignForAssistant),
+            canRespondForCustomer: Boolean(data.adminCanRespondForCustomer),
+            canRespondForAssistant: Boolean(data.adminCanRespondForAssistant),
+            canForceCompleteTask: Boolean(data.adminCanForceCompleteTask),
+            canSwitchInstantToSchedule: Boolean(data.adminCanSwitchInstantToSchedule),
+            overrideReasonRequired: Boolean(data.adminOverrideReasonRequired),
+            autoEscalateNoResponseMinutes: Number(data.adminAutoEscalateNoResponseMinutes || 5)
+          },
+          communication: {
+            realtimeUpdatesEnabled: Boolean(data.communicationRealtimeUpdatesEnabled),
+            customerNotifyOnAssignment: Boolean(data.communicationCustomerNotifyOnAssignment),
+            customerNotifyOnDelay: Boolean(data.communicationCustomerNotifyOnDelay),
+            assistantNotifyOnAssignment: Boolean(data.communicationAssistantNotifyOnAssignment),
+            adminNotifyOnNoResponse: Boolean(data.communicationAdminNotifyOnNoResponse),
+            allowCustomerAssistantChat: Boolean(data.communicationAllowCustomerAssistantChat),
+            storeTaskMediaInTimeline: Boolean(data.communicationStoreTaskMediaInTimeline)
+          },
+          hurdles: {
+            assistantOffline: collectBookingEngineHurdle(form, "assistantOffline"),
+            previousTaskDelay: collectBookingEngineHurdle(form, "previousTaskDelay"),
+            customerExtension: collectBookingEngineHurdle(form, "customerExtension"),
+            waitingTimeExtend: collectBookingEngineHurdle(form, "waitingTimeExtend"),
+            vehicleIssue: collectBookingEngineHurdle(form, "vehicleIssue"),
+            locationIssue: collectBookingEngineHurdle(form, "locationIssue")
+          }
+        })
+      });
+    }
+    if (formName === "assistant-master-work") {
+      await api(`/assistant-master/${data.assistantId}/work`, {
+        method: "PUT",
+        body: JSON.stringify({
+          workingType: data.workingType,
+          workingTimeSlot: summarizeWeeklySchedule(collectWeeklySchedule(form)) || null,
+          workingSchedule: collectWeeklySchedule(form),
+          payType: data.payType
+        })
+      });
+      $("#assistantMasterEditModal").classList.add("d-none");
+    }
+    if (formName === "assistant-master-cluster") {
+      await api(`/assistant-master/${data.assistantId}/cluster`, {
+        method: "POST",
+        body: JSON.stringify({ clusterId: data.clusterId })
+      });
+      $("#assistantMasterEditModal").classList.add("d-none");
+    }
+    if (formName === "assistant-master-vehicle") {
+      await api(`/assistant-master/${data.assistantId}/vehicle`, {
+        method: "POST",
+        body: JSON.stringify({ vehicleMasterId: data.vehicleMasterId })
+      });
+      $("#assistantMasterEditModal").classList.add("d-none");
+    }
+    if (formName === "assistant-damage") {
+      await api(`/assistant-master/${data.assistantId}/damage`, {
+        method: "POST",
+        body: JSON.stringify({
+          vehicleMasterId: data.vehicleMasterId || null,
+          reason: data.reason,
+          proofPictureUrls: JSON.parse(data.proofPictureUrls || "[]"),
+          expense: data.expense ? Number(data.expense) : null,
+          paidBy: data.paidBy,
+          paymentProofUrl: data.imageUrl || null
+        })
+      });
+      $("#damageProofPictureUrls").value = "[]";
+      $("#damageProofGallery").innerHTML = "";
+      $("#assistantMasterEditModal").classList.add("d-none");
+    }
+    if (formName === "assistant-master-basic") {
+      await api(`/verification/assistants/${data.assistantId}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          displayName: data.displayName,
+          assistantCode: data.assistantCode,
+          phone: data.phone || null,
+          email: data.email || null,
+          isActive: Boolean(data.isActive)
+        })
+      });
+      $("#assistantMasterEditModal").classList.add("d-none");
+    }
+    if (formName === "assistant-master-document") {
+      const assistant = cache.assistantMasters.find((item) => item.id === data.assistantId);
+      const uploads = collectAssistantDocumentUploads(form, assistantMissingDocumentFields(assistant?.documents || []));
+      if (!uploads.length) throw new Error("Please upload at least one PDF or image document.");
+      for (const document of uploads) {
+        await api(`/verification/assistants/${data.assistantId}/documents`, {
+          method: "POST",
+          body: JSON.stringify(document)
+        });
+      }
+      $("#assistantMasterEditModal").classList.add("d-none");
+    }
+    form.reset();
+    await showSection(state.section);
+  } catch (error) {
+    showAlert(error.message);
+  }
+});
+
+document.querySelectorAll("[data-section]").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
+
+document.querySelectorAll("[data-nav-toggle]").forEach((button) => {
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    const group = button.closest(".nav-collapsible");
+    setNavGroupOpen(group, !group?.classList.contains("open"));
+  });
+});
+
+$("#menuToggleButton")?.addEventListener("click", () => {
+  if (window.matchMedia("(max-width: 960px)").matches) {
+    document.body.classList.add("sidebar-open");
+    return;
+  }
+  document.body.classList.toggle("sidebar-collapsed");
+});
+
+$("#sidebarCloseButton")?.addEventListener("click", () => {
+  document.body.classList.remove("sidebar-open");
+});
+
+$("#sidebarBackdrop")?.addEventListener("click", () => {
+  document.body.classList.remove("sidebar-open");
+});
+
+document.querySelectorAll(".nav-child, .nav-item").forEach((button) => {
+  button.addEventListener("click", () => {
+    if (button.dataset.navToggle) return;
+    document.body.classList.remove("sidebar-open");
+  });
+});
+
+document.addEventListener("change", async (event) => {
+  const input = event.target;
+  if (input instanceof HTMLSelectElement && input.id === "userRoleSelect") {
+    toggleAssistantUserFields();
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "serviceCategoryServiceFilter") {
+    serviceCategoryFilters.serviceId = input.value || "";
+    renderServiceCategoryTable();
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.name === "otpVerifyChannels") {
+    updateOtpVerifyChannelState(input.form);
+    return;
+  }
+  if (input.closest?.("#customerAddressForm") && input.name === "label") {
+    toggleCustomerAddressOtherLabel(input.closest("#customerAddressForm"));
+    return;
+  }
+  if (input.closest?.("#customerAddressForm") && input.name === "saveAddress") {
+    toggleCustomerAddressSaveAs(input.closest("#customerAddressForm"));
+    return;
+  }
+  if (input.closest?.("#customerAddressForm") && input.name === "useCustomerContact") {
+    const form = input.closest("#customerAddressForm");
+    if (input.checked) applyCustomerContactToAddress(form);
+    else {
+      if (form.elements.personName) form.elements.personName.value = "";
+      if (form.elements.contactNumber) form.elements.contactNumber.value = "";
+    }
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "vehicleOwnerType") {
+    toggleVehicleRentalFields();
+    return;
+  }
+  if (input.closest?.("#adminBookingForm") && ["clusterId", "categoryId"].includes(input.name)) {
+    refreshAdminBookingPriceQuote().catch((error) => showAlert(error.message));
+    return;
+  }
+  if (input.closest?.("#zoneForm") && input.name === "stateFilterId") {
+    refreshZoneFormCityOptions();
+    return;
+  }
+  if (input.closest?.("#clusterForm") && input.name === "stateFilterId") {
+    refreshClusterFormLocationCascade("state");
+    return;
+  }
+  if (input.closest?.("#clusterForm") && input.name === "cityId") {
+    refreshClusterFormLocationCascade("city");
+    return;
+  }
+  if (input.closest?.("#bookingTypeForm") && input.name === "bookingType") {
+    toggleBookingTypeScheduleFields(input.closest("#bookingTypeForm"));
+    return;
+  }
+  if (input.closest?.("#clusterBookingTypeForm") && ["clusterId", "serviceAll"].includes(input.name)) {
+    refreshClusterBookingTypeControls();
+    return;
+  }
+  if (input.closest?.("#clusterBookingTypeForm") && ["bookingType", "instantMode", "waitWindowMinutes", "isActive"].includes(input.name)) {
+    renderClusterBookingTypeIndividualSettings(input.closest("#clusterBookingTypeForm"));
+    return;
+  }
+  if (input.closest?.("#clusterBookingTypeForm") && input.matches("[data-cluster-booking-service]")) {
+    refreshClusterBookingTypeControls();
+    return;
+  }
+  if (input.closest?.("#surgeRuleForm") && input.name === "ruleType") {
+    toggleSurgeScheduleSections(input.closest("#surgeRuleForm"));
+    return;
+  }
+  if (input.closest?.("#surgeRuleForm") && input.name === "surgeStrategy") {
+    updateSurgeX(input.closest("#surgeRuleForm"));
+    return;
+  }
+  if (input.closest?.("#surgeRuleForm") && input.name === "scheduleMode") {
+    toggleSurgeScheduleSections(input.closest("#surgeRuleForm"));
+    return;
+  }
+  if (input.closest?.("#surgeRuleForm") && input.name === "scopeType") {
+    refreshSurgeRuleLocationCascade("scope");
+    return;
+  }
+  if (input.closest?.("#surgeRuleForm") && input.name === "stateId") {
+    refreshSurgeRuleLocationCascade("state");
+    return;
+  }
+  if (input.closest?.("#surgeRuleForm") && input.name === "cityId") {
+    refreshSurgeRuleLocationCascade("city");
+    return;
+  }
+  if (input.closest?.("#surgeRuleForm") && input.name === "zoneId") {
+    refreshSurgeRuleLocationCascade("zone");
+    return;
+  }
+  if (input.closest?.("#surgeRuleForm") && input.name === "serviceId") {
+    refreshSurgeRuleTargetCascade("service");
+    return;
+  }
+  if (input.closest?.("#surgeRuleForm") && input.name === "categoryId") {
+    refreshSurgeRuleTargetCascade("category");
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "scopeType") {
+    refreshPriceMasterLocationCascade("scope");
+    return;
+  }
+  if (input.closest?.("#categoryPriceForm") && input.name === "scopeType") {
+    refreshCategoryPriceLocationCascade("scope");
+    return;
+  }
+  if (input.closest?.("#bookingEngineForm") && input.name === "scopeType") {
+    refreshBookingEngineLocationCascade("scope");
+    return;
+  }
+  if (input.closest?.("#serviceForm") && input.name === "locationMode") {
+    toggleServiceLocationLimit(input.closest("#serviceForm"));
+    return;
+  }
+  if (input.closest?.("#categoryMasterForm") && input.name === "locationMode") {
+    toggleCategoryMasterLocationLimit(input.closest("#categoryMasterForm"));
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "priceType") {
+    togglePriceMasterTypeFields(input.closest("#priceMasterForm"));
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "categoryGroupEnabled") {
+    togglePriceMasterCategoryGroupFields(input.closest("#priceMasterForm"));
+    renderPriceMasterCategoryGroupRows(collectPriceMasterCategoryGroupPricing(input.closest("#priceMasterForm")));
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "allottedTimeEnabled") {
+    togglePriceMasterAllottedTimeFields(input.closest("#priceMasterForm"));
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "discountType") {
+    updatePriceMasterSellingPrice(input.closest("#priceMasterForm"));
+    return;
+  }
+  if (input.closest?.("[data-category-price-duration-row]") && input.dataset.categoryPriceDurationField === "discountType") {
+    updateCategoryPriceDurationSellingPrice(input.closest("[data-category-price-duration-row]"));
+    return;
+  }
+  if (input.closest?.("[data-time-slab-row]") && input.dataset.timeSlabField === "discountType") {
+    updateTimeSlabSellingPrice(input.closest("[data-time-slab-row]"));
+    return;
+  }
+  if (input.closest?.("[data-category-group-row]") && ["discountType", "allottedTimeEnabled", "waitingChargeEnabled"].includes(input.dataset.categoryGroupField)) {
+    const row = input.closest("[data-category-group-row]");
+    toggleCategoryGroupRowFields(row);
+    updateCategoryGroupRowSellingPrice(row);
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "stateId") {
+    refreshPriceMasterLocationCascade("state");
+    return;
+  }
+  if (input.closest?.("#categoryPriceForm") && input.name === "stateId") {
+    refreshCategoryPriceLocationCascade("state");
+    return;
+  }
+  if (input.closest?.("#bookingEngineForm") && input.name === "stateId") {
+    refreshBookingEngineLocationCascade("state");
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "cityId") {
+    refreshPriceMasterLocationCascade("city");
+    return;
+  }
+  if (input.closest?.("#categoryPriceForm") && input.name === "cityId") {
+    refreshCategoryPriceLocationCascade("city");
+    return;
+  }
+  if (input.closest?.("#bookingEngineForm") && input.name === "cityId") {
+    refreshBookingEngineLocationCascade("city");
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "zoneId") {
+    refreshPriceMasterLocationCascade("zone");
+    return;
+  }
+  if (input.closest?.("#categoryPriceForm") && input.name === "zoneId") {
+    refreshCategoryPriceLocationCascade("zone");
+    return;
+  }
+  if (input.closest?.("#bookingEngineForm") && input.name === "zoneId") {
+    refreshBookingEngineLocationCascade("zone");
+    return;
+  }
+  if (input.closest?.("#bookingEngineForm") && input.name === "serviceControlMode") {
+    toggleBookingEngineCalendarFields(input.closest("#bookingEngineForm"));
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "serviceId") {
+    refreshPriceMasterServiceCascade("service");
+    return;
+  }
+  if (input.closest?.("#priceMasterForm") && input.name === "categoryId") {
+    refreshPriceMasterServiceCascade("category");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "assistantClusterStateSelect") {
+    refreshAssistantClusterCascade("state");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "assistantClusterCitySelect") {
+    refreshAssistantClusterCascade("city");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "assistantClusterZoneSelect") {
+    refreshAssistantClusterCascade("zone");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "storeCategoryServiceSelect") {
+    refreshStoreCategoryParentSelect();
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "storeKeywordServiceSelect") {
+    refreshStoreKeywordParentSelect();
+    return;
+  }
+  if (input.closest?.("#serviceCategoryForm") && ["discountType"].includes(input.name)) {
+    updateCategoryPricingPreview();
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "clusterCategoryClusterSelect") {
+    refreshClusterCategoryCascade("cluster");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "clusterCategoryServiceSelect") {
+    refreshClusterCategoryCascade("service");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "storeClusterStateSelect") {
+    refreshStoreClusterCascade("state");
+    return;
+  }
+  if (input.dataset.categoryPriceFilter) {
+    categoryPriceFilters[input.dataset.categoryPriceFilter] = input.value;
+    renderCategoryPriceReport();
+    return;
+  }
+  if (input.dataset.bookingEngineFilter) {
+    bookingEngineFilters[input.dataset.bookingEngineFilter] = input.value;
+    renderBookingEngineReport();
+    return;
+  }
+  if (input.dataset.bookingEngineQuickReplyFilter) {
+    bookingEngineQuickReplyFilters[input.dataset.bookingEngineQuickReplyFilter] = input.value;
+    renderBookingEngineQuickReplyReport();
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "storeClusterCitySelect") {
+    refreshStoreClusterCascade("city");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "storeClusterZoneSelect") {
+    refreshStoreClusterCascade("zone");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "vehicleMasterStateSelect") {
+    refreshVehicleMasterClusterCascade("state");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "vehicleMasterCitySelect") {
+    refreshVehicleMasterClusterCascade("city");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "vehicleMasterZoneSelect") {
+    refreshVehicleMasterClusterCascade("zone");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "assistantVehicleStateFilter") {
+    refreshAssistantVehiclePickerCascade("state");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "assistantVehicleCityFilter") {
+    refreshAssistantVehiclePickerCascade("city");
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.id === "assistantVehicleZoneFilter") {
+    refreshAssistantVehiclePickerCascade("zone");
+    return;
+  }
+  if (
+    input instanceof HTMLSelectElement &&
+    ["assistantVehicleClusterFilter", "assistantVehicleFuelFilter", "assistantVehicleOwnerFilter", "assistantVehicleStatusFilter"].includes(input.id)
+  ) {
+    renderAssistantVehiclePicker($("#assistantVehiclePickerAssistantId")?.value || "");
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.dataset.pickerCheckbox) {
+    refreshPicker(input.dataset.pickerCheckbox);
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.dataset.pickerSelectAll) {
+    const name = input.dataset.pickerSelectAll;
+    const wrapper = document.querySelector(`[data-picker="${name}"]`);
+    wrapper?.querySelectorAll(`[data-picker-checkbox="${name}"]`).forEach((checkbox) => {
+      checkbox.checked = input.checked;
+    });
+    refreshPicker(name);
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.id === "allDayWorkingSchedule") {
+    for (const day of weekDays) {
+      const enabled = document.querySelector(`[name="${day}Enabled"]`);
+      if (enabled) enabled.checked = input.checked;
+    }
+    return;
+  }
+  if (!(input instanceof HTMLInputElement) || (!input.dataset.imageUpload && !input.dataset.documentUpload && !input.dataset.bookingMasterAttachments)) return;
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    clearAlert();
+    if (input.dataset.bookingMasterAttachments) {
+      const files = [...(input.files || [])];
+      for (const selectedFile of files) {
+        bookingMasterAttachments.push(await uploadBookingMasterAttachment(selectedFile));
+      }
+      renderBookingMasterAttachmentPreview();
+      showAlert(`${files.length} file${files.length === 1 ? "" : "s"} uploaded.`, "success");
+      return;
+    }
+    if (input.dataset.documentUpload) {
+      await uploadDocumentFile(file, input.dataset.documentUpload);
+      return;
+    }
+    const uploaded = await uploadImageFile(file, input.dataset.imageUpload);
+    if (input.dataset.imageUpload === "bookingMasterDetailImage") {
+      bookingMasterDetailImageUrl = uploaded.imageUrl || "";
+    }
+    if (input.dataset.imageUpload === "storeImages") {
+      const hidden = $("#storeImageUrls");
+      const urls = JSON.parse(hidden.value || "[]");
+      if (!urls.includes(uploaded.imageUrl)) urls.push(uploaded.imageUrl);
+      hidden.value = JSON.stringify(urls);
+      $("#storeImageGallery").innerHTML = storeImageGallery(urls);
+    }
+    if (input.dataset.imageUpload === "vehiclePictures") {
+      const hidden = $("#vehiclePictureUrls");
+      const urls = JSON.parse(hidden.value || "[]");
+      if (!urls.includes(uploaded.imageUrl)) urls.push(uploaded.imageUrl);
+      hidden.value = JSON.stringify(urls);
+      $("#vehiclePictureGallery").innerHTML = vehiclePictureGallery(urls);
+    }
+    if (input.dataset.imageUpload === "damageProofImages") {
+      const hidden = $("#damageProofPictureUrls");
+      const urls = JSON.parse(hidden.value || "[]");
+      if (!urls.includes(uploaded.imageUrl)) urls.push(uploaded.imageUrl);
+      hidden.value = JSON.stringify(urls);
+      $("#damageProofGallery").innerHTML = imageUrlGallery(urls, "remove-damage-proof-url");
+    }
+  } catch (error) {
+    showAlert(error.message);
+  } finally {
+    input.value = "";
+  }
+});
+
+document.addEventListener("input", (event) => {
+  const input = event.target;
+  if (input instanceof HTMLInputElement && input.closest("#passwordShareForm") && input.name === "verifyEmail") {
+    validatePasswordShareEmailInput(true);
+    $("#passwordShareEmailCodeRow").classList.add("d-none");
+    return;
+  }
+  if (input.id === "customerSearchInput") {
+    customerSearchText = input.value || "";
+    renderCustomerRows();
+    return;
+  }
+  if (input.closest?.("#customerAddressForm") && input.name === "customLabel") {
+    validateCustomerAddressCustomLabel(input.closest("#customerAddressForm"));
+  }
+});
+
+document.addEventListener("input", (event) => {
+  const input = event.target;
+  if (input instanceof HTMLInputElement && input.id === "serviceCategorySearchInput") {
+    serviceCategoryFilters.search = input.value || "";
+    renderServiceCategoryTable();
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.closest("#serviceCategoryForm") && ["basePrice", "discountValue"].includes(input.name)) {
+    updateCategoryPricingPreview();
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.closest("#priceMasterForm") && ["basePrice", "discountValue"].includes(input.name)) {
+    updatePriceMasterSellingPrice(input.closest("#priceMasterForm"));
+    return;
+  }
+  if (input.closest?.("[data-category-price-duration-row]") && ["basePrice", "discountValue"].includes(input.dataset.categoryPriceDurationField)) {
+    updateCategoryPriceDurationSellingPrice(input.closest("[data-category-price-duration-row]"));
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.dataset.categoryPriceFilter) {
+    categoryPriceFilters[input.dataset.categoryPriceFilter] = input.value;
+    renderCategoryPriceReport();
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.dataset.bookingEngineFilter) {
+    bookingEngineFilters[input.dataset.bookingEngineFilter] = input.value;
+    renderBookingEngineReport();
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.dataset.bookingEngineQuickReplyFilter) {
+    bookingEngineQuickReplyFilters[input.dataset.bookingEngineQuickReplyFilter] = input.value;
+    renderBookingEngineQuickReplyReport();
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.closest("#priceMasterForm") && input.name === "maxStoresPerCategory") {
+    validatePriceMasterComplexityLimit(input.closest("#priceMasterForm"));
+    return;
+  }
+  if (input.closest?.("[data-complexity-slab-row]") && ["storeNumber", "multiplier"].includes(input.dataset.complexitySlabField)) {
+    validatePriceMasterComplexityLimit(input.closest("#priceMasterForm"));
+    return;
+  }
+  if (input.closest?.("[data-time-slab-row]") && ["basePrice", "discountValue"].includes(input.dataset.timeSlabField)) {
+    updateTimeSlabSellingPrice(input.closest("[data-time-slab-row]"));
+    return;
+  }
+  if (input.closest?.("[data-category-group-row]") && ["basePrice", "discountValue"].includes(input.dataset.categoryGroupField)) {
+    updateCategoryGroupRowSellingPrice(input.closest("[data-category-group-row]"));
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.closest("#surgeRuleForm") && input.name === "adjustmentValue") {
+    updateSurgeX(input.closest("#surgeRuleForm"));
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.id === "assistantVehicleSearchInput") {
+    renderAssistantVehiclePicker($("#assistantVehiclePickerAssistantId")?.value || "");
+    return;
+  }
+  if (!(input instanceof HTMLInputElement) || !input.dataset.pickerSearch) return;
+  const query = input.value.trim().toLowerCase();
+  document.querySelectorAll(`[data-picker-option="${input.dataset.pickerSearch}"]`).forEach((option) => {
+    option.classList.toggle("d-none", query && !option.dataset.text.includes(query));
+  });
+});
+
+document.addEventListener("dragstart", (event) => {
+  const handle = event.target.closest?.("[data-category-guidance-drag-handle]");
+  if (!handle) return;
+  const row = handle.closest("[data-category-guidance-row]");
+  if (!row || !row.closest("#categoryMasterForm")) return;
+  categoryGuidanceDragRow = row;
+  row.classList.add("dragging");
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", row.dataset.categoryGuidanceRow || "category-guidance");
+  }
+});
+
+document.addEventListener("dragend", () => {
+  clearCategoryGuidanceDragState();
+});
+
+document.addEventListener("dragover", (event) => {
+  if (categoryGuidanceDragRow) {
+    const row = categoryGuidanceDropTarget(event.target);
+    if (!row || row === categoryGuidanceDragRow || row.parentElement !== categoryGuidanceDragRow.parentElement) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    document.querySelectorAll(".category-guidance-row.drag-over").forEach((item) => item.classList.remove("drag-over"));
+    row.classList.add("drag-over");
+    const box = row.getBoundingClientRect();
+    const placeAfter = event.clientY > box.top + box.height / 2;
+    row.parentElement.insertBefore(categoryGuidanceDragRow, placeAfter ? row.nextSibling : row);
+    return;
+  }
+  const box = event.target.closest?.("[data-upload-box]");
+  if (!box) return;
+  event.preventDefault();
+  box.classList.add("dragging");
+});
+
+document.addEventListener("dragleave", (event) => {
+  const box = event.target.closest?.("[data-upload-box]");
+  if (box) box.classList.remove("dragging");
+});
+
+document.addEventListener("drop", async (event) => {
+  if (categoryGuidanceDragRow) {
+    event.preventDefault();
+    clearCategoryGuidanceDragState();
+    return;
+  }
+  const box = event.target.closest?.("[data-upload-box]");
+  if (!box) return;
+  event.preventDefault();
+  box.classList.remove("dragging");
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  try {
+    clearAlert();
+    if (box.dataset.uploadKind === "document") {
+      await uploadDocumentFile(file, box.dataset.uploadBox);
+      return;
+    }
+    const uploaded = await uploadImageFile(file, box.dataset.uploadBox);
+    if (box.dataset.uploadBox === "storeImages") {
+      const hidden = $("#storeImageUrls");
+      const urls = JSON.parse(hidden.value || "[]");
+      if (!urls.includes(uploaded.imageUrl)) urls.push(uploaded.imageUrl);
+      hidden.value = JSON.stringify(urls);
+      $("#storeImageGallery").innerHTML = storeImageGallery(urls);
+    }
+    if (box.dataset.uploadBox === "vehiclePictures") {
+      const hidden = $("#vehiclePictureUrls");
+      const urls = JSON.parse(hidden.value || "[]");
+      if (!urls.includes(uploaded.imageUrl)) urls.push(uploaded.imageUrl);
+      hidden.value = JSON.stringify(urls);
+      $("#vehiclePictureGallery").innerHTML = vehiclePictureGallery(urls);
+    }
+    if (box.dataset.uploadBox === "damageProofImages") {
+      const hidden = $("#damageProofPictureUrls");
+      const urls = JSON.parse(hidden.value || "[]");
+      if (!urls.includes(uploaded.imageUrl)) urls.push(uploaded.imageUrl);
+      hidden.value = JSON.stringify(urls);
+      $("#damageProofGallery").innerHTML = imageUrlGallery(urls, "remove-damage-proof-url");
+    }
+  } catch (error) {
+    showAlert(error.message);
+  }
+});
+
+document.addEventListener("click", async (event) => {
+  if (event.target.closest?.('a[href^="https://wa.me/"]')) return;
+  const restartBookingLiveSyncButton = event.target.closest?.('[data-action="restart-booking-live-sync"]');
+  if (restartBookingLiveSyncButton) {
+    event.preventDefault();
+    try {
+      await ensureBookingRealtimeSettings(true);
+      await startBookingRealtime(true);
+      renderSystemControlStatus((await safeApi(BASE_PATH+"/operations/bookings/realtime/status")).data);
+      showAlert("Booking live sync restarted.", "success");
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const bookingAssistantToggle = event.target.closest?.('[data-action="booking-master-assistant-toggle"]');
+  if (bookingAssistantToggle) {
+    event.preventDefault();
+    if (bookingMasterAssistantWidgetClickSuppressed || bookingMasterAssistantWidgetDrag?.moved) return;
+    bookingMasterAssistantWidgetExpanded = !bookingMasterAssistantWidgetExpanded;
+    renderBookingMasterAssistantWidget();
+    return;
+  }
+  const bookingAssistantCollapse = event.target.closest?.('[data-action="booking-master-assistant-collapse"]');
+  if (bookingAssistantCollapse) {
+    event.preventDefault();
+    bookingMasterAssistantWidgetExpanded = false;
+    renderBookingMasterAssistantWidget();
+    return;
+  }
+  const bookingAssistantTab = event.target.closest?.('[data-action="booking-master-assistant-tab"]');
+  if (bookingAssistantTab) {
+    event.preventDefault();
+    bookingMasterAssistantWidgetTab = bookingAssistantTab.dataset.tab || "all";
+    renderBookingMasterAssistantWidget();
+    return;
+  }
+  const bookingAssistantProfile = event.target.closest?.('[data-action="booking-master-assistant-profile"]');
+  if (bookingAssistantProfile) {
+    event.preventDefault();
+    openAssignedAssistantProfileModal(bookingAssistantProfile.dataset.id || "").catch((error) => showAlert(error.message));
+    return;
+  }
+  const verifyOtpChannelButton = event.target.closest?.('[data-action="verify-otp-channel"]');
+  if (verifyOtpChannelButton) {
+    event.preventDefault();
+    try {
+      await verifyOtpChannels([verifyOtpChannelButton.dataset.channel], $("#otpVerifyForm"));
+    } catch (error) {
+      setOtpVerifyModalAlert(error.message, "danger");
+    }
+    return;
+  }
+  const passwordShareSendEmailCodeButton = event.target.closest?.("#passwordShareSendEmailCodeButton");
+  if (passwordShareSendEmailCodeButton) {
+    event.preventDefault();
+    try {
+      await sendPasswordShareEmailCode();
+    } catch (error) {
+      setPasswordShareModalAlert(error.message, "danger");
+    }
+    return;
+  }
+  const passwordShareVerifyEmailButton = event.target.closest?.("#passwordShareVerifyEmailButton");
+  if (passwordShareVerifyEmailButton) {
+    event.preventDefault();
+    try {
+      await verifyPasswordShareEmailCode();
+    } catch (error) {
+      setPasswordShareModalAlert(error.message, "danger");
+    }
+    return;
+  }
+  const verifyUserOtpButton = event.target.closest?.('[data-action="verify-user-otp"]');
+  if (verifyUserOtpButton) {
+    event.preventDefault();
+    try {
+      const user = cache.users.find((item) => item.id === verifyUserOtpButton.dataset.id);
+      if (!user) throw new Error("User not found.");
+      const channels = pendingOtpChannelsForUser(user);
+      if (!channels.length) throw new Error("Verification code is already completed.");
+      const channelStatus = { ...(user.otpChannelStatus || user.metadata?.otpChannelStatus || {}) };
+      const roleLabel = (user.roles || []).map((role) => role.replace(/_/g, " ")).join(" / ") || "User";
+      openOtpVerifyModal(user.id, channels, { channels, channelStatus, roleLabel });
+      setOtpVerifyModalAlert("Enter the verification code already received, or click Send/Re-send Verification Code.", "warning");
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const verifyUserCodeChannelButton = event.target.closest?.('[data-action="verify-user-code-channel"]');
+  if (verifyUserCodeChannelButton) {
+    event.preventDefault();
+    try {
+      const user = cache.users.find((item) => item.id === verifyUserCodeChannelButton.dataset.id);
+      if (!user) throw new Error("User not found.");
+      const channel = verifyUserCodeChannelButton.dataset.channel;
+      const channels = pendingOtpChannelsForUser(user).filter((item) => item === channel);
+      if (!channels.length) throw new Error("Verification code is already completed.");
+      const channelStatus = { ...(user.otpChannelStatus || user.metadata?.otpChannelStatus || {}) };
+      const roleLabel = (user.roles || []).map((role) => role.replace(/_/g, " ")).join(" / ") || "User";
+      openOtpVerifyModal(user.id, channels, { channels, channelStatus, roleLabel });
+      setOtpVerifyModalAlert(`Enter the ${otpChannelVerifiedName(channel)} verification code already received, or click Send/Re-send Verification Code.`, "warning");
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const bookingMasterStoreButton = event.target.closest?.('[data-action="booking-master-open-store"]');
+  if (bookingMasterStoreButton) {
+    event.preventDefault();
+    try {
+      clearAlert();
+      bookingMasterOpenStoreDetails(bookingMasterStoreButton.dataset.storeId || "");
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const bookingMasterAddStoreButton = event.target.closest?.('[data-action="booking-master-add-store"]');
+  if (bookingMasterAddStoreButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    try {
+      clearAlert();
+      await addBookingMasterStoreToCart(bookingMasterAddStoreButton.dataset.storeId || "");
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const bookingMasterAddCategoryButton = event.target.closest?.('[data-action="booking-master-add-category"]');
+  if (bookingMasterAddCategoryButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    try {
+      clearAlert();
+      await addBookingMasterCategoryToCart(bookingMasterAddCategoryButton.dataset.categoryId || "");
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const bookingMasterRemoveStoreButton = event.target.closest?.('[data-action="booking-master-remove-cart-store"]');
+  if (bookingMasterRemoveStoreButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    try {
+      clearAlert();
+      await removeBookingMasterStoreFromCart(bookingMasterRemoveStoreButton.dataset.storeId || "");
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const bookingMasterRemoveCategoryButton = event.target.closest?.('[data-action="booking-master-remove-cart-category"]');
+  if (bookingMasterRemoveCategoryButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    try {
+      clearAlert();
+      await removeBookingMasterCategoryFromCart(bookingMasterRemoveCategoryButton.dataset.categoryId || "");
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const bookingMasterCreateButton = event.target.closest?.('[data-action="booking-master-create-booking"]');
+  if (bookingMasterCreateButton) {
+    event.preventDefault();
+    try {
+      clearAlert();
+      const mode = bookingMasterCreateButton.dataset.bookingMode || "";
+      if (mode === "schedule") {
+        openBookingMasterScheduleSheet();
+      } else {
+        await createBookingMasterBooking(mode);
+      }
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const bookingMasterSelectButton = event.target.closest?.('[data-action="select-booking-master-customer"]');
+  if (bookingMasterSelectButton) {
+    event.preventDefault();
+    const customer = bookingMasterCustomerResults.find((item) => item.customerId === bookingMasterSelectButton.dataset.customerId);
+    if (!customer) {
+      showAlert("Customer selection expired. Search again and select the customer.");
+      return;
+    }
+    try {
+      clearAlert();
+      await selectBookingMasterCustomer(customer);
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const bookingMasterLocationButton = event.target.closest?.(
+    '[data-action="parse-booking-master-whatsapp-location"], [data-action="use-booking-master-manual-location"], #bookingMasterWhatsappUseButton, #bookingMasterManualUseButton'
+  );
+  if (bookingMasterLocationButton) {
+    event.preventDefault();
+    try {
+      clearAlert();
+      if (!bookingMasterSelectedCustomer?.customerId) {
+        showAlert("Select a customer before choosing task location.");
+        return;
+      }
+      if (bookingMasterLocationButton.dataset.action === "parse-booking-master-whatsapp-location") {
+        await useBookingMasterLatLngInput("bookingMasterWhatsappLocationInput", "whatsapp");
+      } else {
+        await useBookingMasterLatLngInput("bookingMasterManualLatLngInput", "manual");
+      }
+    } catch (error) {
+      bookingMasterServiceability = { isServiceable: false, message: error.message };
+      renderBookingMasterLocationPhase();
+      showAlert(error.message);
+    }
+    return;
+  }
+  const button = event.target.closest("[data-action], [data-section], #cancelModuleEditButton, #cancelStateEditButton, #cancelCityEditButton, #cancelZoneEditButton, #cancelClusterEditButton, #cancelServiceEditButton, #cancelServiceCategoryEditButton, #cancelCategoryMasterEditButton, #cancelCategoryPriceEditButton, #cancelBookingEngineEditButton, #cancelBookingEngineQuickReplyEditButton, #cancelBookingTypeEditButton, #cancelSurgeRuleEditButton, #cancelPriceRuleEditButton, #cancelStoreCategoryEditButton, #cancelStoreKeywordEditButton, #cancelStoreEditButton, #cancelVehicleMasterEditButton, #cancelUserEditButton");
+  if (!button) return;
+  if (button.dataset.section && !button.dataset.action) {
+    if (button.closest(".nav-menu")) return;
+    await showSection(button.dataset.section);
+    return;
+  }
+
+  if (button.id === "cancelModuleEditButton") {
+    resetModuleForm();
+    return;
+  }
+  if (button.id === "cancelStateEditButton") {
+    resetStateForm();
+    return;
+  }
+  if (button.id === "cancelCityEditButton") {
+    resetCityForm();
+    return;
+  }
+  if (button.id === "cancelZoneEditButton") {
+    resetZoneForm();
+    return;
+  }
+  if (button.id === "cancelClusterEditButton") {
+    resetClusterForm();
+    return;
+  }
+  if (button.id === "cancelServiceEditButton") {
+    resetServiceForm();
+    return;
+  }
+  if (button.id === "cancelServiceCategoryEditButton") {
+    resetServiceCategoryForm();
+    return;
+  }
+  if (button.id === "cancelCategoryMasterEditButton") {
+    resetCategoryMasterForm();
+    return;
+  }
+  if (button.id === "cancelCategoryPriceEditButton") {
+    resetCategoryPriceForm();
+    return;
+  }
+  if (button.id === "cancelBookingEngineEditButton") {
+    resetBookingEngineForm();
+    return;
+  }
+  if (button.id === "cancelBookingEngineQuickReplyEditButton") {
+    resetBookingEngineQuickReplyForm();
+    return;
+  }
+  if (button.id === "cancelBookingTypeEditButton") {
+    resetBookingTypeForm();
+    return;
+  }
+  if (button.id === "cancelSurgeRuleEditButton") {
+    resetSurgeRuleForm();
+    return;
+  }
+  if (button.id === "cancelPriceRuleEditButton") {
+    resetPriceMasterForm();
+    return;
+  }
+  if (button.id === "cancelStoreCategoryEditButton") {
+    resetStoreCategoryForm();
+    return;
+  }
+  if (button.id === "cancelStoreKeywordEditButton") {
+    resetStoreKeywordForm();
+    return;
+  }
+  if (button.id === "cancelStoreEditButton") {
+    resetStoreForm();
+    return;
+  }
+  if (button.id === "cancelVehicleMasterEditButton") {
+    resetVehicleMasterForm();
+    return;
+  }
+  if (button.id === "cancelUserEditButton") {
+    resetUserForm();
+    return;
+  }
+
+  const { action, id, active } = button.dataset;
+  if (!action) return;
+  if (action === "add-category-guidance-row") {
+    event.preventDefault();
+    event.stopPropagation();
+    const type = button.dataset.type || "";
+    const list = button.closest(".category-guidance-block")?.querySelector(`[data-category-guidance-list="${type}"]`);
+    if (!list) return;
+    list.insertAdjacentHTML("beforeend", categoryMasterGuidanceRows(type, [""]));
+    const input = list.lastElementChild?.querySelector("input");
+    input?.focus();
+    return;
+  }
+  if (action === "remove-category-guidance-row") {
+    event.preventDefault();
+    event.stopPropagation();
+    const row = button.closest("[data-category-guidance-row]");
+    const list = row?.parentElement;
+    if (!row || !list) return;
+    row.remove();
+    if (!list.querySelector("[data-category-guidance-row]")) {
+      list.insertAdjacentHTML("beforeend", categoryMasterGuidanceRows(button.dataset.type || "", [""]));
+    }
+    return;
+  }
+  if ([
+    "booking-master-add-category",
+    "booking-master-remove-cart-category",
+    "booking-master-add-store",
+    "booking-master-remove-cart-store",
+    "booking-master-add-time-slab",
+    "booking-master-remove-time-slab",
+    "booking-master-remove-cart-item"
+  ].includes(action)) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+  }
+
+  try {
+    clearAlert();
+    if (action === "clear-service-category-filters") {
+      serviceCategoryFilters = { search: "", serviceId: "" };
+      const input = $("#serviceCategorySearchInput");
+      if (input) input.value = "";
+      renderServiceCategoryTable();
+      return;
+    }
+    if (action === "browse-image") {
+      document.getElementById(button.dataset.target)?.click();
+      return;
+    }
+    if (action === "close-alert") {
+      clearAlert();
+      return;
+    }
+    if (action === "add-category-price-duration") {
+      const host = $("#categoryPriceDurationRows");
+      if (!host) return;
+      host.insertAdjacentHTML("beforeend", categoryPriceDurationRowHtml({ timeDurationMinutes: 30 }));
+      const row = host.lastElementChild;
+      if (row) updateCategoryPriceDurationSellingPrice(row);
+      return;
+    }
+    if (action === "remove-category-price-duration") {
+      const row = button.closest("[data-category-price-duration-row]");
+      const rows = [...document.querySelectorAll("[data-category-price-duration-row]")];
+      if (!row) return;
+      if (rows.length > 1) {
+        row.remove();
+      } else {
+        renderCategoryPriceDurationRows();
+      }
+      return;
+    }
+    if (action === "open-booking-master-customer-picker") {
+      await openBookingMasterCustomerPicker();
+      return;
+    }
+    if (action === "change-booking-master-customer") {
+      await openBookingMasterCustomerPicker();
+      return;
+    }
+    if (action === "change-booking-master-address") {
+      await openBookingMasterAddressPicker("primary");
+      return;
+    }
+    if (action === "add-booking-master-location-stop") {
+      await openBookingMasterAddressPicker("stop");
+      return;
+    }
+    if (action === "remove-booking-master-location-stop") {
+      bookingMasterLocationStops.splice(Number(button.dataset.index || 0), 1);
+      syncBookingMasterLocationStops();
+      renderBookingMasterNextPhase();
+      return;
+    }
+    if (action === "back-to-booking-master") {
+      bookingMasterAddressPickerActive = false;
+      bookingMasterAddressPickerMode = "primary";
+      await showSection("bookingMaster");
+      return;
+    }
+    if (action === "back-to-customers") {
+      await showSection("customers");
+      return;
+    }
+    if (action === "manage-customer-addresses") {
+      const customer = (await api(`/admin-customers/${id}`)).data;
+      await selectCustomerAddressCustomer(customer);
+      await showSection("customerAddresses");
+      return;
+    }
+    if (action === "select-admin-customer") {
+      await chooseCustomerOnCustomersPage(id);
+      return;
+    }
+    if (action === "open-customer-addresses") {
+      await openCustomerAddressesPage(id);
+      return;
+    }
+    if (action === "edit-admin-customer") {
+      await editAdminCustomer(id);
+      return;
+    }
+    if (action === "select-customer-address-location") {
+      await selectCustomerAddressLocation(JSON.parse(button.dataset.location || "{}"));
+      return;
+    }
+    if (action === "add-customer-address") {
+      addCustomerAddress();
+      return;
+    }
+    if (action === "choose-booking-master-address") {
+      const address = customerAddressRows.find((item) => String(item.addressId || "") === String(id || ""));
+      if (!address) throw new Error("Customer address not found.");
+      await chooseBookingMasterAddress(address);
+      return;
+    }
+    if (action === "choose-booking-master-previous-location") {
+      const address = customerPreviousUsedLocationRows.find((item) => String(item.addressId || "") === String(id || ""));
+      if (!address) throw new Error("Previous used location not found.");
+      await chooseBookingMasterAddress(address);
+      return;
+    }
+    if (action === "save-previous-used-location-as-address") {
+      await savePreviousUsedLocationAsAddress(id);
+      return;
+    }
+    if (action === "use-customer-current-location") {
+      await useCustomerCurrentLocation();
+      return;
+    }
+    if (action === "open-customer-address-map") {
+      await openCustomerAddressMapPicker();
+      return;
+    }
+    if (action === "confirm-customer-address-map-pin") {
+      await confirmCustomerAddressMapPin();
+      return;
+    }
+    if (action === "edit-customer-address") {
+      await editCustomerAddress(id);
+      return;
+    }
+    if (action === "cancel-customer-address-edit") {
+      resetCustomerAddressEdit();
+      return;
+    }
+    if (action === "delete-customer-address") {
+      if (!customerAddressSelectedCustomer?.id) return;
+      await api(`/admin-customers/${customerAddressSelectedCustomer.id}/addresses/${id}`, { method: "DELETE" });
+      await loadCustomerAddressLists(customerAddressSelectedCustomer.id);
+      renderCustomerAddressManager();
+      return;
+    }
+    if (action === "add-booking-type-time") {
+      addBookingTypeTimeSlot(button.closest("[data-time-slot-builder-form]"));
+      return;
+    }
+    if (action === "add-booking-type-time-category") {
+      addBookingTypeTimeCategory(button.closest("[data-time-slot-builder-form]"));
+      return;
+    }
+    if (action === "update-booking-type-time-category") {
+      updateBookingTypeTimeCategory(button.closest("[data-time-slot-builder-form]"), id || button.dataset.id || "");
+      return;
+    }
+    if (action === "select-booking-type-time-category") {
+      const form = button.closest("[data-time-slot-builder-form]");
+      if (!form?.elements.activeTimeCategoryId) return;
+      form.elements.activeTimeCategoryId.value = id || "";
+      renderBookingTypeTimeCategories(form);
+      return;
+    }
+    if (action === "remove-booking-type-time-category") {
+      const form = button.closest("[data-time-slot-builder-form]");
+      if (!form) return;
+      setBookingTypeTimeCategories(form, bookingTypeTimeCategories(form).filter((category) => category.id !== id));
+      return;
+    }
+    if (action === "remove-booking-type-time") {
+      const form = button.closest("[data-time-slot-builder-form]");
+      if (!form) return;
+      const categoryId = id || button.dataset.id || form.elements.activeTimeCategoryId?.value || "";
+      const categories = bookingTypeTimeCategories(form).map((category) => category.id === categoryId
+        ? { ...category, timeSlots: category.timeSlots.filter((time) => time !== button.dataset.time) }
+        : category);
+      setBookingTypeTimeCategories(form, categories, categoryId);
+      return;
+    }
+    if (action === "booking-master-search") {
+      await searchBookingMasterCustomers();
+      return;
+    }
+    if (action === "select-booking-master-customer") {
+      const customer = bookingMasterCustomerResults.find((item) => item.customerId === button.dataset.customerId);
+      if (!customer) {
+        showAlert("Customer selection expired. Search again and select the customer.");
+        return;
+      }
+      await selectBookingMasterCustomer(customer);
+      return;
+    }
+    if (action === "clear-booking-master-customer") {
+      bookingMasterSelectedCustomer = null;
+      resetBookingMasterLocationState();
+      renderBookingMasterSelectedCustomer();
+      return;
+    }
+    if (action === "select-booking-master-location") {
+      await selectBookingMasterLocation(JSON.parse(button.dataset.location || "{}"));
+      return;
+    }
+    if (action === "set-booking-master-map-center") {
+      await useBookingMasterMapCenter();
+      return;
+    }
+    if (action === "booking-master-continue-services") {
+      await continueBookingMasterToServices();
+      return;
+    }
+    if (action === "booking-master-select-service") {
+      await selectBookingMasterService(button.dataset.serviceId || "");
+      return;
+    }
+    if (action === "booking-master-select-category") {
+      await selectBookingMasterCategory(button.dataset.categoryId || "");
+      return;
+    }
+    if (action === "booking-master-add-category") {
+      await addBookingMasterCategoryToCart(button.dataset.categoryId || "");
+      return;
+    }
+    if (action === "booking-master-remove-cart-category") {
+      await removeBookingMasterCategoryFromCart(button.dataset.categoryId || "");
+      return;
+    }
+    if (action === "booking-master-add-time-slab") {
+      await addBookingMasterTimeSlotToCart(button.dataset.categoryId || "", button.dataset.duration || 30);
+      return;
+    }
+    if (action === "booking-master-remove-time-slab") {
+      removeBookingMasterTimeSlotFromCart();
+      return;
+    }
+    if (action === "booking-master-open-store") {
+      bookingMasterOpenStoreDetails(button.dataset.storeId || "");
+      return;
+    }
+    if (action === "booking-master-remove-cart-store") {
+      await removeBookingMasterStoreFromCart(button.dataset.storeId || "");
+      return;
+    }
+    if (action === "toggle-assistant-availability") {
+      const assistantId = button.dataset.id || "";
+      const isOnline = button.dataset.online === "true";
+      if (!assistantId) return;
+      button.disabled = true;
+      try {
+        const existingAssistant = cache.assistantMasters.find((item) => item.id === assistantId);
+        const visibleSecondsBeforeToggle = existingAssistant ? assistantTodayOnlineSeconds(existingAssistant) : 0;
+        const payload = await api(`/assistant-master/${assistantId}/availability`, {
+          method: "PATCH",
+          body: JSON.stringify({ isOnline })
+        });
+        const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+        if (assistant) {
+          assistant.availabilityStatus = isOnline ? "available" : "offline";
+          const savedSeconds = Number(payload.data?.todayOnlineSeconds ?? assistant.todayOnlineSeconds ?? 0);
+          assistant.todayOnlineSeconds = isOnline ? savedSeconds : Math.max(savedSeconds, visibleSecondsBeforeToggle);
+          assistant.onlineStartedAt = payload.data?.onlineStartedAt || (isOnline ? new Date().toISOString() : null);
+          assistant.availabilityUpdatedAt = payload.data?.availabilityUpdatedAt || new Date().toISOString();
+          assistant.todayOnlineSyncedAt = new Date().toISOString();
+          if (isOnline) {
+            assistant.isLoggedIn = true;
+            assistant.lastLoginAt = assistant.lastLoginAt || new Date().toISOString();
+          }
+        }
+        renderAssistantRecords();
+        showAlert(`Assistant marked ${isOnline ? "Online" : "Offline"}.`, "success");
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
+    if (action === "toggle-assistant-login") {
+      const assistantId = button.dataset.id || "";
+      const shouldLogIn = button.dataset.loggedIn === "true";
+      const assistant = cache.assistantMasters.find((item) => item.id === assistantId);
+      if (!assistantId || !assistant) return;
+      const originalText = button.textContent;
+      const visibleSecondsBeforeToggle = assistantTodayOnlineSeconds(assistant);
+      button.disabled = true;
+      button.textContent = "Updating...";
+      try {
+        const payload = await api(`/assistant-master/${assistantId}/login-status`, {
+          method: "PATCH",
+          body: JSON.stringify({ isLoggedIn: shouldLogIn })
+        });
+        assistant.isLoggedIn = shouldLogIn;
+        assistant.lastLoginAt = shouldLogIn ? payload.data?.lastLoginAt || new Date().toISOString() : payload.data?.lastLoginAt || assistant.lastLoginAt || null;
+        if (!shouldLogIn) {
+          const savedSeconds = Number(payload.data?.todayOnlineSeconds ?? assistant.todayOnlineSeconds ?? 0);
+          assistant.availabilityStatus = "offline";
+          assistant.todayOnlineSeconds = Math.max(savedSeconds, visibleSecondsBeforeToggle);
+          assistant.onlineStartedAt = null;
+          assistant.availabilityUpdatedAt = payload.data?.availabilityUpdatedAt || new Date().toISOString();
+          assistant.todayOnlineSyncedAt = new Date().toISOString();
+        }
+        renderAssistantRecords();
+        showAlert(`Assistant marked ${shouldLogIn ? "Logged-In" : "Logged-Out and Offline"}.`, "success");
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+      return;
+    }
+    if (action === "booking-master-remove-cart-item") {
+      await removeBookingMasterCartItem(Number(button.dataset.index || 0));
+      return;
+    }
+    if (action === "booking-master-select-schedule-date") {
+      bookingMasterSelectedScheduleDate = button.dataset.date || "";
+      ensureBookingMasterScheduleSelection(bookingMasterEffectiveBookingType("schedule"));
+      refreshBookingMasterScheduleSelectionUi();
+      return;
+    }
+    if (action === "booking-master-select-schedule-period") {
+      bookingMasterSelectedSchedulePeriod = button.dataset.period || "morning";
+      const bookingType = bookingMasterEffectiveBookingType("schedule");
+      const allTimes = bookingMasterScheduleTimes(bookingType);
+      const category = bookingMasterAvailableTimeCategoriesForDate(bookingType, bookingMasterSelectedScheduleDate).find((item) => item.id === bookingMasterSelectedSchedulePeriod);
+      const times = (category?.timeSlots || []).filter((time) => allTimes.includes(time)).sort();
+      const availableTimes = times.filter((time) => !bookingMasterScheduleTimeDisabled(bookingMasterSelectedScheduleDate, time));
+      if (!availableTimes.includes(bookingMasterSelectedScheduleTime)) bookingMasterSelectedScheduleTime = availableTimes[0] || "";
+      refreshBookingMasterScheduleSelectionUi();
+      return;
+    }
+    if (action === "booking-master-select-schedule-time") {
+      bookingMasterSelectedScheduleTime = button.dataset.time || "";
+      refreshBookingMasterScheduleSelectionUi();
+      return;
+    }
+    if (action === "booking-master-quote-time") {
+      bookingMasterDurationMinutes = Number($("#bookingMasterDurationInput")?.value || 30);
+      await quoteBookingMasterCart("time");
+      return;
+    }
+    if (action === "booking-master-create-booking") {
+      const mode = button.dataset.bookingMode || "";
+      if (mode === "schedule") {
+        openBookingMasterScheduleSheet();
+      } else {
+        await createBookingMasterBooking(mode);
+      }
+      return;
+    }
+    if (action === "booking-master-confirm-schedule-booking") {
+      await createBookingMasterBooking("schedule");
+      closeBookingMasterScheduleSheet();
+      return;
+    }
+    if (action === "close-booking-master-schedule-sheet") {
+      closeBookingMasterScheduleSheet();
+      return;
+    }
+    if (action === "parse-booking-master-whatsapp-location") {
+      await useBookingMasterLatLngInput("bookingMasterWhatsappLocationInput", "whatsapp");
+      return;
+    }
+    if (action === "use-booking-master-manual-location") {
+      await useBookingMasterLatLngInput("bookingMasterManualLatLngInput", "manual");
+      return;
+    }
+    if (action === "remove-booking-master-attachment") {
+      const index = Number(button.dataset.index);
+      bookingMasterAttachments = bookingMasterAttachments.filter((_, itemIndex) => itemIndex !== index);
+      renderBookingMasterAttachmentPreview();
+      return;
+    }
+    if (action === "preview-booking-master-attachment") {
+      const index = Number(button.dataset.index);
+      openBookingMediaPreview(bookingMasterAttachments[index]);
+      return;
+    }
+    if (action === "preview-booking-upload") {
+      openBookingMediaPreview({
+        label: button.dataset.title || "Upload",
+        mimeType: button.dataset.mimeType || "",
+        type: button.dataset.type || "",
+        url: button.dataset.url || "",
+        previewUrl: button.dataset.url || ""
+      });
+      return;
+    }
+    if (action === "view-image") {
+      assistantDocPreviewState = { assistantId: "", documentId: "", replacementFile: null };
+      clearImagePreviewAlert();
+      $("#imagePreviewKind").textContent = "Image Preview";
+      $("#imagePreviewLarge").src = withBasePath(button.dataset.url || "");
+      $("#imagePreviewLarge").classList.remove("d-none");
+      $("#documentPreviewFrame").classList.add("d-none");
+      $("#documentPreviewFrame").src = "";
+      const video = $("#documentPreviewVideo");
+      if (video) {
+        video.pause?.();
+        video.src = "";
+        video.classList.add("d-none");
+      }
+      $("#documentPreviewLink").classList.add("d-none");
+      $("#previewPrevButton").classList.add("d-none");
+      $("#previewNextButton").classList.add("d-none");
+      $("#documentPreviewStatusSelect").classList.add("d-none");
+      $("#documentPreviewStatusSaveButton").classList.add("d-none");
+      $("#documentPreviewReuploadButton").classList.add("d-none");
+      $("#documentPreviewDeleteButton").classList.add("d-none");
+      $("#imagePreviewModalTitle").textContent = button.dataset.title || "Image Preview";
+      $("#imagePreviewModal").classList.remove("d-none");
+      return;
+    }
+    if (action === "close-image-preview-alert") {
+      clearImagePreviewAlert();
+      return;
+    }
+    if (action === "preview-assistant-doc") {
+      const assistantId = button.closest("[data-assistant-docs]")?.dataset.assistantDocs || "";
+      openAssistantDocPreview(assistantId, button.dataset.docId || Number(button.dataset.docIndex || 0));
+      return;
+    }
+    if (action === "assistant-doc-preview-prev") {
+      stepAssistantDocPreview(-1);
+      return;
+    }
+    if (action === "assistant-doc-preview-next") {
+      stepAssistantDocPreview(1);
+      return;
+    }
+    if (action === "save-assistant-doc-status") {
+      await saveAssistantDocPreviewStatus();
+      return;
+    }
+    if (action === "reupload-assistant-doc") {
+      $("#documentPreviewReuploadInput").click();
+      return;
+    }
+    if (action === "delete-assistant-doc") {
+      await deleteAssistantDocPreview();
+      return;
+    }
+    if (action === "reset-user-password") {
+      const superAdminPassword = prompt("Passwords are stored securely and cannot be viewed. Enter your Super Admin password to reset this user's password.");
+      if (!superAdminPassword) return;
+      const newPassword = prompt("Enter the new password for this user. Minimum 8 characters.");
+      if (!newPassword) return;
+      if (newPassword.length < 8) {
+        showAlert("New password must be at least 8 characters.");
+        return;
+      }
+      await api(`/users/${id}/password/reset-by-super-admin`, {
+        method: "POST",
+        body: JSON.stringify({ superAdminPassword, newPassword })
+      });
+      showAlert("Password reset successfully.");
+      await showSection("users");
+      return;
+    }
+    if (action === "share-user-password") {
+      openPasswordShareModal(id);
+      return;
+    }
+    if (action === "remove-store-image-url") {
+      const hidden = $("#storeImageUrls");
+      const urls = JSON.parse(hidden.value || "[]").filter((url) => url !== button.dataset.url);
+      hidden.value = JSON.stringify(urls);
+      $("#storeImageGallery").innerHTML = storeImageGallery(urls);
+      return;
+    }
+    if (action === "remove-vehicle-picture-url") {
+      const hidden = $("#vehiclePictureUrls");
+      const urls = JSON.parse(hidden.value || "[]").filter((url) => url !== button.dataset.url);
+      hidden.value = JSON.stringify(urls);
+      $("#vehiclePictureGallery").innerHTML = vehiclePictureGallery(urls);
+      return;
+    }
+    if (action === "remove-damage-proof-url") {
+      const hidden = $("#damageProofPictureUrls");
+      const urls = JSON.parse(hidden.value || "[]").filter((url) => url !== button.dataset.url);
+      hidden.value = JSON.stringify(urls);
+      $("#damageProofGallery").innerHTML = imageUrlGallery(urls, "remove-damage-proof-url");
+      return;
+    }
+    if (action === "apply-all-day-schedule") {
+      const openTime = $("#allDayOpenTime")?.value || "";
+      const closeTime = $("#allDayCloseTime")?.value || "";
+      for (const day of weekDays) {
+        const enabled = document.querySelector(`[name="${day}Enabled"]`);
+        const open = document.querySelector(`[name="${day}Open"]`);
+        const close = document.querySelector(`[name="${day}Close"]`);
+        if (enabled) enabled.checked = true;
+        if (open) open.value = openTime;
+        if (close) close.value = closeTime;
+      }
+      const allDay = $("#allDayWorkingSchedule");
+      if (allDay) allDay.checked = true;
+      return;
+    }
+    if (action === "picker-remove") {
+      const wrapper = document.querySelector(`[data-picker="${button.dataset.picker}"]`);
+      const input = wrapper?.querySelector(`[data-picker-checkbox="${button.dataset.picker}"][value="${CSS.escape(button.dataset.id)}"]`);
+      if (input) input.checked = false;
+      refreshPicker(button.dataset.picker);
+      return;
+    }
+    if (action === "assistant-master-search") {
+      renderAssistantMasterRecords();
+      return;
+    }
+    if (action === "assistant-search") {
+      assistantPage = 1;
+      renderAssistantRecords();
+      return;
+    }
+    if (action === "assistant-tab") {
+      assistantStatusTab = button.dataset.assistantTab || "all";
+      assistantActiveTabGroup = "lifecycle";
+      assistantPage = 1;
+      renderAssistantRecords();
+      return;
+    }
+    if (action === "assistant-availability-tab") {
+      assistantAvailabilityTab = button.dataset.assistantAvailabilityTab || "all";
+      assistantActiveTabGroup = "availability";
+      assistantPage = 1;
+      renderAssistantRecords();
+      return;
+    }
+    if (action === "assistant-page") {
+      assistantPage = Number(button.dataset.page || 1);
+      renderAssistantRecords();
+      return;
+    }
+    if (action === "delete-assistant") {
+      if (!isSuperAdminUser()) throw new Error("Only Super Admin can delete assistants.");
+      if (!confirm("Delete this assistant?")) return;
+      await api(`/verification/assistants/${id}`, { method: "DELETE" });
+      await showSection("assistant");
+      return;
+    }
+    if (action === "assistant-vehicle-picker-search") {
+      renderAssistantVehiclePicker($("#assistantVehiclePickerAssistantId")?.value || "");
+      return;
+    }
+    if (action === "add-price-time-slab") {
+      $("#priceMasterTimeSlabs")?.insertAdjacentHTML("beforeend", timeSlabRowHtml({ label: "30 min", durationMinutes: 30 }));
+      updateTimeSlabSellingPrice($("#priceMasterTimeSlabs")?.lastElementChild);
+      return;
+    }
+    if (action === "add-price-complexity-slab") {
+      const form = $("#priceMasterForm");
+      const usage = priceMasterComplexityLimitUsage(form);
+      if (usage.remainingStores <= 0) {
+        showAlert(priceMasterComplexityLimitMessage(usage));
+        return;
+      }
+      $("#priceMasterComplexitySlabs")?.insertAdjacentHTML("beforeend", complexitySlabRowHtml({ storeNumber: Math.min(2, usage.remainingStores), multiplier: 0 }));
+      return;
+    }
+    if (action === "remove-price-time-slab") {
+      const row = button.closest("[data-time-slab-row]");
+      const rows = [...document.querySelectorAll("[data-time-slab-row]")];
+      if (rows.length > 1) row?.remove();
+      else {
+        renderPriceMasterTimeSlabs();
+      }
+      return;
+    }
+    if (action === "remove-price-complexity-slab") {
+      const row = button.closest("[data-complexity-slab-row]");
+      const rows = [...document.querySelectorAll("[data-complexity-slab-row]")];
+      if (rows.length > 1) row?.remove();
+      else {
+        renderPriceMasterComplexitySlabs();
+      }
+      validatePriceMasterComplexityLimit($("#priceMasterForm"), false);
+      return;
+    }
+    if (!id) return;
+    if (action === "add-surge-rule") {
+      $("#surgeRulesList")?.insertAdjacentHTML("beforeend", surgeRuleRow({}));
+      return;
+    }
+    if (action === "remove-surge-rule") {
+      button.closest("[data-surge-rule]")?.remove();
+      return;
+    }
+    if (action === "add-surge-date") {
+      addSurgeDate($("#surgeDatePicker")?.value || "");
+      if ($("#surgeDatePicker")) $("#surgeDatePicker").value = "";
+      return;
+    }
+    if (action === "apply-surge-common-time") {
+      applyCommonSurgeTimeToSelectedDays();
+      return;
+    }
+    if (action === "remove-surge-date") {
+      const form = $("#surgeRuleForm");
+      const dates = (form?.elements.selectedDates.value || "").split(",").filter(Boolean).filter((date) => date !== id);
+      if (form) form.elements.selectedDates.value = dates.join(",");
+      renderSelectedSurgeDates(form);
+      return;
+    }
+    if (action === "edit-cluster-service-setting") {
+      const item = cache.clusterServices.find((setting) => setting.id === id);
+      const form = document.querySelector('[data-form="cluster-service-setting"]');
+      if (!item || !form) return;
+      form.elements.clusterId.value = item.clusterId || "";
+      form.elements.serviceId.value = item.serviceId || "";
+      form.elements.isVisible.checked = item.isVisible !== false;
+      form.elements.isEnabled.checked = item.isEnabled !== false;
+      form.elements.isActive.checked = item.isActive !== false;
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-booking-type") {
+      const item = cache.bookingTypes.find((setting) => setting.id === id);
+      const form = document.querySelector('[data-form="booking-type"]');
+      if (!item || !form) return;
+      editingBookingTypeId = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.bookingType.value = item.bookingType || "instant";
+      form.elements.maxAdvanceDays.value = item.maxAdvanceDays || 1;
+      form.elements.timeSlots.value = (item.timeSlots || []).join(",");
+      setBookingTypeTimeCategories(form, normalizeBookingTypeTimeCategories(item.timeCategories || [], item.timeSlots || []));
+      form.elements.isDefault.checked = Boolean(item.isDefault);
+      form.elements.isActive.checked = item.isActive !== false;
+      toggleBookingTypeScheduleFields(form);
+      $("#bookingTypeSubmitButton").textContent = "Update Booking Type";
+      $("#cancelBookingTypeEditButton")?.classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-cluster-category-setting") {
+      const item = cache.clusterCategories.find((setting) => setting.id === id);
+      const form = document.querySelector('[data-form="cluster-category-setting"]');
+      if (!item || !form) return;
+      form.elements.clusterId.value = item.clusterId || "";
+      refreshClusterCategoryCascade("cluster");
+      form.elements.serviceId.value = item.serviceId || "";
+      refreshClusterCategoryCascade("service");
+      form.elements.categoryId.value = item.categoryId || "";
+      form.elements.isVisible.checked = item.isVisible !== false;
+      form.elements.isEnabled.checked = item.isEnabled !== false;
+      form.elements.isActive.checked = item.isActive !== false;
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-cluster-booking-type") {
+      const targetType = button.dataset.targetType || "service";
+      const item = cache.clusterBookingTypes.find((setting) => setting.id === id && setting.targetType === targetType);
+      editClusterBookingTypeSetting(item);
+      return;
+    }
+    if (action === "edit-cluster-booking-type-group") {
+      editClusterBookingTypeGroup(id, button.dataset.configKey || "");
+      return;
+    }
+    if (action === "delete-cluster-booking-type") {
+      const targetType = button.dataset.targetType || "service";
+      if (!confirm("Delete this Cluster Booking Type config?")) return;
+      await api(`/masters/cluster-booking-types/${targetType}/${id}`, { method: "DELETE" });
+      await showSection(state.section);
+      return;
+    }
+    if (action === "delete-cluster-booking-type-group") {
+      if (!confirm("Delete this Cluster Booking Type config group?")) return;
+      await deleteClusterBookingTypeGroup(id, button.dataset.configKey || "");
+      await showSection(state.section);
+      return;
+    }
+    if (action === "booking-tab") {
+      bookingPage = 1;
+      await loadBookings(button.dataset.tab || "pending_assign");
+      return;
+    }
+    if (action === "booking-date-preset") {
+      bookingDatePreset = button.dataset.preset || "today";
+      if (bookingDatePreset === "today") {
+        bookingStartDate = todayInputDate();
+        bookingEndDate = bookingStartDate;
+      }
+      bookingPage = 1;
+      await loadBookings(bookingActiveTab);
+      return;
+    }
+    if (action === "booking-apply-filter") {
+      bookingDatePreset = "range";
+      bookingStartDate = $("#bookingStartDateFilter")?.value || todayInputDate();
+      bookingEndDate = $("#bookingEndDateFilter")?.value || bookingStartDate;
+      bookingPage = 1;
+      await loadBookings(bookingActiveTab);
+      return;
+    }
+    if (action === "booking-page") {
+      bookingPage = Number(button.dataset.page || 1);
+      await loadBookings(bookingActiveTab);
+      return;
+    }
+    if (action === "booking-master-search") {
+      await searchBookingMasterCustomers();
+      return;
+    }
+    if (action === "select-booking-master-customer") {
+      const customer = bookingMasterCustomerResults.find((item) => item.customerId === button.dataset.customerId);
+      if (!customer) {
+        showAlert("Customer selection expired. Search again and select the customer.");
+        return;
+      }
+      await selectBookingMasterCustomer(customer);
+      return;
+    }
+    if (action === "clear-booking-master-customer") {
+      bookingMasterSelectedCustomer = null;
+      resetBookingMasterLocationState();
+      renderBookingMasterSelectedCustomer();
+      return;
+    }
+    if (action === "select-booking-master-location") {
+      await selectBookingMasterLocation(JSON.parse(button.dataset.location || "{}"));
+      return;
+    }
+    if (action === "booking-master-continue-services") {
+      await continueBookingMasterToServices();
+      return;
+    }
+    if (action === "booking-master-select-service") {
+      await selectBookingMasterService(button.dataset.serviceId || "");
+      return;
+    }
+    if (action === "booking-master-select-category") {
+      await selectBookingMasterCategory(button.dataset.categoryId || "");
+      return;
+    }
+    if (action === "booking-master-add-time-slab") {
+      await addBookingMasterTimeSlotToCart(button.dataset.categoryId || "", button.dataset.duration || 30);
+      return;
+    }
+    if (action === "booking-master-remove-time-slab") {
+      removeBookingMasterTimeSlotFromCart();
+      return;
+    }
+    if (action === "booking-master-open-store") {
+      bookingMasterOpenStoreDetails(button.dataset.storeId || "");
+      return;
+    }
+    if (action === "booking-master-remove-cart-store") {
+      await removeBookingMasterStoreFromCart(button.dataset.storeId || "");
+      return;
+    }
+    if (action === "booking-master-remove-cart-item") {
+      await removeBookingMasterCartItem(Number(button.dataset.index || 0));
+      return;
+    }
+    if (action === "booking-master-select-schedule-date") {
+      bookingMasterSelectedScheduleDate = button.dataset.date || "";
+      ensureBookingMasterScheduleSelection(bookingMasterEffectiveBookingType("schedule"));
+      refreshBookingMasterScheduleSelectionUi();
+      return;
+    }
+    if (action === "booking-master-select-schedule-period") {
+      bookingMasterSelectedSchedulePeriod = button.dataset.period || "morning";
+      const bookingType = bookingMasterEffectiveBookingType("schedule");
+      const allTimes = bookingMasterScheduleTimes(bookingType);
+      const category = bookingMasterAvailableTimeCategoriesForDate(bookingType, bookingMasterSelectedScheduleDate).find((item) => item.id === bookingMasterSelectedSchedulePeriod);
+      const times = (category?.timeSlots || []).filter((time) => allTimes.includes(time)).sort();
+      const availableTimes = times.filter((time) => !bookingMasterScheduleTimeDisabled(bookingMasterSelectedScheduleDate, time));
+      if (!availableTimes.includes(bookingMasterSelectedScheduleTime)) bookingMasterSelectedScheduleTime = availableTimes[0] || "";
+      refreshBookingMasterScheduleSelectionUi();
+      return;
+    }
+    if (action === "booking-master-select-schedule-time") {
+      bookingMasterSelectedScheduleTime = button.dataset.time || "";
+      refreshBookingMasterScheduleSelectionUi();
+      return;
+    }
+    if (action === "booking-master-quote-time") {
+      bookingMasterDurationMinutes = Number($("#bookingMasterDurationInput")?.value || 30);
+      await quoteBookingMasterCart("time");
+      return;
+    }
+    if (action === "parse-booking-master-whatsapp-location") {
+      await useBookingMasterLatLngInput("bookingMasterWhatsappLocationInput", "whatsapp");
+      return;
+    }
+    if (action === "use-booking-master-manual-location") {
+      await useBookingMasterLatLngInput("bookingMasterManualLatLngInput", "manual");
+      return;
+    }
+    if (action === "open-booking-modal") {
+      await openBookingModal();
+      return;
+    }
+    if (action === "open-vehicle-allot") {
+      await openVehicleAllotmentModal(id);
+      return;
+    }
+    if (action === "allot-vehicle-to-assistant") {
+      if (!allotVehicleId) return;
+      await api(`/assistant-master/${id}/vehicle`, {
+        method: "POST",
+        body: JSON.stringify({ vehicleMasterId: allotVehicleId })
+      });
+      $("#vehicleAllotModal").classList.add("d-none");
+      allotVehicleId = null;
+      await showSection("vehicles");
+      return;
+    }
+    if (action === "unallot-vehicle-master") {
+      if (!confirm("Unallot this vehicle from the assistant?")) return;
+      await api(`/assistant-master/${id}/vehicle`, { method: "DELETE" });
+      await showSection("vehicles");
+      return;
+    }
+    if (action === "assign-assistant-master-vehicle") {
+      const assistantId = button.dataset.assistantId;
+      if (!assistantId) {
+        setAssistantMasterEditModalAlert("Assistant was not selected for vehicle allotment.");
+        return;
+      }
+      if (!id) {
+        setAssistantMasterEditModalAlert("Vehicle was not selected.");
+        return;
+      }
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = "Assigning...";
+      setAssistantMasterEditModalAlert("Assigning vehicle...", "warning");
+      try {
+        await api(`/assistant-master/${assistantId}/vehicle`, {
+          method: "POST",
+          body: JSON.stringify({ vehicleMasterId: id })
+        });
+        applyAssistantVehicleAssignmentLocally(assistantId, id);
+        $("#assistantMasterEditModal").classList.add("d-none");
+        renderAssistantRecords();
+        showAlert("Vehicle allotted successfully.", "success");
+      } catch (error) {
+        setAssistantMasterEditModalAlert(error.message || "Unable to allot vehicle.");
+        renderAssistantVehiclePicker(assistantId);
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+      return;
+    }
+    if (action === "open-assign-booking") {
+      await openAssignBookingModal(id, button.dataset.label || id);
+      return;
+    }
+    if (action === "assign-booking-assistant-card") {
+      const form = $("#assignBookingForm");
+      const shouldForceMultiTask = button.dataset.busy === "true";
+      if (shouldForceMultiTask) {
+        const confirmed = await appConfirmAction({
+          title: "Assign as multi-task?",
+          message: button.dataset.conflictMessage || "This assistant already has a task during this booking time. Do you still want to assign as a multi-task at the same time?",
+          acceptLabel: "Yes, Assign",
+          cancelLabel: "No"
+        });
+        if (!confirmed) return;
+      }
+      if (form?.elements?.assistantId) form.elements.assistantId.value = id;
+      if (form) form.dataset.forceMultiTaskAssignment = shouldForceMultiTask ? "true" : "false";
+      document.querySelectorAll(".booking-assistant-picker-card").forEach((card) => {
+        card.classList.toggle("selected", card.dataset.id === id);
+      });
+      form?.requestSubmit();
+      return;
+    }
+    if (action === "open-booking-detail") {
+      openBookingDetailModal(id);
+      return;
+    }
+    if (action === "open-booking-customer") {
+      openBookingCustomerModal(id);
+      return;
+    }
+    if (action === "open-booking-locations") {
+      openBookingLocationsModal(id);
+      return;
+    }
+    if (action === "open-booking-uploads") {
+      openBookingUploadsModal(id);
+      return;
+    }
+    if (action === "booking-cancel-confirm") {
+      openBookingCancelConfirmModal(id, button.dataset.label || id);
+      return;
+    }
+    if (action === "booking-change-slot") {
+      showAlert("Change Slot will use the Booking Master schedule selector. Open the booking detail and choose a new slot from Booking Master.", "warning");
+      return;
+    }
+    if (action === "booking-share-link") {
+      await shareBookingTaskLink(id);
+      return;
+    }
+    if (action === "execute-booking-cancel") {
+      await executeBookingCancel(id);
+      return;
+    }
+    if (action === "close-booking-info-modal") {
+      closeBookingInfoModal();
+      return;
+    }
+    if (action === "cluster-report-page") {
+      await loadClusterReport(Number(button.dataset.page || 1));
+      return;
+    }
+    if (action === "open-assistant-master-cell") {
+      openAssistantMasterEditModal(id, button.dataset.field || "basic");
+      return;
+    }
+    if (action === "open-assigned-assistant-profile") {
+      await openAssignedAssistantProfileModal(id);
+      return;
+    }
+    if (action === "open-assistant-profile-picture") {
+      openAssistantProfilePictureModal(id);
+      return;
+    }
+    if (action === "close-assistant-profile-picture") {
+      $("#assistantProfilePictureModal")?.classList.add("d-none");
+      return;
+    }
+    if (action === "remove-assistant-profile-picture") {
+      const assistant = cache.assistantMasters.find((item) => item.id === id);
+      if (!assistant) throw new Error("Assistant profile not found.");
+      const profileDocs = assistantProfilePictureDocuments(assistant);
+      if (!profileDocs.length && !assistant.profilePictureUrl) {
+        setAssistantProfilePictureModalAlert("No profile picture to remove.", "warning");
+        return;
+      }
+      setAssistantProfilePictureModalAlert("Removing profile picture...", "warning");
+      for (const document of profileDocs) {
+        if (document.id) {
+          await api(`/verification/assistants/${id}/documents/${document.id}`, { method: "DELETE" });
+        }
+      }
+      removeAssistantProfilePictureCache(id);
+      renderAssistantRecords();
+      $("#assistantProfilePictureModal")?.classList.add("d-none");
+      showAlert("Assistant profile picture removed.", "success");
+      return;
+    }
+    if (action === "open-assistant-logs") {
+      await openAssistantLogsModal(id);
+      return;
+    }
+    if (action === "select-booking-customer") {
+      const customer = JSON.parse(button.dataset.customer || "{}");
+      const form = $("#adminBookingForm");
+      form.elements.customerId.value = customer.customerId || "";
+      form.elements.customerLabel.value = `${customer.customerName || "-"} (${customer.phone || customer.email || customer.customerCode || "-"})`;
+      form.elements.address.value = customer.address || "";
+      form.elements.latitude.value = customer.latitude ?? "";
+      form.elements.longitude.value = customer.longitude ?? "";
+      if (customer.clusterId) form.elements.clusterId.value = customer.clusterId;
+      return;
+    }
+    if (action === "delete-record") {
+      if (!confirm("Soft delete this record?")) return;
+      await api(`${button.dataset.endpoint}/${id}`, { method: "DELETE" });
+      if (button.dataset.endpoint === BASE_PATH+"/masters/states") resetStateForm();
+      if (button.dataset.endpoint === BASE_PATH+"/masters/cities") resetCityForm();
+      if (button.dataset.endpoint === BASE_PATH+"/masters/zones") resetZoneForm();
+      if (button.dataset.endpoint === BASE_PATH+"/masters/clusters") resetClusterForm();
+      if (button.dataset.endpoint === BASE_PATH+"/masters/services") resetServiceForm();
+      if (button.dataset.endpoint === BASE_PATH+"/masters/service-categories") resetServiceCategoryForm();
+      if (button.dataset.endpoint === BASE_PATH+"/masters/category-prices") resetCategoryPriceForm();
+      if (button.dataset.endpoint === BASE_PATH+"/masters/booking-engine") resetBookingEngineForm();
+      if (button.dataset.endpoint === BASE_PATH+"/masters/booking-engine/quick-replies") resetBookingEngineQuickReplyForm();
+      if (button.dataset.endpoint === BASE_PATH+"/stores") resetStoreForm();
+      if (button.dataset.endpoint === BASE_PATH+"/stores/store-categories") resetStoreCategoryForm();
+      if (button.dataset.endpoint === BASE_PATH+"/stores/store-keywords") resetStoreKeywordForm();
+      if (button.dataset.endpoint === BASE_PATH+"/vehicle-master") resetVehicleMasterForm();
+      await showSection(state.section);
+      return;
+    }
+    if (action === "edit-state") {
+      const item = cache.states.find((stateItem) => stateItem.id === id);
+      const form = $("#stateForm");
+      if (!item || !form) return;
+      editingStateId = id;
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.countryName.value = item.countryName || "India";
+      form.elements.isActive.checked = Boolean(item.isActive);
+      $("#stateSubmitButton").textContent = "Update State";
+      $("#cancelStateEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-city") {
+      const item = cache.cities.find((city) => city.id === id);
+      const form = $("#cityForm");
+      if (!item || !form) return;
+      editingCityId = id;
+      form.elements.id.value = item.id;
+      form.elements.stateId.value = item.stateId || "";
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.isActive.checked = Boolean(item.isActive);
+      $("#citySubmitButton").textContent = "Update City";
+      $("#cancelCityEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-zone") {
+      const item = cache.zones.find((zone) => zone.id === id);
+      const form = $("#zoneForm");
+      if (!item || !form) return;
+      editingZoneId = id;
+      form.elements.id.value = item.id;
+      form.elements.stateFilterId.value = cityStateId(item.cityId || "");
+      refreshZoneFormCityOptions(item.cityId || "");
+      form.elements.cityId.value = item.cityId || "";
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.isActive.checked = Boolean(item.isActive);
+      $("#zoneSubmitButton").textContent = "Update Zone";
+      $("#cancelZoneEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-cluster") {
+      const item = cache.clusters.find((cluster) => cluster.id === id);
+      const form = $("#clusterForm");
+      if (!item || !form) return;
+      editingClusterId = id;
+      form.elements.id.value = item.id;
+      form.elements.stateFilterId.value = cityStateId(item.cityId || "");
+      refreshClusterFormLocationCascade("state", { stateId: cityStateId(item.cityId || ""), cityId: item.cityId || "", zoneId: item.zoneId || "" });
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.description.value = item.description || "";
+      form.elements.areasDescription.value = item.areasDescription || "";
+      form.elements.polygonDescription.value = item.polygonDescription || "";
+      form.elements.startTime.value = item.startTime || "";
+      form.elements.endTime.value = item.endTime || "";
+      form.elements.priority.value = item.priority ?? 0;
+      form.elements.isPinned.checked = Boolean(item.isPinned);
+      form.elements.pinPriority.value = item.pinPriority ?? 0;
+      form.elements.isBookingEnabled.checked = Boolean(item.isBookingEnabled);
+      $("#clusterSubmitButton").textContent = "Update Cluster";
+      $("#cancelClusterEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-service") {
+      const item = cache.services.find((service) => service.id === id);
+      const form = $("#serviceForm");
+      if (!item || !form) return;
+      editingServiceId = id;
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.description.value = item.description || "";
+      form.elements.note.value = item.note || "";
+      form.elements.imageUrl.value = item.imageUrl || "";
+      form.elements.locationMode.value = item.locationMode === "multi" ? "multi" : "current";
+      form.elements.maxLocationsLimit.value = item.locationMode === "multi" ? Math.max(1, Number(item.maxLocationsLimit || 1)) : 1;
+      form.elements.priority.value = item.priority ?? 0;
+      form.elements.isRecommended.checked = Boolean(item.isRecommended);
+      form.elements.isEnabled.checked = item.isEnabled !== false;
+      form.elements.isActive.checked = item.isActive !== false;
+      const preview = form.querySelector(".upload-preview");
+      if (preview) preview.innerHTML = item.imageUrl ? imageCell(item.imageUrl) : "";
+      toggleServiceLocationLimit(form);
+      $("#serviceSubmitButton").textContent = "Update Service";
+      $("#cancelServiceEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-service-category") {
+      const item = cache.categories.find((category) => category.id === id);
+      const form = $("#serviceCategoryForm");
+      if (!item || !form) return;
+      editingCategoryId = id;
+      form.elements.id.value = item.id;
+      form.elements.serviceId.value = item.serviceId || "";
+      form.elements.parentCategoryId.value = item.parentCategoryId || "";
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.description.value = item.description || "";
+      form.elements.imageUrl.value = item.imageUrl || "";
+      form.elements.priority.value = item.priority ?? 0;
+      form.elements.isRecommended.checked = Boolean(item.isRecommended);
+      form.elements.isEnabled.checked = item.isEnabled !== false;
+      form.elements.isActive.checked = item.isActive !== false;
+      const preview = form.querySelector(".upload-preview");
+      if (preview) preview.innerHTML = item.imageUrl ? imageCell(item.imageUrl) : "";
+      $("#serviceCategorySubmitButton").textContent = "Update Category";
+      $("#cancelServiceCategoryEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-category-master") {
+      const item = cache.categories.find((category) => category.id === id);
+      const form = $("#categoryMasterForm");
+      if (!item || !form) return;
+      editingCategoryMasterId = id;
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.description.value = item.description || "";
+      form.elements.imageUrl.value = item.imageUrl || "";
+      form.elements.priority.value = item.priority ?? 0;
+      form.elements.locationMode.value = item.locationMode === "multi" ? "multi" : "current";
+      form.elements.maxLocationsLimit.value = item.locationMode === "multi" ? Math.max(1, Number(item.maxLocationsLimit || 1)) : 1;
+      form.elements.addWithOtherCategory.checked = Boolean(item.addWithOtherCategory);
+      form.elements.isRecommended.checked = Boolean(item.isRecommended);
+      form.elements.isEnabled.checked = item.isEnabled !== false;
+      form.elements.isActive.checked = item.isActive !== false;
+      const preview = form.querySelector(".upload-preview");
+      if (preview) preview.innerHTML = item.imageUrl ? imageCell(item.imageUrl) : "";
+      $("#categoryMasterSubmitButton").textContent = "Update Category";
+      $("#cancelCategoryMasterEditButton").classList.remove("d-none");
+      toggleCategoryMasterLocationLimit(form);
+      renderCategoryMasterGuidance(form, item);
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-category-price") {
+      const item = (cache.categoryPrices || []).find((rule) => rule.id === id);
+      const form = $("#categoryPriceForm");
+      if (!item || !form) return;
+      editingCategoryPriceId = id;
+      form.elements.id.value = item.id;
+      form.elements.scopeType.value = item.scopeType || "all";
+      setSelectValueWithFallback(form.elements.stateId, item.stateId || "", item.stateName || "");
+      refreshCategoryPriceLocationCascade("scope", {
+        stateId: item.stateId || "",
+        cityId: item.cityId || "",
+        zoneId: item.zoneId || "",
+        clusterId: item.clusterId || ""
+      });
+      setSelectValueWithFallback(form.elements.stateId, item.stateId || "", item.stateName || "");
+      setSelectValueWithFallback(form.elements.cityId, item.cityId || "", item.cityName || "");
+      setSelectValueWithFallback(form.elements.zoneId, item.zoneId || "", item.zoneName || "");
+      setSelectValueWithFallback(form.elements.clusterId, item.clusterId || "", item.clusterName || "");
+      setSelectValueWithFallback(form.elements.categoryId, item.categoryId || "", item.categoryName || "");
+      renderCategoryPriceDurationRows([{
+        label: item.label || "",
+        timeDurationMinutes: item.timeDurationMinutes ?? 0,
+        basePrice: item.basePrice ?? 0,
+        discountType: item.discountType || "none",
+        discountValue: item.discountValue ?? 0,
+        sellingPrice: item.sellingPrice ?? 0
+      }]);
+      form.elements.waitingChargeAmount.value = item.waitingChargeAmount ?? 0;
+      form.elements.waitingChargeTimeMinutes.value = item.waitingChargeTimeMinutes ?? 0;
+      form.elements.isActive.checked = item.isActive !== false;
+      updateCategoryPriceSellingPrice(form);
+      $("#categoryPriceSubmitButton").textContent = "Update Category Price";
+      $("#cancelCategoryPriceEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-booking-engine") {
+      const item = (cache.bookingEngineRules || []).find((rule) => rule.id === id);
+      const form = $("#bookingEngineForm");
+      if (!item || !form) return;
+      editingBookingEngineRuleId = id;
+      form.elements.id.value = item.id;
+      form.elements.scopeType.value = item.scopeType || "all";
+      setSelectValueWithFallback(form.elements.stateId, item.stateId || "", item.stateName || "");
+      refreshBookingEngineLocationCascade("scope", {
+        stateId: item.stateId || "",
+        cityId: item.cityId || "",
+        zoneId: item.zoneId || "",
+        clusterId: item.clusterId || ""
+      });
+      setSelectValueWithFallback(form.elements.stateId, item.stateId || "", item.stateName || "");
+      setSelectValueWithFallback(form.elements.cityId, item.cityId || "", item.cityName || "");
+      setSelectValueWithFallback(form.elements.zoneId, item.zoneId || "", item.zoneName || "");
+      setSelectValueWithFallback(form.elements.clusterId, item.clusterId || "", item.clusterName || "");
+      setSelectValueWithFallback(form.elements.categoryId, item.categoryId || "", item.categoryName || "");
+      form.elements.serviceControlMode.value = item.serviceControlMode || "manual";
+      form.elements.manualServiceStatus.value = item.manualServiceStatus || "stop";
+      form.elements.autoStartAt.value = bookingEngineDateTimeValue(item.autoStartAt);
+      form.elements.autoEndAt.value = bookingEngineDateTimeValue(item.autoEndAt);
+      form.elements.instantEtaMinutes.value = item.instantEtaMinutes ?? 0;
+      form.elements.instantWrapUpMinutes.value = item.instantWrapUpMinutes ?? 0;
+      form.elements.instantTravelMinutes.value = item.instantTravelMinutes ?? 0;
+      form.elements.scheduleEtaMinutes.value = item.scheduleEtaMinutes ?? 0;
+      form.elements.scheduleWrapUpMinutes.value = item.scheduleWrapUpMinutes ?? 0;
+      form.elements.scheduleTravelMinutes.value = item.scheduleTravelMinutes ?? 0;
+      form.elements.assistantAssignmentMode.value = item.assistantAssignmentMode || "manual";
+      form.elements.note.value = item.note || "";
+      form.elements.imageUrl.value = item.imageUrl || "";
+      form.elements.isActive.checked = item.isActive !== false;
+      const preview = form.querySelector(".upload-preview");
+      if (preview) preview.innerHTML = item.imageUrl ? imageCell(item.imageUrl) : "";
+      toggleBookingEngineCalendarFields(form);
+      $("#bookingEngineSubmitButton").textContent = "Update Booking Engine Rule";
+      $("#cancelBookingEngineEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-booking-engine-quick-reply") {
+      const item = (cache.bookingEngineQuickReplies || []).find((reply) => reply.id === id);
+      const form = $("#bookingEngineQuickReplyForm");
+      if (!item || !form) return;
+      editingBookingEngineQuickReplyId = id;
+      form.elements.id.value = item.id;
+      form.elements.scopeType.value = item.scopeType || "all";
+      setSelectValueWithFallback(form.elements.stateId, item.stateId || "", item.stateName || "");
+      setSelectValueWithFallback(form.elements.cityId, item.cityId || "", item.cityName || "");
+      setSelectValueWithFallback(form.elements.zoneId, item.zoneId || "", item.zoneName || "");
+      setSelectValueWithFallback(form.elements.clusterId, item.clusterId || "", item.clusterName || "");
+      setSelectValueWithFallback(form.elements.categoryId, item.categoryId || "", item.categoryName || "");
+      form.elements.actor.value = item.actor || "assistant";
+      form.elements.audience.value = item.audience || "customer";
+      form.elements.bookingStage.value = item.bookingStage || "working";
+      form.elements.actionType.value = item.actionType || "message";
+      form.elements.sortOrder.value = item.sortOrder ?? 0;
+      form.elements.title.value = item.title || "";
+      form.elements.message.value = item.message || "";
+      form.elements.isActive.checked = item.isActive !== false;
+      $("#bookingEngineQuickReplySubmitButton").textContent = "Update Quick Reply";
+      $("#cancelBookingEngineQuickReplyEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-surge-rule") {
+      const item = cache.surgeRules.find((rule) => rule.id === id);
+      const form = $("#surgeRuleForm");
+      if (!item || !form) return;
+      editingSurgeRuleId = id;
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.ruleType.value = ["time", "day", "holiday", "weather"].includes(item.ruleType) ? item.ruleType : "time";
+      form.elements.surgeStrategy.value = surgeStrategyFromAdjustment(item.adjustmentType, item.adjustmentValue);
+      form.elements.adjustmentValue.value = Math.abs(Number(item.adjustmentValue || 0));
+      form.elements.priority.value = item.priority ?? 0;
+      form.elements.scheduleMode.value = item.scheduleMode === "date_time" ? "date_time" : "weekly";
+      for (const input of form.querySelectorAll('input[name="days"]')) input.checked = (item.days || []).includes(input.value);
+      form.elements.startTime.value = item.startTime || "";
+      form.elements.endTime.value = item.endTime || "";
+      form.elements.selectedDates.value = (item.selectedDates || []).join(",");
+      setSurgeDateTimes(item.dateTimes || [], form);
+      setSurgeDayTimes(item.dayTimes || {}, form);
+      const scope = item.scope || {};
+      form.elements.scopeType.value = scope.scopeType || "all";
+      refreshSurgeRuleLocationCascade("scope", {
+        stateId: scope.stateId || "",
+        cityId: scope.cityId || "",
+        zoneId: scope.zoneId || "",
+        clusterId: scope.clusterId || scope.clusterIds?.[0] || ""
+      });
+      form.elements.serviceId.value = scope.serviceId || scope.serviceIds?.[0] || "";
+      refreshSurgeRuleTargetCascade("service", {
+        serviceId: scope.serviceId || scope.serviceIds?.[0] || "",
+        categoryId: scope.categoryId || scope.categoryIds?.[0] || ""
+      });
+      toggleSurgeScheduleSections(form);
+      updateSurgeX(form);
+      form.elements.isActive.checked = item.isActive !== false;
+      $("#surgeRuleSubmitButton").textContent = "Update Surge Rule";
+      $("#cancelSurgeRuleEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-price-rule") {
+      const item = (cache.priceRules || []).find((rule) => rule.id === id);
+      const form = $("#priceMasterForm");
+      if (!item || !form) return;
+      editingPriceRuleId = id;
+      form.elements.id.value = item.id;
+      form.elements.priceType.value = item.priceType || "task";
+      form.elements.scopeType.value = item.scopeType || "all";
+      setSelectValueWithFallback(form.elements.stateId, item.stateId || "", item.stateName || "");
+      refreshPriceMasterLocationCascade("scope", {
+        stateId: item.stateId || "",
+        cityId: item.cityId || "",
+        zoneId: item.zoneId || "",
+        clusterId: item.clusterId || ""
+      });
+      setSelectValueWithFallback(form.elements.stateId, item.stateId || "", item.stateName || "");
+      setSelectValueWithFallback(form.elements.cityId, item.cityId || "", item.cityName || "");
+      setSelectValueWithFallback(form.elements.zoneId, item.zoneId || "", item.zoneName || "");
+      setSelectValueWithFallback(form.elements.clusterId, item.clusterId || "", item.clusterName || "");
+      setSelectValueWithFallback(form.elements.serviceId, item.serviceId || "", item.serviceName || "");
+      refreshPriceMasterServiceCascade("service", {
+        serviceId: item.serviceId || "",
+        categoryId: item.categoryId || "",
+        storeId: item.storeId || ""
+      });
+      setSelectValueWithFallback(form.elements.serviceId, item.serviceId || "", item.serviceName || "");
+      setSelectValueWithFallback(form.elements.categoryId, item.categoryId || "", item.categoryName || "");
+      setSelectValueWithFallback(form.elements.storeId, item.storeId || "", item.storeName || "");
+      form.elements.basePrice.value = item.basePrice ?? 0;
+      form.elements.discountType.value = item.discountType || "none";
+      form.elements.discountValue.value = item.discountValue ?? 0;
+      form.elements.sellingPrice.value = item.sellingPrice ?? 0;
+      form.elements.complexityBase.value = item.complexityBase === "base" ? "base" : "selling";
+      form.elements.maxStoresPerCategory.value = item.maxStoresPerCategory ?? 1;
+      if (form.elements.taskDurationMinutes) form.elements.taskDurationMinutes.value = priceMasterTaskDurationMinutes(item) || "";
+      renderPriceMasterComplexitySlabs(item.complexitySlabs || []);
+      renderPriceMasterTimeSlabs(item.timeSlabs || []);
+      setPriceMasterAllottedTime(form, item);
+      if (form.elements.description) form.elements.description.value = item.description || "";
+      form.elements.isActive.checked = item.isActive !== false;
+      updatePriceMasterSellingPrice(form);
+      togglePriceMasterTypeFields(form);
+      setPriceMasterCategoryGroupPricing(form, item);
+      $("#priceRuleSubmitButton").textContent = "Update Price Rule";
+      $("#cancelPriceRuleEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-store-category") {
+      const item = cache.storeCategories.find((category) => category.id === id);
+      const form = $("#storeCategoryForm");
+      if (!item || !form) return;
+      editingStoreCategoryId = id;
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.serviceId.value = item.serviceId || "";
+      refreshStoreCategoryParentSelect(item.serviceCategoryId || "");
+      form.elements.imageUrl.value = item.imageUrl || "";
+      form.elements.description.value = item.description || "";
+      form.elements.priority.value = item.priority ?? 0;
+      form.elements.isActive.checked = item.isActive !== false;
+      const preview = form.querySelector(".upload-preview");
+      if (preview) preview.innerHTML = item.imageUrl ? imageCell(item.imageUrl) : "";
+      $("#storeCategorySubmitButton").textContent = "Update Store Category";
+      $("#cancelStoreCategoryEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-store-keyword") {
+      const item = cache.storeKeywords.find((keyword) => keyword.id === id);
+      const form = $("#storeKeywordForm");
+      if (!item || !form) return;
+      editingStoreKeywordId = id;
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.serviceId.value = item.serviceId || "";
+      refreshStoreKeywordParentSelect(item.serviceCategoryId || "");
+      form.elements.description.value = item.description || "";
+      form.elements.priority.value = item.priority ?? 0;
+      form.elements.isActive.checked = item.isActive !== false;
+      $("#storeKeywordSubmitButton").textContent = "Update Store Keyword";
+      $("#cancelStoreKeywordEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-store") {
+      const item = cache.stores.find((store) => store.id === id);
+      const form = $("#storeForm");
+      if (!item || !form) return;
+      editingStoreId = id;
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.description.value = item.description || "";
+      form.elements.address.value = item.address || "";
+      form.elements.contact.value = item.contact || "";
+      form.elements.website.value = item.website || "";
+      form.elements.latitude.value = item.latitude ?? "";
+      form.elements.longitude.value = item.longitude ?? "";
+      form.elements.priority.value = item.priority ?? 0;
+      form.elements.isActive.checked = item.isActive !== false;
+      const imageUrls = (item.images || []).map((image) => image.imageUrl).filter(Boolean);
+      $("#storeImageUrls").value = JSON.stringify(imageUrls);
+      $("#storeImageGallery").innerHTML = storeImageGallery(imageUrls);
+      for (const input of form.querySelectorAll('[data-picker-checkbox="serviceCategoryIds"]')) input.checked = (item.serviceCategoryIds || []).includes(input.value);
+      for (const input of form.querySelectorAll('[data-picker-checkbox="storeCategoryIds"]')) input.checked = (item.storeCategoryIds || []).includes(input.value);
+      for (const input of form.querySelectorAll('[data-picker-checkbox="storeKeywordIds"]')) input.checked = (item.storeKeywordIds || []).includes(input.value);
+      refreshPicker("serviceCategoryIds");
+      refreshPicker("storeCategoryIds");
+      refreshPicker("storeKeywordIds");
+      initializeStoreClusterCascade(item);
+      const schedule = item.operatingHours || {};
+      for (const day of weekDays) {
+        form.elements[`${day}Enabled`].checked = Boolean(schedule[day]?.enabled);
+        form.elements[`${day}Open`].value = schedule[day]?.openTime || "";
+        form.elements[`${day}Close`].value = schedule[day]?.closeTime || "";
+      }
+      $("#storeSubmitButton").textContent = "Update Store";
+      $("#cancelStoreEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-vehicle-master") {
+      const item = cache.vehicleMasters.find((vehicle) => vehicle.id === id);
+      const form = $("#vehicleMasterForm");
+      if (!item || !form) return;
+      editingVehicleMasterId = id;
+      form.elements.id.value = item.id;
+      form.elements.vehicleName.value = item.vehicleName || "";
+      initializeVehicleMasterClusterCascade(item);
+      form.elements.company.value = item.company || "";
+      form.elements.vehicleNumber.value = item.vehicleNumber || "";
+      form.elements.model.value = item.model || "";
+      form.elements.fuelType.value = item.fuelType || "EV";
+      form.elements.color.value = item.color || "";
+      form.elements.ownerType.value = normalizedVehicleOwnerType(item.ownerType);
+      form.elements.rentalCompanyName.value = item.rentalCompanyName || "";
+      form.elements.rentalCompanyAddress.value = item.rentalCompanyAddress || "";
+      form.elements.rentalCompanyNumber.value = item.rentalCompanyNumber || "";
+      form.elements.rentSlab.value = item.rentSlab || "";
+      form.elements.rentCharges.value = item.rentCharges ?? "";
+      form.elements.zigoSlab.value = item.zigoSlab || "";
+      form.elements.zigoCharges.value = item.zigoCharges ?? "";
+      form.elements.isActive.checked = item.isActive !== false;
+      const pictureUrls = item.pictureUrls || [];
+      form.elements.pictureUrls.value = JSON.stringify(pictureUrls);
+      $("#vehiclePictureGallery").innerHTML = vehiclePictureGallery(pictureUrls);
+      const preview = form.querySelector(".upload-preview");
+      if (preview) preview.innerHTML = "";
+      $("#vehicleMasterSubmitButton").textContent = "Update Vehicle";
+      $("#cancelVehicleMasterEditButton").classList.remove("d-none");
+      toggleVehicleRentalFields();
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "prefill-assistant-master") {
+      const item = cache.assistantMasters.find((assistant) => assistant.id === id);
+      if (!item) return;
+      const workForm = $("#assistantMasterWorkForm");
+      const clusterForm = $("#assistantMasterClusterForm");
+      const vehicleForm = $("#assistantMasterVehicleForm");
+      const damageForm = $("#assistantDamageForm");
+      if (workForm) {
+        workForm.elements.assistantId.value = item.id;
+        workForm.elements.workingType.value = item.workingType || "full_time";
+        workForm.elements.payType.value = item.payType || "per_task";
+      }
+      if (clusterForm) {
+        clusterForm.elements.assistantId.value = item.id;
+        clusterForm.elements.clusterId.value = item.currentClusterId || "";
+      }
+      if (vehicleForm) {
+        vehicleForm.elements.assistantId.value = item.id;
+        vehicleForm.elements.vehicleMasterId.value = item.vehicleMasterId || "";
+      }
+      if (damageForm) {
+        damageForm.elements.assistantId.value = item.id;
+        damageForm.elements.vehicleMasterId.value = item.vehicleMasterId || "";
+      }
+      workForm?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "remove-assistant-cluster-master") {
+      if (!confirm("Remove assistant from current cluster?")) return;
+      await api(`/assistant-master/${id}/cluster`, { method: "DELETE" });
+      $("#assistantMasterEditModal")?.classList.add("d-none");
+      await showSection("assistant");
+      return;
+    }
+    if (action === "remove-assistant-vehicle-master") {
+      if (!confirm("Remove allotted vehicle from this assistant?")) return;
+      setAssistantMasterEditModalAlert("Removing allotted vehicle...", "warning");
+      try {
+        await api(`/assistant-master/${id}/vehicle`, { method: "DELETE" });
+        applyAssistantVehicleRemovalLocally(id);
+        $("#assistantMasterEditModal")?.classList.add("d-none");
+        renderAssistantRecords();
+        showAlert("Vehicle removed successfully.", "success");
+      } catch (error) {
+        setAssistantMasterEditModalAlert(error.message || "Unable to remove allotted vehicle.");
+      }
+      return;
+    }
+    if (action === "view-polygon" || action === "view-report-polygon") {
+      const item = cache.clusters.find((cluster) => cluster.id === id);
+      if (!item) {
+        showAlert("Cluster location data is not available yet. Refresh locations and try again.");
+        return;
+      }
+      if (!item.polygonDescription) {
+        showAlert("No polygon location is saved for this cluster.");
+        return;
+      }
+      await renderPolygonMap(item);
+      return;
+    }
+    if (action === "prefill-assign" || action === "prefill-reassign") {
+      const form = document.querySelector('[data-form="operation-assign"]');
+      if (form) {
+        form.elements.serviceRequestId.value = id;
+        form.elements.reason.value = action === "prefill-reassign" ? "Reassignment from live operations" : "Manual dispatch from live operations";
+        form.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      return;
+    }
+    if (action === "admin-cancel") {
+      const reason = prompt("Cancellation reason");
+      if (!reason) return;
+      await api(`/operations/bookings/${id}/cancel`, { method: "POST", body: JSON.stringify({ reason }) });
+      await showSection("operations");
+    }
+    if (action === "force-close") {
+      const reason = prompt("Force close reason");
+      if (!reason) return;
+      await api(`/operations/bookings/${id}/force-close`, { method: "POST", body: JSON.stringify({ reason }) });
+      await showSection("operations");
+    }
+    if (action === "approve-assistant" || action === "reject-assistant") {
+      const decision = action === "approve-assistant" ? "approved" : "rejected";
+      const reason = decision === "rejected" ? prompt("Rejection reason") : "Approved from admin panel";
+      if (!reason) return;
+      await api(`/verification/assistants/${id}/decision`, { method: "POST", body: JSON.stringify({ decision, reason }) });
+      await showSection("verification");
+    }
+    if (action === "activate-user" || action === "deactivate-user") {
+      await api(`/users/${id}/${action === "activate-user" ? "activate" : "deactivate"}`, { method: "PATCH" });
+      await showSection("users");
+    }
+    if (action === "delete-user") {
+      if (!confirm("Soft delete this user?")) return;
+      await api(`/users/${id}`, { method: "DELETE" });
+      await showSection("users");
+    }
+    if (action === "delete-user-role") {
+      if (!confirm("Delete this user-role mapping?")) return;
+      await api(`/access/user-roles/${id}`, { method: "DELETE" });
+      await showSection("userRoles");
+    }
+    if (action === "edit-user") {
+      const user = cache.users.find((item) => item.id === id);
+      const form = $("#userForm");
+      if (!user || !form) return;
+      editingUserId = id;
+      const roleCode = user.roles?.[0] || "";
+      const role = cache.roles.find((item) => item.code === roleCode);
+      const isSuperAdminEdit = roleCode === "super_admin";
+      form.elements.displayName.value = user.displayName || "";
+      form.elements.email.value = user.email || "";
+      form.elements.phone.value = user.phone || "";
+      form.elements.password.value = "";
+      form.elements.imageUrl.value = user.profilePictureUrl || "";
+      form.elements.roleId.value = isSuperAdminEdit ? "__super_admin_display" : role?.id || (roleCode === "admin" ? "__admin_display" : "");
+      form.elements.roleId.disabled = isSuperAdminEdit;
+      form.elements.isActive.checked = user.accountStatus !== "inactive" && user.accountStatus !== "deleted";
+      form.elements.isLoginWithOtp.checked = Boolean(user.metadata?.isLoginWithOtp);
+      form.elements.isLoginWithPassword.checked = Boolean(user.metadata?.isLoginWithPassword);
+      const verifyChannels = user.metadata?.otpVerifyChannels || [];
+      form.querySelectorAll('input[name="otpVerifyChannels"]').forEach((input) => {
+        input.checked = verifyChannels.includes(input.value);
+      });
+      updateOtpVerifyChannelState(form);
+      form.elements.isActive.disabled = isSuperAdminEdit;
+      form.elements.isLoginWithOtp.disabled = isSuperAdminEdit;
+      form.elements.isLoginWithPassword.disabled = isSuperAdminEdit;
+      if (roleCode === "assistant") {
+        form.elements.assistantStatus.value = ["verifying", "verified", "rejected"].includes(user.accountStatus) ? user.accountStatus : "verifying";
+      }
+      assistantUserDocumentFields.forEach((field) => {
+        if (form.elements[field.key]) form.elements[field.key].value = "";
+      });
+      form.querySelectorAll(".upload-preview").forEach((preview) => {
+        preview.innerHTML = "";
+      });
+      $("#userProfilePictureUploadPreview").innerHTML = user.profilePictureUrl ? imageCell(user.profilePictureUrl) : "";
+      toggleAssistantUserFields();
+      setCurrentAssistantDocumentSummary(user);
+      $("#userFormTitle").textContent = "Edit User";
+      $("#userSubmitButton").textContent = "Update User";
+      $("#cancelUserEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (action === "edit-module") {
+      const module = cache.modules.find((item) => item.ModuleId === id);
+      const form = $("#moduleForm");
+      if (!module || !form) return;
+      editingModuleId = id;
+      form.elements.ModuleId.value = module.ModuleId;
+      form.elements.Name.value = module.Name;
+      form.elements.Description.value = module.Description || "";
+      form.elements.IsActive.checked = Boolean(module.IsActive);
+      $("#moduleFormTitle").textContent = "Edit Module";
+      $("#cancelModuleEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (action === "toggle-module") {
+      await api(`/access/modules/${id}/status`, { method: "PATCH", body: JSON.stringify({ IsActive: active === "true" }) });
+      await showSection("modules");
+    }
+    if (action === "delete-module") {
+      if (!confirm("Soft delete this module?")) return;
+      await api(`/access/modules/${id}`, { method: "DELETE" });
+      resetModuleForm();
+      await showSection("modules");
+    }
+  } catch (error) {
+    showAlert(error.message);
+  }
+});
+
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest?.('#bookingsSection [data-action]');
+  const action = button?.dataset?.action || "";
+  if (!["booking-tab", "booking-date-preset", "booking-apply-filter", "booking-page"].includes(action)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  try {
+    clearAlert();
+    if (action === "booking-tab") {
+      bookingPage = 1;
+      await loadBookings(button.dataset.tab || "pending_assign");
+      return;
+    }
+    if (action === "booking-date-preset") {
+      bookingDatePreset = button.dataset.preset || "today";
+      if (bookingDatePreset === "today") {
+        bookingStartDate = todayInputDate();
+        bookingEndDate = bookingStartDate;
+      }
+      bookingPage = 1;
+      await loadBookings(bookingActiveTab);
+      return;
+    }
+    if (action === "booking-apply-filter") {
+      bookingDatePreset = "range";
+      bookingStartDate = $("#bookingStartDateFilter")?.value || todayInputDate();
+      bookingEndDate = $("#bookingEndDateFilter")?.value || bookingStartDate;
+      bookingPage = 1;
+      await loadBookings(bookingActiveTab);
+      return;
+    }
+    if (action === "booking-page") {
+      bookingPage = Number(button.dataset.page || 1);
+      await loadBookings(bookingActiveTab);
+    }
+  } catch (error) {
+    showAlert(error.message);
+  }
+}, true);
+
+document.addEventListener("click", (event) => {
+  const closeButton = event.target.closest?.('[data-action="close-booking-info-modal"]');
+  const modal = $("#bookingInfoModal");
+  if (closeButton || event.target === modal) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeBookingInfoModal();
+  }
+}, true);
+
+$("#refreshCurrentButton").addEventListener("click", () => showSection(state.section));
+bookingBellButton?.addEventListener("click", () => {
+  bookingNewNotificationCount = 0;
+  updateBookingBell();
+  if (state.section === "bookings") loadBookings(bookingActiveTab).catch((error) => showAlert(error.message));
+  else showSection("bookings").catch((error) => showAlert(error.message));
+});
+$("#profileChipButton").addEventListener("click", openProfileModal);
+$("#closeProfileModalButton").addEventListener("click", closeProfileModal);
+$("#closePolygonModalButton").addEventListener("click", () => {
+  $("#polygonModal").classList.add("d-none");
+  if (polygonMapInstance?.remove) polygonMapInstance.remove();
+  polygonMapInstance = null;
+  $("#polygonOverlay").innerHTML = "";
+});
+$("#closeBookingModalButton").addEventListener("click", () => $("#bookingModal").classList.add("d-none"));
+$("#closePasswordShareModalButton").addEventListener("click", closePasswordShareModal);
+$("#cancelPasswordShareButton").addEventListener("click", closePasswordShareModal);
+$("#closeBookingMasterStoreModalButton")?.addEventListener("click", () => {
+  cleanupBookingMasterStoreMap();
+  $("#bookingMasterStoreModal")?.classList.add("d-none");
+});
+$("#closeAssignBookingModalButton").addEventListener("click", () => $("#assignBookingModal").classList.add("d-none"));
+$("#closeVehicleAllotModalButton").addEventListener("click", () => {
+  $("#vehicleAllotModal").classList.add("d-none");
+  allotVehicleId = null;
+});
+$("#closeAssistantMasterEditModalButton").addEventListener("click", () => $("#assistantMasterEditModal").classList.add("d-none"));
+$("#closeAssistantLogsModalButton").addEventListener("click", () => $("#assistantLogsModal").classList.add("d-none"));
+$("#closeOtpVerifyModalButton").addEventListener("click", () => {
+  closeOtpVerifyModal();
+});
+$("#resendOtpButton").addEventListener("click", async () => {
+  try {
+    const details = await sendOtpForUser(pendingOtpVerification.userId, pendingOtpVerification.channels);
+    updateOtpModalProgress(details);
+    const summary = otpDeliverySummary(details);
+    const warning = details.sendWarning ? `Verification code is pending, but one or more channels could not send. ${summary}` : `Verification code sent again. ${summary}`;
+    setOtpVerifyModalAlert(warning, details.sendWarning ? "warning" : "success");
+  } catch (error) {
+    setOtpVerifyModalAlert(error.message, "danger");
+  }
+});
+$("#closeImagePreviewModalButton").addEventListener("click", () => {
+  $("#imagePreviewModal").classList.add("d-none");
+  $("#imagePreviewLarge").src = "";
+  $("#documentPreviewFrame").src = "";
+  $("#documentPreviewLink").href = "";
+  $("#documentPreviewLink").textContent = "Open Document";
+  const video = $("#documentPreviewVideo");
+  if (video) {
+    video.pause?.();
+    video.src = "";
+    video.classList.add("d-none");
+  }
+  clearImagePreviewAlert();
+  $("#documentPreviewStatusSelect").classList.add("d-none");
+  $("#documentPreviewStatusSaveButton").classList.add("d-none");
+  $("#documentPreviewReuploadButton").classList.add("d-none");
+  $("#documentPreviewDeleteButton").classList.add("d-none");
+  assistantDocPreviewState = { assistantId: "", documentId: "", replacementFile: null };
+});
+$("#documentPreviewReuploadInput").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    const uploaded = await uploadDocumentFile(file, "__assistantDocPreviewReplacement");
+    assistantDocPreviewState.replacementFile = uploaded;
+    $("#documentPreviewStatusSaveButton").textContent = "Update";
+    $("#imagePreviewModalTitle").textContent = `${$("#imagePreviewModalTitle").textContent} (new file selected)`;
+    showImagePreviewAlert("New document selected. Click Update to save it.", "info");
+  } catch (error) {
+    showImagePreviewAlert(error.message, "danger");
+  }
+});
+$("#bookingCustomerSearchButton").addEventListener("click", () => {
+  searchBookingCustomers().catch((error) => {
+    $("#bookingModalAlert").textContent = error.message;
+    $("#bookingModalAlert").classList.remove("d-none");
+  });
+});
+$("#bookingCustomerSearchInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    $("#bookingCustomerSearchButton").click();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && event.target?.id === "bookingMasterCustomerSearchInput") {
+    event.preventDefault();
+    openBookingMasterCustomerPicker().catch((error) => showAlert(error.message));
+  }
+  if (event.key === "Enter" && event.target?.id === "bookingMasterWhatsappLocationInput") {
+    event.preventDefault();
+    useBookingMasterLatLngInput("bookingMasterWhatsappLocationInput", "whatsapp").catch((error) => showAlert(error.message));
+  }
+  if (event.key === "Enter" && event.target?.id === "bookingMasterManualLatLngInput") {
+    event.preventDefault();
+    useBookingMasterLatLngInput("bookingMasterManualLatLngInput", "manual").catch((error) => showAlert(error.message));
+  }
+});
+$("#vehicleAssistantSearchButton").addEventListener("click", () => renderVehicleAllotmentResults());
+$("#vehicleAssistantSearchInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    renderVehicleAllotmentResults();
+  }
+});
+["#vehicleAssistantCityFilter", "#vehicleAssistantZoneFilter", "#vehicleAssistantClusterFilter"].forEach((selector) => {
+  $(selector).addEventListener("change", () => renderVehicleAllotmentResults());
+});
+document.addEventListener("input", (event) => {
+  const input = event.target;
+  if (input instanceof HTMLInputElement && input.id === "assistantMasterSearchInput") renderAssistantMasterRecords();
+  if (input instanceof HTMLInputElement && input.id === "assistantSearchInput") {
+    assistantPage = 1;
+    renderAssistantRecords();
+  }
+  if (input instanceof HTMLSelectElement && input.id === "documentPreviewStatusSelect") input.dataset.status = input.value;
+  if (input instanceof HTMLInputElement && input.id === "bookingMasterManualLatLngInput") {
+    bookingMasterManualLatLngText = input.value;
+    scheduleBookingMasterManualMapSync();
+  }
+  if (input instanceof HTMLInputElement && input.id === "bookingMasterWhatsappLocationInput") bookingMasterWhatsappLocationText = input.value;
+  if (input instanceof HTMLInputElement && input.id === "bookingMasterLocationSearchInput") {
+    bookingMasterLocationSearchText = input.value;
+    scheduleBookingMasterLocationSearchSuggestions();
+  }
+  if (input instanceof HTMLInputElement && input.id === "bookingMasterCategorySearchInput") {
+    bookingMasterCategorySearchText = input.value;
+    const grid = $("#bookingMasterCategoryGrid");
+    if (grid) grid.innerHTML = bookingMasterCategoryCards().join("") || `<div class="empty-state">No categories match this service.</div>`;
+  }
+  if (input instanceof HTMLInputElement && input.id === "bookingMasterStoreSearchInput") {
+    bookingMasterStoreSearchText = input.value;
+    scheduleBookingMasterStoreSearch();
+  }
+  if (input instanceof HTMLTextAreaElement && input.id === "bookingMasterDetailNoteInput") bookingMasterDetailNote = input.value;
+});
+document.addEventListener("change", (event) => {
+  const input = event.target;
+  if (input instanceof HTMLSelectElement && input.id === "assistantPageSizeSelect") {
+    assistantPageSize = Number(input.value || 10);
+    assistantPage = 1;
+    renderAssistantRecords();
+  }
+  if (input instanceof HTMLSelectElement && input.id === "bookingPageSizeSelect") {
+    bookingPageSize = Number(input.value || 20);
+    bookingPage = 1;
+    loadBookings(bookingActiveTab).catch((error) => showAlert(error.message));
+  }
+  if (input instanceof HTMLInputElement && (input.id === "bookingStartDateFilter" || input.id === "bookingEndDateFilter")) {
+    bookingDatePreset = "range";
+  }
+  if (input instanceof HTMLInputElement && input.id === "bookingSearchInput") {
+    bookingSearchText = input.value;
+    if (bookingSearchTimer) clearTimeout(bookingSearchTimer);
+    bookingSearchTimer = setTimeout(() => {
+      bookingPage = 1;
+      loadBookings(bookingActiveTab).catch((error) => showAlert(error.message));
+    }, 350);
+  }
+});
+["#assistantMasterCityFilter", "#assistantMasterZoneFilter", "#assistantMasterClusterFilter", "#assistantMasterStatusFilter"].forEach((selector) => {
+  document.addEventListener("change", (event) => {
+    if (event.target?.matches?.(selector)) renderAssistantMasterRecords();
+  });
+});
+["#assistantCityFilter", "#assistantZoneFilter", "#assistantClusterFilter"].forEach((selector) => {
+  document.addEventListener("change", (event) => {
+    if (event.target?.matches?.(selector)) {
+      assistantPage = 1;
+      renderAssistantRecords();
+    }
+  });
+});
+$("#logoutButton").addEventListener("click", () => {
+  clearAdminSession();
+});
+
+if (state.token) {
+  showAdmin();
+  refreshSignedInUser().catch(() => {});
+  showSection("dashboard");
+}

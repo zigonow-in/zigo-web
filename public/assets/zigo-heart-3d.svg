@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 912" role="img" aria-label="Heart">
+  <defs>
+    <radialGradient id="heartGlow" cx="72%" cy="28%" r="70%">
+      <stop offset="0" stop-color="#fff1f1"/>
+      <stop offset="0.13" stop-color="#ff6f74"/>
+      <stop offset="0.43" stop-color="#ff1f2d"/>
+      <stop offset="0.72" stop-color="#e31321"/>
+      <stop offset="1" stop-color="#8d2427"/>
+    </radialGradient>
+    <radialGradient id="heartHighlight" cx="72%" cy="26%" r="18%">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="145%">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#aa1018" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <path filter="url(#softShadow)" fill="url(#heartGlow)" d="M512 876C355 734 209 604 116 467 34 348 4 224 64 120 119 25 245-12 352 34c57 24 107 68 160 135C565 102 615 58 672 34c107-46 233-9 288 86 60 104 30 228-52 347-93 137-239 267-396 409Z"/>
+  <ellipse cx="707" cy="244" rx="136" ry="54" fill="url(#heartHighlight)" transform="rotate(-28 707 244)"/>
+</svg>

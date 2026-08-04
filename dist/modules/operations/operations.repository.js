@@ -8,6 +8,7 @@ import { quotePriceMaster, resolveBookingEngineRuleForContext } from "../masters
 import { getBookingEngineSetting, getBookingTypeAutomationSetting } from "../settings/settings.repository.js";
 import { ensurePaymentsSchema } from "../payments/payments.repository.js";
 import { ensureBookingEngineSchema, releaseCapacityReservations, upsertBookingOrchestrationState, upsertCapacityReservation } from "./bookingEngine.js";
+import { stopAssistantCalendarBlocksForBooking } from "./assistantDispatchEngine.js";
 async function ensureCustomerDisputeSchema(client = pool) {
     await client.query(`
     create table if not exists zigo.customer_disputes (
@@ -361,8 +362,8 @@ export async function listBookings(input = {}) {
           count(*) as count,
           max(coalesce(
             wsr.booking_available_at,
-            nullif(wsr.metadata->>'bookingAvailableAt', '')::timestamptz,
-            nullif(wsr.metadata->>'expectedFreeAt', '')::timestamptz,
+            case when coalesce(wsr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (wsr.metadata->>'bookingAvailableAt')::timestamptz else null end,
+            case when coalesce(wsr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (wsr.metadata->>'expectedFreeAt')::timestamptz else null end,
             wsr.created_at + (coalesce(wsr.duration_minutes, 30) || ' minutes')::interval
           )) as "nextAvailableAt"
         from zigo.task_assignments wta
@@ -1113,7 +1114,7 @@ async function resolveBookingAvailabilityConfig(db, input) {
          and coalesce(m.is_active, true) = true
          and coalesce(m.is_enabled, true) = true
         left join zigo.category_service_masters csm
-          on csm.id = nullif(c.config->'categorySettings'->>'serviceMasterId', '')::uuid
+          on csm.id::text = nullif(c.config->'categorySettings'->>'serviceMasterId', '')
          and coalesce(csm.is_deleted, false) = false
          and coalesce(csm.is_active, true) = true
          and coalesce(csm.is_enabled, true) = true
@@ -1259,7 +1260,7 @@ function instantAssistantCapacityWindow(input) {
     const assistantFreeInMinutes = Math.max(0, Math.ceil((assistantReadyAt.getTime() - input.requestAt.getTime()) / 60_000));
     if (input.maxReadyDelayMinutes != null && assistantFreeInMinutes > input.maxReadyDelayMinutes)
         return null;
-    const candidateStartAt = addMinutes(assistantReadyAt, Math.max(0, input.etaMinutes));
+    const candidateStartAt = addMinutes(assistantReadyAt, Math.max(0, input.etaMinutes) + Math.max(0, input.initiateMinutes || 0));
     const candidateEndAt = addMinutes(candidateStartAt, Math.max(1, input.durationMinutes));
     const overlaps = scheduledWindows.some((window) => candidateStartAt < window.end && candidateEndAt > window.start);
     if (overlaps)
@@ -1381,21 +1382,21 @@ async function selectAssistantForCapacityWindow(db, input) {
         from (
           select coalesce(
             sr.booking_available_at,
-            nullif(sr.metadata->>'bookingAvailableAt', '')::timestamptz,
-            nullif(sr.metadata->>'expectedFreeAt', '')::timestamptz,
+            case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
+            case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
             sr.created_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
           ) as window_end
           from zigo.task_assignments ta
           join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
           where ta.assistant_id = a.id
-            and ta.status_code in ('reserved', 'offered', 'accepted', 'in_progress')
-            and sr.status_code in ('payment_pending', 'paid', 'queued', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+            and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+            and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
             and coalesce(sr.booking_type, sr.metadata->>'bookingType', 'instant') <> 'schedule'
           union all
           select acr.reserved_until as window_end
           from zigo.assistant_capacity_reservations acr
           where acr.assistant_id = a.id
-            and acr.status_code in ('held', 'reserved', 'assigned')
+            and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
             and acr.reserved_until > now()
             and coalesce(acr.booking_type, 'instant') <> 'schedule'
         ) active_windows
@@ -1405,13 +1406,21 @@ async function selectAssistantForCapacityWindow(db, input) {
         from zigo.task_assignments ta
         join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
         where ta.assistant_id = a.id
-          and ta.status_code in ('reserved', 'offered', 'accepted', 'in_progress')
-          and sr.status_code in ('payment_pending', 'paid', 'queued', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+          and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+          and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
           and coalesce(sr.booking_type, sr.metadata->>'bookingType') = 'schedule'
           and (
-            coalesce(sr.booking_date, nullif(sr.metadata->>'scheduledDate', '')::date, sr.scheduled_at::date) > current_date
+            coalesce(
+              sr.booking_date,
+              case when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$' then (sr.metadata->>'scheduledDate')::date else null end,
+              sr.scheduled_at::date
+            ) > current_date
             or (
-              coalesce(sr.booking_date, nullif(sr.metadata->>'scheduledDate', '')::date, sr.scheduled_at::date) = current_date
+              coalesce(
+                sr.booking_date,
+                case when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$' then (sr.metadata->>'scheduledDate')::date else null end,
+                sr.scheduled_at::date
+              ) = current_date
               and coalesce(sr.booking_time_slot, sr.metadata->>'scheduledTime', to_char(sr.scheduled_at, 'HH24:MI')) >= to_char(now(), 'HH24:MI')
             )
           )
@@ -1440,15 +1449,25 @@ async function selectAssistantForCapacityWindow(db, input) {
         coalesce(
           sr.booking_start_at,
           sr.scheduled_at,
-          nullif(sr.metadata->>'scheduledDate', '')::date + nullif(sr.metadata->>'scheduledTime', '')::time
+          case
+            when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$'
+             and coalesce(sr.metadata->>'scheduledTime', '') ~ '^\d{2}:\d{2}'
+            then (sr.metadata->>'scheduledDate')::date + left(sr.metadata->>'scheduledTime', 5)::time
+            else null
+          end
         ) as "startAt",
         coalesce(
           sr.booking_available_at,
-          nullif(sr.metadata->>'bookingAvailableAt', '')::timestamptz,
-          nullif(sr.metadata->>'expectedFreeAt', '')::timestamptz,
+          case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
+          case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
           sr.booking_end_at,
           sr.scheduled_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval,
-          (nullif(sr.metadata->>'scheduledDate', '')::date + nullif(sr.metadata->>'scheduledTime', '')::time) + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
+          case
+            when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$'
+             and coalesce(sr.metadata->>'scheduledTime', '') ~ '^\d{2}:\d{2}'
+            then ((sr.metadata->>'scheduledDate')::date + left(sr.metadata->>'scheduledTime', 5)::time) + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
+            else null
+          end
         ) as "endAt",
         sr.metadata->>'scheduledDate' as "scheduledDate",
         sr.metadata->>'scheduledTime' as "scheduledTime",
@@ -1456,10 +1475,14 @@ async function selectAssistantForCapacityWindow(db, input) {
       from zigo.task_assignments ta
       join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
       where ta.assistant_id = any($1::uuid[])
-        and ta.status_code in ('reserved', 'offered', 'accepted', 'in_progress')
-        and sr.status_code in ('payment_pending', 'paid', 'queued', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+        and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+        and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
         and coalesce(sr.booking_type, sr.metadata->>'bookingType') = 'schedule'
-        and coalesce(sr.booking_date, nullif(sr.metadata->>'scheduledDate', '')::date, sr.scheduled_at::date) >= $2::date
+        and coalesce(
+          sr.booking_date,
+          case when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$' then (sr.metadata->>'scheduledDate')::date else null end,
+          sr.scheduled_at::date
+        ) >= $2::date
     `, [assistants.rows.map((assistant) => assistant.assistantId), localDateText(new Date())]);
     const scheduledByAssistant = new Map();
     for (const row of blocked.rows) {
@@ -1484,6 +1507,7 @@ async function selectAssistantForCapacityWindow(db, input) {
                 requestAt: input.instantRequestAt,
                 baseAvailableAt: nextAvailableAt,
                 etaMinutes: input.instantEtaMinutes,
+                initiateMinutes: input.instantInitiateMinutes,
                 maxReadyDelayMinutes: input.instantReadyByMinutes,
                 durationMinutes: Math.max(1, Number(input.durationMinutes || 30)),
                 scheduledWindows: scheduled
@@ -1524,7 +1548,8 @@ async function selectScheduleAssistantForSlot(db, input) {
     const scheduleBoundaryToleranceMs = 60_000;
     if (slotStart.getTime() + scheduleBoundaryToleranceMs < earliestAllowedStart.getTime())
         return null;
-    const capacityMinutes = Math.max(1, Math.round(Number(input.durationMinutes || 30)))
+    const initiateMinutes = Math.max(0, Math.round(Number(input.initiateMinutes || 0)));
+    const capacityMinutes = initiateMinutes + Math.max(1, Math.round(Number(input.durationMinutes || 30)))
         + Math.max(0, Math.round(Number(input.wrapUpMinutes || 0)))
         + Math.max(0, Math.round(Number(input.travelBufferMinutes || 0)));
     const slotEnd = addMinutes(slotStart, capacityMinutes);
@@ -1563,9 +1588,11 @@ export async function getBookingAvailabilityDecision(input) {
     const isServiceOpenByEngine = bookingEngineRuleOpen(resolvedBookingEngineRule, now, { requireRule: true });
     const engineAssignmentMode = resolvedBookingEngineRule?.assistantAssignmentMode === "auto" ? "auto" : resolvedBookingEngineRule?.assistantAssignmentMode === "manual" ? "manual" : (assignType === "automate" ? "auto" : "manual");
     const instantEtaMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantEtaMinutes ?? engineSettings.instantAutoMaxWaitMinutes ?? 45)));
+    const instantInitiateMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantInitiateMinutes ?? 0)));
     const instantWrapUpMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantWrapUpMinutes ?? 0)));
     const instantTravelMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantTravelMinutes ?? 0)));
     const scheduleEtaMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleEtaMinutes ?? 0)));
+    const scheduleInitiateMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleInitiateMinutes ?? 0)));
     const scheduleWrapUpMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleWrapUpMinutes ?? 0)));
     const scheduleTravelMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleTravelMinutes ?? 0)));
     const assistants = await pool.query(`
@@ -1587,21 +1614,21 @@ export async function getBookingAvailabilityDecision(input) {
         from (
           select coalesce(
             sr.booking_available_at,
-            nullif(sr.metadata->>'bookingAvailableAt', '')::timestamptz,
-            nullif(sr.metadata->>'expectedFreeAt', '')::timestamptz,
+            case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
+            case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
             sr.created_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
           ) as window_end
           from zigo.task_assignments ta
           join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
           where ta.assistant_id = a.id
-            and ta.status_code in ('reserved', 'offered', 'accepted', 'in_progress')
-            and sr.status_code in ('payment_pending', 'paid', 'queued', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+            and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+            and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
             and coalesce(sr.booking_type, sr.metadata->>'bookingType', 'instant') <> 'schedule'
           union all
           select acr.reserved_until as window_end
           from zigo.assistant_capacity_reservations acr
           where acr.assistant_id = a.id
-            and acr.status_code in ('held', 'reserved', 'assigned')
+            and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
             and acr.reserved_until > now()
             and coalesce(acr.booking_type, 'instant') <> 'schedule'
         ) active_windows
@@ -1611,10 +1638,14 @@ export async function getBookingAvailabilityDecision(input) {
         from zigo.task_assignments ta
         join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
         where ta.assistant_id = a.id
-          and ta.status_code in ('reserved', 'offered', 'accepted', 'in_progress')
-          and sr.status_code in ('payment_pending', 'paid', 'queued', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+          and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+          and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
           and coalesce(sr.booking_type, sr.metadata->>'bookingType') = 'schedule'
-          and coalesce(sr.booking_date, nullif(sr.metadata->>'scheduledDate', '')::date, sr.scheduled_at::date) >= current_date
+          and coalesce(
+            sr.booking_date,
+            case when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$' then (sr.metadata->>'scheduledDate')::date else null end,
+            sr.scheduled_at::date
+          ) >= current_date
       ) future_schedule on true
       where u.deleted_at is null
         and coalesce(u.metadata->>'accountStatus', 'active') = 'active'
@@ -1626,6 +1657,8 @@ export async function getBookingAvailabilityDecision(input) {
         : assistants.rows
             .map((assistant) => ({ ...assistant, nextAvailableAt: assistant.busyFreeAt && assistant.busyFreeAt.getTime() > now.getTime() ? assistant.busyFreeAt : now }));
     const assistantPool = clusterAssistantPool.filter((assistant) => assistantOnlineStatusCodes.has(assistant.statusCode));
+    const instantAssistantPool = assistantPool.filter((assistant) => assistant.nextAvailableAt.getTime() <= now.getTime()
+        && !["working", "busy", "assigned", "in_progress"].includes(String(assistant.statusCode || "").toLowerCase()));
     const scheduleAssistantPool = assistantPool.length ? assistantPool : clusterAssistantPool;
     const scheduledByAssistant = new Map();
     if (assistantPool.length) {
@@ -1635,15 +1668,25 @@ export async function getBookingAvailabilityDecision(input) {
           coalesce(
             sr.booking_start_at,
             sr.scheduled_at,
-            nullif(sr.metadata->>'scheduledDate', '')::date + nullif(sr.metadata->>'scheduledTime', '')::time
+            case
+              when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$'
+               and coalesce(sr.metadata->>'scheduledTime', '') ~ '^\d{2}:\d{2}'
+              then (sr.metadata->>'scheduledDate')::date + left(sr.metadata->>'scheduledTime', 5)::time
+              else null
+            end
           ) as "startAt",
           coalesce(
             sr.booking_available_at,
-            nullif(sr.metadata->>'bookingAvailableAt', '')::timestamptz,
-            nullif(sr.metadata->>'expectedFreeAt', '')::timestamptz,
+            case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
+            case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
             sr.booking_end_at,
             sr.scheduled_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval,
-            (nullif(sr.metadata->>'scheduledDate', '')::date + nullif(sr.metadata->>'scheduledTime', '')::time) + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
+            case
+              when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$'
+               and coalesce(sr.metadata->>'scheduledTime', '') ~ '^\d{2}:\d{2}'
+              then ((sr.metadata->>'scheduledDate')::date + left(sr.metadata->>'scheduledTime', 5)::time) + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
+              else null
+            end
           ) as "endAt",
           sr.metadata->>'scheduledDate' as "scheduledDate",
           sr.metadata->>'scheduledTime' as "scheduledTime",
@@ -1651,10 +1694,14 @@ export async function getBookingAvailabilityDecision(input) {
         from zigo.task_assignments ta
         join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
         where ta.assistant_id = any($1::uuid[])
-          and ta.status_code in ('reserved', 'offered', 'accepted', 'in_progress')
-          and sr.status_code in ('payment_pending', 'paid', 'queued', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+          and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+          and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
           and coalesce(sr.booking_type, sr.metadata->>'bookingType') = 'schedule'
-          and coalesce(sr.booking_date, nullif(sr.metadata->>'scheduledDate', '')::date, sr.scheduled_at::date) >= $2::date
+          and coalesce(
+            sr.booking_date,
+            case when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$' then (sr.metadata->>'scheduledDate')::date else null end,
+            sr.scheduled_at::date
+          ) >= $2::date
         union all
         select
           acr.assistant_id as "assistantId",
@@ -1665,7 +1712,7 @@ export async function getBookingAvailabilityDecision(input) {
           greatest(1, ceil(extract(epoch from (acr.reserved_until - acr.reserved_from)) / 60)::int) as "durationMinutes"
         from zigo.assistant_capacity_reservations acr
         where acr.assistant_id = any($1::uuid[])
-          and acr.status_code in ('held', 'reserved', 'assigned')
+          and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
           and acr.reserved_until > now()
           and coalesce(acr.booking_type, 'schedule') = 'schedule'
           and acr.reserved_from::date >= $2::date
@@ -1682,21 +1729,54 @@ export async function getBookingAvailabilityDecision(input) {
             scheduledByAssistant.get(row.assistantId).push({ start, end });
         }
     }
-    const onlineFreeAssistantCount = assistantPool.filter((assistant) => {
+    const activeUnassignedInstantDemand = hasClusterMismatch
+        ? 0
+        : Number((await pool.query(`
+          select count(*)::int as count
+          from zigo.service_requests sr
+          where (
+              sr.cluster_id = $1::uuid
+              or (
+                coalesce(sr.metadata->>'clusterId', '') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                and (sr.metadata->>'clusterId')::uuid = $1::uuid
+              )
+              or (
+                coalesce(sr.metadata->>'locationClusterId', '') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                and (sr.metadata->>'locationClusterId')::uuid = $1::uuid
+              )
+              or exists (
+                select 1
+                from zigo.request_locations rl
+                where rl.service_request_id = sr.id
+                  and rl.cluster_id = $1::uuid
+              )
+            )
+            and sr.accepted_assignment_id is null
+            and sr.status_code in ('new', 'created', 'requested', 'open', 'initiated', 'payment_due', 'due', 'unpaid', 'payment_pending', 'pending_payment', 'paid', 'queued', 'pending', 'pending_assign', 'pending_assignment', 'awaiting_assignment', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+            and coalesce(sr.booking_type, sr.metadata->>'bookingType', 'instant') <> 'schedule'
+            and coalesce(
+              sr.booking_available_at,
+              case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
+              case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
+              sr.created_at + ((coalesce(sr.duration_minutes, 30)::int + $2::int) || ' minutes')::interval
+            ) > now()
+        `, [requiredClusterId, instantWrapUpMinutes + instantTravelMinutes])).rows[0]?.count || 0);
+    const rawOnlineFreeAssistantCount = instantAssistantPool.filter((assistant) => {
         if (assistant.nextAvailableAt.getTime() > now.getTime())
             return false;
         const scheduled = scheduledByAssistant.get(assistant.assistantId) || [];
         return !scheduled.some((window) => window.start.getTime() <= now.getTime() && window.end.getTime() > now.getTime());
     }).length;
+    const onlineFreeAssistantCount = Math.max(0, rawOnlineFreeAssistantCount - activeUnassignedInstantDemand);
     const onlineAssistantCount = assistantPool.length;
     const workingAssistantCount = Math.max(0, onlineAssistantCount - onlineFreeAssistantCount);
     const configuredWaitWindowMinutes = 0;
     const instantStartAt = now;
     const instantLimitMinutes = instantEtaMinutes || engineSettings.instantAutoMaxWaitMinutes || 45;
-    const instantCapacityStartAt = addMinutes(instantStartAt, instantLimitMinutes);
+    const instantCapacityStartAt = addMinutes(instantStartAt, instantLimitMinutes + instantInitiateMinutes);
     const instantCapacityDurationMinutes = durationMinutes + instantWrapUpMinutes + instantTravelMinutes;
     const instantCapacityEndAt = addMinutes(instantCapacityStartAt, instantCapacityDurationMinutes);
-    const candidates = assistantPool
+    const candidates = instantAssistantPool
         .map((assistant) => {
         const predictedReadyAt = assistant.nextAvailableAt.getTime() > now.getTime() ? assistant.nextAvailableAt : now;
         const scheduled = scheduledByAssistant.get(assistant.assistantId) || [];
@@ -1708,12 +1788,13 @@ export async function getBookingAvailabilityDecision(input) {
             requestAt: now,
             baseAvailableAt: predictedReadyAt,
             etaMinutes: instantEtaMinutes,
+            initiateMinutes: instantInitiateMinutes,
             maxReadyDelayMinutes: instantEtaMinutes,
             durationMinutes: instantCapacityDurationMinutes,
             scheduledWindows: scheduled
         });
         const candidateStartAt = window?.candidateStartAt ?? null;
-        const baseStartAt = candidateStartAt ?? addMinutes(assistantReadyAt, instantEtaMinutes);
+        const baseStartAt = candidateStartAt ?? addMinutes(assistantReadyAt, instantEtaMinutes + instantInitiateMinutes);
         const availableInMinutes = minutesUntil(now, candidateStartAt);
         const fallbackAvailableInMinutes = minutesUntil(now, baseStartAt) ?? 0;
         return {
@@ -1746,10 +1827,13 @@ export async function getBookingAvailabilityDecision(input) {
     const finalAssistantAvailableInMinutes = assistantAvailableInMinutes;
     const hasInstantMode = bookingMode === "instant" || bookingMode === "both";
     const hasScheduleMode = bookingMode === "schedule" || bookingMode === "both";
+    const hasInstantFreeAssistantNow = onlineFreeAssistantCount > 0;
     const instantAllowed = Boolean(hasInstantMode
         && isServiceOpenByEngine
         && !hasClusterMismatch
+        && hasInstantFreeAssistantNow
         && bestCandidate
+        && bestCandidate.isFreeNow
         && bestCandidate.hasInstantCapacityWindow);
     const scheduleAllowed = Boolean(hasScheduleMode
         && !hasClusterMismatch
@@ -1759,7 +1843,7 @@ export async function getBookingAvailabilityDecision(input) {
     const scheduleAvailableSlots = [];
     if (scheduleAssistantPool.length && dates.length && scheduleTimeSlots.length) {
         const requestedDurationMinutes = durationMinutes;
-        const scheduleCapacityDurationMinutes = requestedDurationMinutes + scheduleWrapUpMinutes + scheduleTravelMinutes;
+        const scheduleCapacityDurationMinutes = scheduleInitiateMinutes + requestedDurationMinutes + scheduleWrapUpMinutes + scheduleTravelMinutes;
         const earliestScheduleSlotStartAt = addMinutes(now, scheduleEtaMinutes);
         const blocked = await pool.query(`
         select distinct
@@ -1767,15 +1851,25 @@ export async function getBookingAvailabilityDecision(input) {
           coalesce(
             sr.booking_start_at,
             sr.scheduled_at,
-            nullif(sr.metadata->>'scheduledDate', '')::date + nullif(sr.metadata->>'scheduledTime', '')::time
+            case
+              when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$'
+               and coalesce(sr.metadata->>'scheduledTime', '') ~ '^\d{2}:\d{2}'
+              then (sr.metadata->>'scheduledDate')::date + left(sr.metadata->>'scheduledTime', 5)::time
+              else null
+            end
           ) as "startAt",
           coalesce(
             sr.booking_available_at,
-            nullif(sr.metadata->>'bookingAvailableAt', '')::timestamptz,
-            nullif(sr.metadata->>'expectedFreeAt', '')::timestamptz,
+            case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
+            case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
             sr.booking_end_at,
             sr.scheduled_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval,
-            (nullif(sr.metadata->>'scheduledDate', '')::date + nullif(sr.metadata->>'scheduledTime', '')::time) + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
+            case
+              when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$'
+               and coalesce(sr.metadata->>'scheduledTime', '') ~ '^\d{2}:\d{2}'
+              then ((sr.metadata->>'scheduledDate')::date + left(sr.metadata->>'scheduledTime', 5)::time) + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
+              else null
+            end
           ) as "endAt",
           sr.metadata->>'scheduledDate' as "scheduledDate",
           sr.metadata->>'scheduledTime' as "scheduledTime",
@@ -1783,10 +1877,14 @@ export async function getBookingAvailabilityDecision(input) {
         from zigo.task_assignments ta
         join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
         where ta.assistant_id = any($1::uuid[])
-          and ta.status_code in ('reserved', 'offered', 'accepted', 'in_progress')
-          and sr.status_code in ('payment_pending', 'paid', 'queued', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+          and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+          and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
           and coalesce(sr.booking_type, sr.metadata->>'bookingType') = 'schedule'
-          and coalesce(sr.booking_date, nullif(sr.metadata->>'scheduledDate', '')::date, sr.scheduled_at::date)::text = any($2::text[])
+          and coalesce(
+            sr.booking_date,
+            case when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$' then (sr.metadata->>'scheduledDate')::date else null end,
+            sr.scheduled_at::date
+          )::text = any($2::text[])
         union all
         select distinct
           acr.assistant_id as "assistantId",
@@ -1797,7 +1895,7 @@ export async function getBookingAvailabilityDecision(input) {
           greatest(1, ceil(extract(epoch from (acr.reserved_until - acr.reserved_from)) / 60)::int) as "durationMinutes"
         from zigo.assistant_capacity_reservations acr
         where acr.assistant_id = any($1::uuid[])
-          and acr.status_code in ('held', 'reserved', 'assigned')
+          and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
           and acr.reserved_until > now()
           and coalesce(acr.booking_type, 'schedule') = 'schedule'
           and acr.reserved_from::date::text = any($2::text[])
@@ -1846,6 +1944,16 @@ export async function getBookingAvailabilityDecision(input) {
             : !hasScheduleCapacity
                 ? "no_schedule_slots"
                 : null;
+    const instantSupplyUnavailable = Boolean(hasInstantMode && !hasClusterMismatch && isServiceOpenByEngine && !instantAllowed);
+    const instantSupplyUnavailableReason = instantSupplyUnavailable
+        ? (!assistantPool.length
+            ? "no_cluster_assistant"
+            : !onlineAssistantCount
+                ? "no_online_assistant"
+                : !onlineFreeAssistantCount
+                    ? "no_free_assistant"
+                    : "no_instant_capacity")
+        : null;
     const canonicalResult = {
         effectiveBookingType: bookingMode === "schedule" ? "schedule" : "instant",
         bookingTypeMode: bookingMode,
@@ -1860,6 +1968,12 @@ export async function getBookingAvailabilityDecision(input) {
         finalAssistantAvailableInMinutes,
         earliestPredictedAvailableAt: assistantNextAvailableAt?.toISOString() ?? null,
         instantAllowed,
+        supplyAvailable: instantAllowed,
+        supplyUnavailable: instantSupplyUnavailable,
+        supplyUnavailableReason: instantSupplyUnavailableReason,
+        autoHideUnavailable: instantSupplyUnavailable,
+        instantSupplyUnavailable,
+        instantSupplyUnavailableReason,
         scheduleAllowed: scheduleAllowed && hasScheduleCapacity,
         instantAvailable: instantAllowed,
         estimatedReachMinutes: bestCandidate?.estimatedReachMinutes ?? settings.averageReachMinutes,
@@ -1871,9 +1985,11 @@ export async function getBookingAvailabilityDecision(input) {
         instantCapacityDurationMinutes,
         availabilityControls: {
             instantEtaMinutes,
+            instantInitiateMinutes,
             instantWrapUpMinutes,
             instantTravelMinutes,
             scheduleEtaMinutes,
+            scheduleInitiateMinutes,
             scheduleWrapUpMinutes,
             scheduleTravelMinutes,
             serviceOpen: isServiceOpenByEngine,
@@ -2121,11 +2237,13 @@ export async function createBookingByAdmin(input) {
         const bookingEngineTiming = isScheduleBooking
             ? {
                 etaMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleEtaMinutes ?? 0))),
+                initiateMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleInitiateMinutes ?? 0))),
                 wrapUpMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleWrapUpMinutes ?? 0))),
                 travelBufferMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleTravelMinutes ?? 0)))
             }
             : {
                 etaMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantEtaMinutes ?? engineSettings.instantAutoMaxWaitMinutes ?? 0))),
+                initiateMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantInitiateMinutes ?? 0))),
                 wrapUpMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantWrapUpMinutes ?? 0))),
                 travelBufferMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantTravelMinutes ?? 0)))
             };
@@ -2151,7 +2269,7 @@ export async function createBookingByAdmin(input) {
         }
         const requestedWaitWindowMinutes = 0;
         const instantWaitLimitMinutes = bookingEngineTiming.etaMinutes || engineSettings.instantAutoMaxWaitMinutes || 45;
-        const instantAssignmentStartAt = addMinutes(instantStartAt, instantWaitLimitMinutes);
+        const instantAssignmentStartAt = addMinutes(instantStartAt, instantWaitLimitMinutes + bookingEngineTiming.initiateMinutes);
         const instantCapacityDurationMinutes = normalizedDurationMinutes + bookingEngineTiming.wrapUpMinutes + bookingEngineTiming.travelBufferMinutes;
         const instantCapacityEndAt = addMinutes(instantAssignmentStartAt, instantCapacityDurationMinutes);
         const requestLocationStops = bookingLocationStopsFromMetadata(inputMetadata, {
@@ -2297,6 +2415,7 @@ export async function createBookingByAdmin(input) {
                 scheduledTime,
                 durationMinutes: normalizedDurationMinutes,
                 etaMinutes: bookingEngineTiming.etaMinutes,
+                initiateMinutes: bookingEngineTiming.initiateMinutes,
                 wrapUpMinutes: bookingEngineTiming.wrapUpMinutes,
                 travelBufferMinutes: bookingEngineTiming.travelBufferMinutes
             })
@@ -2309,6 +2428,7 @@ export async function createBookingByAdmin(input) {
                 durationMinutes: instantCapacityDurationMinutes,
                 instantRequestAt: instantStartAt,
                 instantEtaMinutes: instantWaitLimitMinutes,
+                instantInitiateMinutes: bookingEngineTiming.initiateMinutes,
                 instantReadyByMinutes: instantWaitLimitMinutes
             });
         if (!selectedAssistant) {
@@ -2334,7 +2454,7 @@ export async function createBookingByAdmin(input) {
             throw new HttpError(409, isScheduleBooking ? "Selected schedule slot is no longer available." : "No online assistant capacity is available for instant booking.");
         }
         const assignmentStartAt = isScheduleBooking
-            ? scheduleSlotDate(scheduledDate, scheduledTime)
+            ? addMinutes(scheduleSlotDate(scheduledDate, scheduledTime), bookingEngineTiming.initiateMinutes)
             : selectedAssistant.candidateStartAt;
         if (!assignmentStartAt)
             throw new HttpError(400, "Booking start time is invalid.");
@@ -2370,6 +2490,7 @@ export async function createBookingByAdmin(input) {
             taskEndAt: bookingWorkEndAt.toISOString(),
             expectedFreeAt: expectedFreeAt.toISOString(),
             etaMinutes: bookingEngineTiming.etaMinutes,
+            initiateMinutes: bookingEngineTiming.initiateMinutes,
             wrapUpMinutes: bookingEngineTiming.wrapUpMinutes,
             travelBufferMinutes: bookingEngineTiming.travelBufferMinutes,
             resolvedBookingEngineRule,
@@ -2434,6 +2555,7 @@ export async function createBookingByAdmin(input) {
                 bookingAvailableAt: bookingAvailableAt.toISOString(),
                 taskEndAt: bookingWorkEndAt.toISOString(),
                 etaMinutes: bookingEngineTiming.etaMinutes,
+                initiateMinutes: bookingEngineTiming.initiateMinutes,
                 wrapUpMinutes: bookingEngineTiming.wrapUpMinutes,
                 travelBufferMinutes: bookingEngineTiming.travelBufferMinutes,
                 waitWindowMinutes: 0,
@@ -2508,8 +2630,9 @@ export async function createBookingByAdmin(input) {
             booking_end_at = $3::timestamptz,
             booking_available_at = $4::timestamptz,
             eta_minutes = $5::int,
-            wrap_up_minutes = $6::int,
-            travel_buffer_minutes = $7::int,
+            initiate_minutes = $6::int,
+            wrap_up_minutes = $7::int,
+            travel_buffer_minutes = $8::int,
             updated_at = now()
         where id = $1::uuid
       `, [
@@ -2518,14 +2641,15 @@ export async function createBookingByAdmin(input) {
             bookingWorkEndAt,
             bookingAvailableAt,
             bookingEngineTiming.etaMinutes,
+            bookingEngineTiming.initiateMinutes,
             bookingEngineTiming.wrapUpMinutes,
             bookingEngineTiming.travelBufferMinutes
         ]);
         for (const stop of requestLocationStops) {
             await client.query(`
           insert into zigo.request_locations
-            (service_request_id, sequence, location_type, name, address, latitude, longitude, metadata)
-           values ($1::uuid, $2::int, $3::text, $4::text, $5::text, $6::double precision, $7::double precision, $8::jsonb)
+            (service_request_id, sequence, location_type, name, address, latitude, longitude, cluster_id, metadata)
+           values ($1::uuid, $2::int, $3::text, $4::text, $5::text, $6::double precision, $7::double precision, $8::uuid, $9::jsonb)
         `, [
                 request.rows[0].id,
                 stop.sequence,
@@ -2534,13 +2658,14 @@ export async function createBookingByAdmin(input) {
                 stop.address,
                 stop.latitude,
                 stop.longitude,
+                stop.clusterId || input.clusterId,
                 JSON.stringify({ ...stop.metadata, createdByAdmin: true })
             ]);
         }
         let capacityAssignment = null;
         const capacityStatusCode = assignmentMode === "automate" ? "offered" : "reserved";
         const capacitySource = assignmentMode === "automate" ? "booking_auto_assignment" : "booking_capacity_reservation";
-        const capacitySlotStart = assignmentStartAt;
+        const capacitySlotStart = isScheduleBooking ? scheduledSlotStart : instantStartAt;
         const capacityExpiresAt = expectedFreeAt;
         if (!capacityExpiresAt)
             throw new HttpError(400, "Booking start time is invalid.");
@@ -2562,11 +2687,13 @@ export async function createBookingByAdmin(input) {
                 assignmentMode,
                 scheduledDate: isScheduleBooking ? scheduledDate : localDateText(assignmentStartAt),
                 scheduledTime: isScheduleBooking ? scheduledTime : localTimeText(assignmentStartAt),
+                reservedFrom: capacitySlotStart.toISOString(),
                 startsAt: assignmentStartAt.toISOString(),
                 taskEndAt: bookingWorkEndAt.toISOString(),
                 bookingAvailableAt: bookingAvailableAt.toISOString(),
                 expectedFreeAt: expectedFreeAt?.toISOString(),
                 etaMinutes: bookingEngineTiming.etaMinutes,
+                initiateMinutes: bookingEngineTiming.initiateMinutes,
                 wrapUpMinutes: bookingEngineTiming.wrapUpMinutes,
                 travelBufferMinutes: bookingEngineTiming.travelBufferMinutes
             })
@@ -2582,7 +2709,7 @@ export async function createBookingByAdmin(input) {
             bookingType: bookingTypeMode,
             assignType: assignmentMode,
             statusCode: assignmentMode === "automate" ? "assigned" : "reserved",
-            reservedFrom: assignmentStartAt,
+            reservedFrom: capacitySlotStart,
             reservedUntil: expectedFreeAt,
             promisedStartAt,
             slaDeadlineAt,
@@ -2592,12 +2719,14 @@ export async function createBookingByAdmin(input) {
                 taskAssignmentStatus: capacityStatusCode,
                 scheduledDate: isScheduleBooking ? scheduledDate : localDateText(assignmentStartAt),
                 scheduledTime: isScheduleBooking ? scheduledTime : localTimeText(assignmentStartAt),
+                reservedFrom: capacitySlotStart.toISOString(),
                 waitWindowMinutes: 0,
                 durationMinutes: normalizedDurationMinutes,
                 taskEndAt: bookingWorkEndAt.toISOString(),
                 bookingAvailableAt: bookingAvailableAt.toISOString(),
                 expectedFreeAt: expectedFreeAt.toISOString(),
                 etaMinutes: bookingEngineTiming.etaMinutes,
+                initiateMinutes: bookingEngineTiming.initiateMinutes,
                 wrapUpMinutes: bookingEngineTiming.wrapUpMinutes,
                 travelBufferMinutes: bookingEngineTiming.travelBufferMinutes
             }
@@ -2649,6 +2778,7 @@ export async function createBookingByAdmin(input) {
                 bookingAvailableAt: bookingAvailableAt.toISOString(),
                 expectedFreeAt: expectedFreeAt.toISOString(),
                 etaMinutes: bookingEngineTiming.etaMinutes,
+                initiateMinutes: bookingEngineTiming.initiateMinutes,
                 wrapUpMinutes: bookingEngineTiming.wrapUpMinutes,
                 travelBufferMinutes: bookingEngineTiming.travelBufferMinutes
             }
@@ -2805,6 +2935,7 @@ async function bookingAssignmentWindow(db, serviceRequestId) {
         coalesce(metadata, '{}'::jsonb) as metadata,
         coalesce(duration_minutes, 30)::int as "durationMinutes",
         coalesce(eta_minutes, 0)::int as "etaMinutes",
+        coalesce(initiate_minutes, 0)::int as "initiateMinutes",
         coalesce(wrap_up_minutes, 0)::int as "wrapUpMinutes",
         coalesce(travel_buffer_minutes, 0)::int as "travelBufferMinutes",
         booking_start_at as "bookingStartAt",
@@ -2821,12 +2952,13 @@ async function bookingAssignmentWindow(db, serviceRequestId) {
     const now = new Date();
     const durationMinutes = Math.max(1, Math.min(1440, Math.round(Number(row.durationMinutes || 30))));
     const etaMinutes = Math.max(0, Math.round(Number(row.etaMinutes || row.metadata?.etaMinutes || 0)));
+    const initiateMinutes = Math.max(0, Math.round(Number(row.initiateMinutes || row.metadata?.initiateMinutes || 0)));
     const wrapUpMinutes = Math.max(0, Math.round(Number(row.wrapUpMinutes || row.metadata?.wrapUpMinutes || 0)));
     const travelBufferMinutes = Math.max(0, Math.round(Number(row.travelBufferMinutes || row.metadata?.travelBufferMinutes || 0)));
     const persistedStartAt = row.bookingStartAt && !Number.isNaN(row.bookingStartAt.getTime()) ? row.bookingStartAt : null;
     const persistedTaskEndAt = row.bookingEndAt && !Number.isNaN(row.bookingEndAt.getTime()) ? row.bookingEndAt : null;
     const persistedAvailableAt = row.bookingAvailableAt && !Number.isNaN(row.bookingAvailableAt.getTime()) ? row.bookingAvailableAt : null;
-    const slotStart = persistedStartAt ?? addMinutes(now, etaMinutes);
+    const slotStart = persistedStartAt ?? addMinutes(now, etaMinutes + initiateMinutes);
     const taskEndAt = persistedTaskEndAt ?? addMinutes(slotStart, durationMinutes);
     const slotEnd = persistedAvailableAt ?? addMinutes(taskEndAt, wrapUpMinutes + travelBufferMinutes);
     const bookingType = row.metadata?.bookingType === "schedule" ? "schedule" : "instant";
@@ -2877,13 +3009,18 @@ async function listAssignableAssistantWindows(db, input) {
         coalesce(
           sr.booking_start_at,
           sr.scheduled_at,
-          nullif(sr.metadata->>'scheduledDate', '')::date + nullif(sr.metadata->>'scheduledTime', '')::time,
+          case
+            when coalesce(sr.metadata->>'scheduledDate', '') ~ '^\d{4}-\d{2}-\d{2}$'
+             and coalesce(sr.metadata->>'scheduledTime', '') ~ '^\d{2}:\d{2}'
+            then (sr.metadata->>'scheduledDate')::date + left(sr.metadata->>'scheduledTime', 5)::time
+            else null
+          end,
           sr.created_at
         ) as "startAt",
         coalesce(
           sr.booking_available_at,
-          nullif(sr.metadata->>'bookingAvailableAt', '')::timestamptz,
-          nullif(sr.metadata->>'expectedFreeAt', '')::timestamptz,
+          case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
+          case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
           sr.booking_end_at,
           sr.scheduled_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval,
           sr.created_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
@@ -2895,8 +3032,8 @@ async function listAssignableAssistantWindows(db, input) {
       join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
       where ta.assistant_id = any($1::uuid[])
         and sr.id <> $2::uuid
-        and ta.status_code in ('reserved', 'offered', 'accepted', 'in_progress')
-        and sr.status_code in ('payment_pending', 'paid', 'queued', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+        and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+        and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
       union all
       select
         acr.assistant_id as "assistantId",
@@ -2909,7 +3046,7 @@ async function listAssignableAssistantWindows(db, input) {
       from zigo.assistant_capacity_reservations acr
       where acr.assistant_id = any($1::uuid[])
         and acr.service_request_id <> $2::uuid
-        and acr.status_code in ('held', 'reserved', 'assigned')
+        and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
         and acr.reserved_until > now()
     `, [assistants.rows.map((assistant) => assistant.assistantId), input.serviceRequestId]);
     const windowsByAssistant = new Map();
@@ -3401,6 +3538,21 @@ export async function cancelBookingByAdmin(serviceRequestId, actorUserId, reason
         returning id, cluster_id as "clusterId", coalesce(metadata, '{}'::jsonb) as metadata, accepted_assignment_id as "acceptedAssistantId"
       `, [serviceRequestId, reason]);
         if (result.rows[0]) {
+            await client.query(`
+          update zigo.task_assignments
+          set status_code = 'cancelled',
+              responded_at = coalesce(responded_at, now()),
+              metadata = coalesce(metadata, '{}'::jsonb) || $2::jsonb
+          where service_request_id = $1::uuid
+            and status_code not in ('completed', 'cancelled', 'canceled', 'rejected', 'released')
+        `, [
+                serviceRequestId,
+                JSON.stringify({
+                    cancelledBy: "admin",
+                    cancellationReason: reason,
+                    cancelledAt: new Date().toISOString()
+                })
+            ]);
             await releaseCapacityReservations(client, {
                 serviceRequestId,
                 statusCode: "cancelled",
@@ -3432,6 +3584,11 @@ export async function cancelBookingByAdmin(serviceRequestId, actorUserId, reason
             await writeAdminAction(client, actorUserId, serviceRequestId, "cancel", reason, {});
         }
         await client.query("commit");
+        if (result.rows[0]) {
+            await stopAssistantCalendarBlocksForBooking({ bookingId: serviceRequestId, status: "cancelled" }).catch((error) => {
+                console.error("Unable to release assistant dispatch blocks for cancelled booking.", error);
+            });
+        }
         return result.rows[0] ?? null;
     }
     catch (error) {

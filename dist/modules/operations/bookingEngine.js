@@ -28,10 +28,10 @@ export function ensureBookingEngineSchema(client = pool) {
     create index if not exists idx_capacity_reservations_booking on zigo.assistant_capacity_reservations(service_request_id);
     create index if not exists idx_capacity_reservations_assistant_window
       on zigo.assistant_capacity_reservations(assistant_id, reserved_from, reserved_until)
-      where status_code in ('held', 'reserved', 'assigned');
+      where status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active');
     create index if not exists idx_capacity_reservations_cluster_window
       on zigo.assistant_capacity_reservations(cluster_id, reserved_from, reserved_until)
-      where status_code in ('held', 'reserved', 'assigned');
+      where status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active');
     create index if not exists idx_capacity_reservations_status on zigo.assistant_capacity_reservations(status_code, updated_at desc);
 
     create table if not exists zigo.booking_orchestration_state (
@@ -137,6 +137,7 @@ export function ensureBookingEngineSchema(client = pool) {
       add column if not exists booking_start_at timestamptz,
       add column if not exists booking_end_at timestamptz,
       add column if not exists booking_available_at timestamptz,
+      add column if not exists cluster_id uuid references zigo.clusters(id),
       add column if not exists accepted_assignment_id uuid,
       add column if not exists cancelled_reason text,
       add column if not exists completed_at timestamptz,
@@ -144,6 +145,7 @@ export function ensureBookingEngineSchema(client = pool) {
       add column if not exists assistant_start_delay_minutes int not null default 0,
       add column if not exists delay_credit_minutes int not null default 0,
       add column if not exists eta_minutes int not null default 0,
+      add column if not exists initiate_minutes int not null default 0,
       add column if not exists wrap_up_minutes int not null default 0,
       add column if not exists travel_buffer_minutes int not null default 0,
       add column if not exists additional_details jsonb not null default '{}'::jsonb;
@@ -152,6 +154,24 @@ export function ensureBookingEngineSchema(client = pool) {
       add column if not exists actual_started_at timestamptz,
       add column if not exists start_delay_minutes int not null default 0,
       add column if not exists delay_credit_minutes int not null default 0;
+
+    do $$
+    begin
+      if to_regclass('zigo.request_locations') is not null then
+        execute 'alter table zigo.request_locations add column if not exists cluster_id uuid references zigo.clusters(id)';
+
+        execute '
+          update zigo.request_locations rl
+          set cluster_id = sr.cluster_id
+          from zigo.service_requests sr
+          where rl.service_request_id = sr.id
+            and rl.cluster_id is null
+            and sr.cluster_id is not null
+        ';
+
+        execute 'create index if not exists idx_request_locations_cluster on zigo.request_locations(cluster_id)';
+      end if;
+    end $$;
   `).then(() => undefined);
     if (client === pool)
         schemaReadyPromise = promise;
@@ -192,7 +212,7 @@ export async function releaseCapacityReservations(client, input) {
            release_reason = $3::text,
            updated_at = now()
        where service_request_id = $1::uuid
-        and status_code in ('held', 'reserved', 'assigned')
+        and status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
         and ($4::uuid is null or assignment_id is distinct from $4::uuid)
     `, [input.serviceRequestId, input.statusCode, input.reason, input.exceptAssignmentId ?? null]);
 }
@@ -310,7 +330,7 @@ export async function runBookingOrchestrationCycle(client = pool, limit = 100, o
             )
         from candidates
         where acr.service_request_id = candidates.service_request_id
-          and acr.status_code in ('held', 'reserved', 'assigned')
+          and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
         returning acr.id
       ),
       closed_orchestration as (
@@ -447,7 +467,7 @@ export async function runBookingOrchestrationCycle(client = pool, limit = 100, o
             )
         from candidates
         where acr.service_request_id = candidates.service_request_id
-          and acr.status_code in ('held', 'reserved', 'assigned')
+          and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
         returning acr.id
       ),
       completed_orchestration as (
@@ -515,7 +535,7 @@ export async function runBookingOrchestrationCycle(client = pool, limit = 100, o
             select 1
             from zigo.assistant_capacity_reservations active_acr
             where active_acr.assistant_id = cb.assistant_id
-              and active_acr.status_code in ('held', 'reserved', 'assigned')
+              and active_acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
               and active_acr.reserved_until > now()
           )
         returning av.assistant_id
@@ -540,7 +560,7 @@ export async function runBookingOrchestrationCycle(client = pool, limit = 100, o
           acr.reserved_until
         from zigo.assistant_capacity_reservations acr
         join zigo.service_requests sr on sr.id = acr.service_request_id
-        where acr.status_code in ('held', 'reserved', 'assigned')
+        where acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
           and acr.reserved_until <= now()
           and lower(coalesce(sr.status_code, '')) in ('completed', 'cancelled', 'canceled', 'failed', 'rejected')
         order by acr.reserved_until
@@ -584,7 +604,7 @@ export async function runBookingOrchestrationCycle(client = pool, limit = 100, o
             select 1
             from zigo.assistant_capacity_reservations active_acr
             where active_acr.assistant_id = rc.assistant_id
-              and active_acr.status_code in ('held', 'reserved', 'assigned')
+              and active_acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
               and active_acr.id is distinct from (
                 select reservation_id from candidates c where c.service_request_id = rc.service_request_id and c.assistant_id is not distinct from rc.assistant_id limit 1
               )
@@ -786,7 +806,7 @@ export async function getNextBookingOrchestrationDueAt(client = pool, options = 
         select min(acr.reserved_until) as due_at
         from zigo.assistant_capacity_reservations acr
         join zigo.service_requests sr on sr.id = acr.service_request_id
-        where acr.status_code in ('held', 'reserved', 'assigned')
+        where acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
           and lower(coalesce(sr.status_code, '')) in ('completed', 'cancelled', 'canceled', 'failed', 'rejected')
       )
       select min(due_at) as "dueAt"

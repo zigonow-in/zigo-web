@@ -316,6 +316,7 @@ const state = {
   customerCatalogTab: "categories",
   customerHomeCategorySheetOpen: false,
   customerHomeCategorySheetId: "",
+  customerHomeCategorySheetServiceId: "",
   customerHomeCategorySheetExpanded: false,
   customerHomeDurationSheetOpen: false,
   customerHomeDurationSheetCategoryId: "",
@@ -1965,6 +1966,7 @@ function startCustomerRealtime(force = false) {
       }
       const eventPayload = payload.payload || {};
       const eventType = String(payload.type || "");
+      scheduleCustomerHomeSupplyRefreshForBookingEvent(eventType, eventPayload);
       if (eventType.startsWith("support.") && state.customerView === "support") {
         const activeTicketId = state.customerSupportTicket?.ticket?.id;
         if (state.customerSupportMode === "chat" && activeTicketId && String(eventPayload.ticketId || "") === String(activeTicketId)) {
@@ -2487,6 +2489,14 @@ function normalizeServiceMasterBookingType(value = "") {
   return ["both", "instant", "schedule"].includes(raw) ? raw : "both";
 }
 
+function normalizeSupplyUnavailableAction(value = "") {
+  const raw = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["auto_hide", "autohide"].includes(raw) || (raw.includes("auto") && raw.includes("hide"))) return "auto_hide";
+  if (["show_popup", "showpopup"].includes(raw) || raw.includes("popup")) return "show_popup";
+  if (["redirect_schedule", "redirectschedule"].includes(raw) || (raw.includes("redirect") && raw.includes("schedule"))) return "redirect_schedule";
+  return "";
+}
+
 function normalizeCustomerCatalog(raw = {}) {
   const source = raw && typeof raw === "object" ? raw : {};
   const services = normalizeArray(source.services).map((service, index) => {
@@ -2591,6 +2601,8 @@ function normalizeCustomerCatalog(raw = {}) {
       priceDisplayMode: category.priceDisplayMode || category.price_display_mode || category.config?.categorySettings?.priceDisplayMode || "row",
       priceGridRows: numberValue(category.priceGridRows ?? category.price_grid_rows ?? category.config?.categorySettings?.priceGridRows, 3),
       priceGridColumns: numberValue(category.priceGridColumns ?? category.price_grid_columns ?? category.config?.categorySettings?.priceGridColumns, 3),
+      supplyUnavailableAction: normalizeSupplyUnavailableAction(category.supplyUnavailableAction || category.supply_unavailable_action || category.config?.categorySettings?.supplyUnavailableAction),
+      supplyUnavailableMessage: String(category.supplyUnavailableMessage || category.supply_unavailable_message || category.config?.categorySettings?.supplyUnavailableMessage || "").trim(),
       expandPriority: numberValue(category.expandPriority ?? category.expand_priority, 0),
       expandTitle: categoryExpandTitleValue(category),
       expandDuration: categoryExpandDescriptionValue(category),
@@ -2661,6 +2673,8 @@ function normalizeCustomerCatalog(raw = {}) {
       priceDisplayMode: category.priceDisplayMode || category.price_display_mode || category.config?.categorySettings?.priceDisplayMode || "row",
       priceGridRows: numberValue(category.priceGridRows ?? category.price_grid_rows ?? category.config?.categorySettings?.priceGridRows, 3),
       priceGridColumns: numberValue(category.priceGridColumns ?? category.price_grid_columns ?? category.config?.categorySettings?.priceGridColumns, 3),
+      supplyUnavailableAction: normalizeSupplyUnavailableAction(category.supplyUnavailableAction || category.supply_unavailable_action || category.config?.categorySettings?.supplyUnavailableAction),
+      supplyUnavailableMessage: String(category.supplyUnavailableMessage || category.supply_unavailable_message || category.config?.categorySettings?.supplyUnavailableMessage || "").trim(),
       isActive: category.isActive !== false,
       isEnabled: category.isEnabled !== false,
       isVisible: category.isVisible !== false
@@ -3481,15 +3495,21 @@ function customerBookingTypeForCartItem(item = {}) {
         allowsSchedule: itemMode === "schedule"
       }
     : customerServiceBookingType(resolvedServiceId);
+  const supplyScheduleOverride = Boolean(item.supplyScheduleOverride)
+    && normalizeSupplyUnavailableAction(item.supplyUnavailableAction || category?.supplyUnavailableAction) === "redirect_schedule";
+  const resolvedBase = supplyScheduleOverride ? { ...base, mode: "schedule", allowsSchedule: true } : base;
   const categoryConfig = category?.bookingTypeConfig || {};
   if (categoryConfig && customerBookingConfigActive(categoryConfig) && customerBookingConfigMode(categoryConfig, "")) {
+    const configured = customerApplyBookingConfig(resolvedBase, categoryConfig, service || {});
     return {
-      ...customerApplyBookingConfig(base, categoryConfig, service || {}),
+      ...configured,
+      mode: supplyScheduleOverride ? "schedule" : configured.mode,
+      allowsSchedule: supplyScheduleOverride ? true : configured.allowsSchedule,
       categoryId: category?.id || "",
       categoryName: category?.name || item.categoryName || ""
     };
   }
-  return { ...base, categoryId: category?.id || "", categoryName: category?.name || item.categoryName || "" };
+  return { ...resolvedBase, categoryId: category?.id || "", categoryName: category?.name || item.categoryName || "" };
 }
 
 function customerResolvedBookingTypeMode() {
@@ -4176,7 +4196,7 @@ function customerPaymentMethodValue(method = {}) {
 function customerPaymentMethods() {
   const fallback = [
     { code: "WALLET", name: "Zigo Wallet", sortOrder: 10, metadata: { handler: "wallet", icon: "wallet", subtitle: "₹0.00 (ADD MONEY)", customerSelectable: false } },
-    { code: "CASH", name: "Cash", sortOrder: 20, metadata: { handler: "cash", icon: "receipt", subtitle: "", customerSelectable: true } },
+    { code: "CASH", name: "Cash", sortOrder: 20, metadata: { handler: "cash", icon: "cash", subtitle: "", customerSelectable: true } },
     { code: "RAZORPAY", name: "Online Payment", sortOrder: 30, metadata: { handler: "razorpay", icon: "business", subtitle: "Cards, UPI, wallet and netbanking", customerSelectable: true } }
   ];
   const configured = state.portalConfig?.paymentMethodsConfigured === true;
@@ -4192,7 +4212,7 @@ function customerPaymentMethods() {
     const value = customerPaymentMethodValue(method);
     if (!value || seen.has(value)) return [];
     seen.add(value);
-    const icon = ["wallet", "receipt", "business", "package"].includes(String(metadata.icon || "")) ? String(metadata.icon) : "package";
+    const configuredIcon = ["wallet", "cash", "receipt", "business", "package"].includes(String(metadata.icon || "")) ? String(metadata.icon) : "package";
     const walletBalancePaise = Math.max(0, Number(
       state.user?.walletBalancePaise
       ?? state.user?.metadata?.walletBalancePaise
@@ -4205,7 +4225,7 @@ function customerPaymentMethods() {
       value,
       title: String(method.name || "Payment Method"),
       subtitle: isWalletMethod ? `Wallet Balance ${money(walletBalancePaise / 100)}` : String(metadata.subtitle || ""),
-      icon,
+      icon: value === "cash" ? "cash" : configuredIcon,
       disabled: method.isEnabled === false
     }];
   });
@@ -4216,6 +4236,13 @@ function customerPaymentLabel(method = state.selectedPayment) {
   const configured = customerPaymentMethods().find((item) => item.value === value);
   return configured?.title || ({ razorpay: "Online", upi: "UPI", cash: "Cash", card: "Card", wallet: "Zigo Wallet" }[value] || "Online");
 };
+
+function customerPaymentIcon(method = state.selectedPayment) {
+  const value = String(method || "").toLowerCase();
+  const configured = customerPaymentMethods().find((item) => item.value === value);
+  if (configured?.icon) return configured.icon;
+  return ({ razorpay: "business", upi: "wallet", cash: "cash", card: "wallet", wallet: "wallet" }[value] || "package");
+}
 
 function customerPaymentMethodSheetOptionHtml({ value = "", title = "", subtitle = "", icon = "wallet", disabled = false } = {}) {
   const selected = String(state.selectedPayment || "cash").toLowerCase() === String(value || "").toLowerCase();
@@ -4295,7 +4322,7 @@ customerCartConfirmBarHtml = function customerCartConfirmBarHtmlOverride(totals 
         <b><span>â‚¹</span>${escapeHtml(amount.toFixed(0))}</b>
         ${discount > 0 ? `<del>${escapeHtml(money(total))}</del><em>Save ${escapeHtml(money(discount))}</em>` : ""}
       </div>
-      <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length ? "" : "disabled"}><span>Confirm</span>${customerIcon("chevronRight")}</button>
+      <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length ? "" : "disabled"}><span>Proceed to Pay</span></button>
     </div>
   </div>`;
 };
@@ -4366,7 +4393,7 @@ function customerCartConfirmBarHtml(totals = cartTotals(), activeBookingType = c
         <b><span>Ã¢â€šÂ¹</span>${escapeHtml(amount.toFixed(0))}</b>
         ${discount > 0 ? `<del>${escapeHtml(money(total))}</del><em>Save ${escapeHtml(money(discount))}</em>` : ""}
       </div>
-      <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length ? "" : "disabled"}><span>Confirm</span>${customerIcon("chevronRight")}</button>
+      <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length ? "" : "disabled"}><span>Proceed to Pay</span></button>
     </div>
   </div>`;
 }
@@ -4412,10 +4439,12 @@ customerCartConfirmBarHtml = function customerCartConfirmBarHtmlFinal(totals = c
   const hasPaymentChoice = paymentMethods.length > 1;
   const paymentMethodControl = hasPaymentChoice
     ? `<button class="customer-payment-mode-field" type="button" data-open-review-payment-sheet aria-label="Change payment mode">
+        ${customerIcon(customerPaymentIcon(selectedPayment))}
         <span>${escapeHtml(customerPaymentLabel(selectedPayment))}</span>
         ${customerIcon("chevronDown")}
       </button>`
     : `<span class="customer-payment-mode-field static" aria-label="Selected payment mode">
+        ${customerIcon(customerPaymentIcon(selectedPayment))}
         <span>${escapeHtml(customerPaymentLabel(selectedPayment))}</span>
       </span>`;
   return `<div class="customer-cart-bar cart-confirm-bar">
@@ -4427,7 +4456,7 @@ customerCartConfirmBarHtml = function customerCartConfirmBarHtmlFinal(totals = c
           ${discount > 0 ? `<del>${escapeHtml(money(total))}</del><em>Save ${escapeHtml(money(discount))}</em>` : ""}
         </div>
       </div>
-      <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length && selectedPayment ? "" : "disabled"}><span>Confirm</span>${customerIcon("chevronRight")}</button>
+      <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length && selectedPayment ? "" : "disabled"}><span>Proceed to Pay</span></button>
     </div>
   </div>`;
 };
@@ -5299,6 +5328,7 @@ function customerIcon(name, className = "") {
     map: `<path d="M20 10c0 5-8 12-8 12S4 15 4 10a8 8 0 1 1 16 0Z"></path><circle cx="12" cy="10" r="3"></circle>`,
     business: `<rect x="3" y="7" width="18" height="14" rx="2"></rect><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><path d="M3 13h18"></path><path d="M12 12v3"></path>`,
     wallet: `<path d="M19 7V5a2 2 0 0 0-2-2H5a3 3 0 0 0 0 6h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H5a3 3 0 0 1-3-3V6"></path><path d="M16 13h.01"></path>`,
+    cash: `<rect x="3" y="6" width="18" height="12" rx="2"></rect><circle cx="12" cy="12" r="3"></circle><path d="M6 9h.01"></path><path d="M18 15h.01"></path>`,
     gift: `<path d="M20 12v10H4V12"></path><path d="M2 7h20v5H2z"></path><path d="M12 22V7"></path><path d="M12 7H7.5a2.5 2.5 0 1 1 0-5C11 2 12 7 12 7Z"></path><path d="M12 7h4.5a2.5 2.5 0 1 0 0-5C13 2 12 7 12 7Z"></path>`,
     user: `<circle cx="12" cy="8" r="4"></circle><path d="M4 21a8 8 0 0 1 16 0"></path>`,
     home: `<path d="m3 11 9-8 9 8"></path><path d="M5 10v10h14V10"></path><path d="M9 20v-6h6v6"></path>`,
@@ -7639,6 +7669,7 @@ function customerCategoryHomeDisplayMode(category = {}) {
 
 function customerHomeCategories(options = {}) {
   const includeHiddenHome = options.includeHiddenHome === true;
+  const includeChildCategories = options.includeChildCategories === true;
   const catalog = activeCatalog();
   const masterRows = normalizeArray(catalog.masterCategories);
   const serviceIds = new Set([
@@ -7663,7 +7694,11 @@ function customerHomeCategories(options = {}) {
     const parentId = categoryParentId(category);
     return !parentId || !ids.has(parentId);
   });
-  return roots.length ? roots : rows;
+  return includeChildCategories ? rows : roots.length ? roots : rows;
+}
+
+function customerHomeDurationCategories() {
+  return customerHomeCategories({ includeHiddenHome: true, includeChildCategories: true });
 }
 
 function customerHomeServiceMasters() {
@@ -7684,6 +7719,26 @@ function customerHomeServiceMasterPriority(serviceMasterId = "") {
 function customerHomeCategoriesForServiceMaster(serviceMasterId = "", categories = customerHomeCategories()) {
   const id = String(serviceMasterId || "");
   return normalizeArray(categories).filter((category) => String(category.serviceMasterId || "") === id);
+}
+
+function customerHomeCategorySheetServiceId(category = {}) {
+  return String(
+    state.customerHomeCategorySheetServiceId
+    || category?.serviceMasterId
+    || category?.service_master_id
+    || category?.config?.categorySettings?.serviceMasterId
+    || categoryServiceId(category || {})
+    || ""
+  );
+}
+
+function customerHomeCategorySheetCategories() {
+  const allCategories = customerHomeCategories();
+  const selected = customerHomeCategoryById(state.customerHomeCategorySheetId) || allCategories[0] || {};
+  const serviceId = customerHomeCategorySheetServiceId(selected);
+  if (!serviceId) return allCategories;
+  const rows = customerHomeCategoriesForServiceMaster(serviceId, allCategories);
+  return rows.length ? rows : allCategories.filter((category) => String(category.id || "") === String(selected.id || ""));
 }
 
 function customerHomeServiceMasterIconHtml(icon = {}) {
@@ -7803,7 +7858,7 @@ function customerHomeCategoryTile(category = {}, service = {}, index = 0) {
 function customerHomeCategoryById(categoryId = "") {
   const id = String(categoryId || "");
   if (!id) return null;
-  return customerHomeCategories({ includeHiddenHome: true }).find((category) => String(category.id || "") === id) || null;
+  return customerHomeDurationCategories().find((category) => String(category.id || "") === id) || null;
 }
 
 function customerHomeGuidanceList(items = [], icon = "&#9733;", tone = "do") {
@@ -7881,13 +7936,14 @@ function customerCenterHomeCategorySheetSelection() {
 }
 
 function refreshCustomerHomeCategorySheetUi() {
-  const selected = customerHomeCategoryById(state.customerHomeCategorySheetId) || customerHomeCategories()[0];
+  const categories = customerHomeCategorySheetCategories();
+  const selected = customerHomeCategoryById(state.customerHomeCategorySheetId) || categories[0];
   const sheet = document.querySelector(".portal-customer .customer-home-category-sheet");
   const content = sheet?.querySelector("[data-home-category-validated-content]");
   if (!selected || !sheet) return false;
   const strip = sheet.querySelector(".customer-home-category-strip");
   const scrollLeft = strip ? strip.scrollLeft : 0;
-  if (content) content.innerHTML = customerHomeCategorySheetValidatedContentHtml(selected);
+  if (content) content.innerHTML = customerHomeCategorySheetValidatedContentHtml(selected, categories);
   requestAnimationFrame(() => {
     const nextStrip = sheet.querySelector(".customer-home-category-strip");
     if (nextStrip) nextStrip.scrollLeft = scrollLeft;
@@ -7898,6 +7954,7 @@ function refreshCustomerHomeCategorySheetUi() {
 
 function closeCustomerHomeCategorySheetInPlace() {
   state.customerHomeCategorySheetOpen = false;
+  state.customerHomeCategorySheetServiceId = "";
   state.customerHomeCategorySheetExpanded = false;
   state.customerHomeDurationSheetOpen = false;
   state.customerHomeDurationSheetCategoryId = "";
@@ -7914,7 +7971,7 @@ function closeCustomerHomeCategorySheetInPlace() {
 
 function customerHomeCategoryDetailSheet() {
   if (!state.customerHomeCategorySheetOpen) return "";
-  const categories = customerHomeCategories();
+  const categories = customerHomeCategorySheetCategories();
   if (!categories.length) return "";
   const selected = customerHomeCategoryById(state.customerHomeCategorySheetId) || categories[0];
   return `<div class="customer-home-category-sheet-backdrop" data-home-category-sheet-backdrop role="presentation">
@@ -8114,6 +8171,8 @@ function customerHomeCategoryPriceDurationOptions(categoryId = state.customerHom
         serviceMasterName: resolvedServiceName,
         serviceMasterBookingType: resolvedBookingType,
         bookingType: resolvedBookingType,
+        supplyUnavailableAction: normalizeSupplyUnavailableAction(category.supplyUnavailableAction),
+        supplyUnavailableMessage: category.supplyUnavailableMessage || "",
         name: category.name || rule.categoryName || "Category",
         label: rule.label || personalAssistantDurationLabel({ durationMinutes }),
         durationMinutes,
@@ -8132,10 +8191,10 @@ function customerHomeCategoryPriceDurationOptions(categoryId = state.customerHom
     .sort((left, right) => numberValue(left.durationMinutes, 0) - numberValue(right.durationMinutes, 0));
 }
 
-function customerHomeExpandedDurationOptions(categories = customerHomeCategories()) {
+function customerHomeExpandedDurationOptions(categories = customerHomeCategories(), options = {}) {
   const rows = normalizeArray(categories)
     .filter((category) => customerCategoryHomeDisplayMode(category) === "categoryPrice")
-    .flatMap((category) => customerHomeCategoryPriceDurationOptions(category.id || category.categoryId || "", { availableFor: "expand" })
+    .flatMap((category) => customerHomeCategoryPriceDurationOptions(category.id || category.categoryId || "", { availableFor: "duration" })
       .map((item) => {
         const serviceMasterId = String(category.serviceMasterId || category.service_master_id || category.config?.categorySettings?.serviceMasterId || "");
         const serviceMaster = customerHomeServiceMasters().find((service) => String(service.id || service.serviceMasterId || "") === serviceMasterId) || {};
@@ -8158,19 +8217,23 @@ function customerHomeExpandedDurationOptions(categories = customerHomeCategories
           priceDisplayMode: category.priceDisplayMode === "grid" ? "grid" : "row",
           priceGridRows: Math.max(1, Math.round(numberValue(category.priceGridRows, 3))),
           priceGridColumns: Math.max(1, Math.round(numberValue(category.priceGridColumns, 3))),
-        expandPriority: numberValue(category.expandPriority ?? category.priority ?? category.sortOrder, 0),
-        expandTitle: item.expandTitle || category.expandTitle || "",
-        expandDuration: item.expandDuration || item.expandDescription || category.expandDuration || category.expandDescription || "",
-        expandDescription: item.expandDescription || item.expandDuration || category.expandDescription || category.expandDuration || "",
-        categoryName: item.expandTitle || category.expandTitle || item.categoryName || "",
-        name: item.expandTitle || category.expandTitle || item.name || ""
+          supplyUnavailableAction: normalizeSupplyUnavailableAction(category.supplyUnavailableAction),
+          supplyUnavailableMessage: category.supplyUnavailableMessage || "",
+          expandPriority: numberValue(category.expandPriority ?? category.priority ?? category.sortOrder, 0),
+          expandTitle: item.expandTitle || category.expandTitle || "",
+          expandDuration: item.expandDuration || item.expandDescription || category.expandDuration || category.expandDescription || "",
+          expandDescription: item.expandDescription || item.expandDuration || category.expandDescription || category.expandDuration || "",
+          categoryName: item.expandTitle || category.expandTitle || item.categoryName || "",
+          name: item.expandTitle || category.expandTitle || item.name || ""
         };
       }));
   const seen = new Set();
+  const unavailableServiceKeys = options.includeSupplyHidden ? new Set() : customerHomeAutoHideUnavailableServiceKeys(rows);
   return rows
     .filter((item) => {
       const key = `${item.categoryId || ""}:${item.categoryPriceRuleId || item.id || ""}:${item.durationMinutes || ""}`;
       if (!item.categoryId || !item.durationMinutes || seen.has(key)) return false;
+      if (!options.includeSupplyHidden && unavailableServiceKeys.has(customerHomeSupplyServiceKey(item))) return false;
       seen.add(key);
       return true;
     })
@@ -8203,7 +8266,7 @@ function customerHomeExpandedDurationCard(item = {}) {
 function customerHomeExpandedDurationOptionById(id = "") {
   const targetId = String(id || "");
   if (!targetId) return null;
-  return customerHomeExpandedDurationOptions(customerHomeCategories({ includeHiddenHome: true }))
+  return customerHomeExpandedDurationOptions(customerHomeDurationCategories(), { includeSupplyHidden: true })
     .find((item) => String(item.id || "") === targetId) || null;
 }
 
@@ -8212,6 +8275,329 @@ function customerHomeDurationBookingType(item = {}) {
   const serviceMasterId = String(item.serviceMasterId || "");
   const service = customerHomeServiceMasters().find((row) => String(row.id || row.serviceMasterId || "") === serviceMasterId) || {};
   return normalizeServiceMasterBookingType(service.bookingType);
+}
+
+function customerSupplyUnavailablePopupHtml() {
+  const message = String(state.customerSupplyUnavailablePopupMessage || "").trim();
+  if (!message) return "";
+  return `<div class="assistant-confirm-backdrop customer-supply-policy-backdrop" role="dialog" aria-modal="true">
+    <section class="assistant-confirm-card customer-supply-policy-card" role="document">
+      <button class="customer-modal-close" data-close-supply-policy-popup type="button" aria-label="Close">${customerIcon("x")}</button>
+      <h3>Assistant unavailable</h3>
+      <p>${escapeHtml(message)}</p>
+      <div class="assistant-confirm-actions">
+        <button class="primary-btn" data-close-supply-policy-popup type="button">Okay</button>
+      </div>
+    </section>
+  </div>`;
+}
+
+function showCustomerSupplyUnavailablePopup(message = "") {
+  state.customerSupplyUnavailablePopupMessage = String(message || "Assistant supply is not available right now. Please try again later.").trim();
+  render();
+}
+
+function customerInstantSupplyUnavailableForCurrentContext() {
+  if (!customerAvailabilityDecisionIsCurrent()) return false;
+  const decision = state.customerAvailabilityDecision || {};
+  if (decision.instantSupplyUnavailable === true || decision.supplyUnavailable === true) return true;
+  return decision.instantAvailable === false && decision.instantAllowed === false;
+}
+
+function customerHomeSupplyAvailabilityKey(item = {}) {
+  return [
+    selectedCustomerClusterId() || "",
+    item.categoryId || "",
+    item.categoryPriceRuleId || item.id || "",
+    item.durationMinutes || ""
+  ].map((part) => String(part || "")).join("|");
+}
+
+function customerHomeSupplyServiceKey(item = {}) {
+  return [
+    selectedCustomerClusterId() || "",
+    item.serviceMasterId || item.serviceId || item.serviceMasterName || "service",
+    item.categoryId || "category"
+  ].map((part) => String(part || "")).join("|");
+}
+
+function customerHomeSupplyAvailabilityFresh(entry = null) {
+  const checkedAt = entry?.checkedAt ? new Date(entry.checkedAt).getTime() : 0;
+  return Boolean(checkedAt && Date.now() - checkedAt < 8000);
+}
+
+function customerHomeSupplyDecisionUnavailable(decision = {}) {
+  if (decision.supplyAvailable === true || decision.instantAllowed === true || decision.instantAvailable === true) return false;
+  if (decision.supplyUnavailable === true || decision.autoHideUnavailable === true || decision.instantSupplyUnavailable === true) return true;
+  if (decision.supplyAvailable === false || decision.instantAllowed === false || decision.instantAvailable === false) return true;
+  return false;
+}
+
+function customerHomeAutoHideSupplyUnavailable(item = {}) {
+  if (normalizeSupplyUnavailableAction(item.supplyUnavailableAction) !== "auto_hide") return false;
+  const key = customerHomeSupplyAvailabilityKey(item);
+  const cached = state.customerSupplyAvailabilityByKey?.[key];
+  if (!cached) return false;
+  if (state.customerSupplyAvailabilityLoadingKeys?.[key]) return cached.unavailable === true;
+  return cached.unavailable === true;
+}
+
+function customerHomeAutoHideUnavailableServiceKeys(rows = []) {
+  const grouped = new Map();
+  normalizeArray(rows).forEach((item) => {
+    const key = customerHomeSupplyServiceKey(item);
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(item);
+  });
+  const keys = new Set();
+  grouped.forEach((items, key) => {
+    if (items.length && items.every((item) => customerHomeAutoHideSupplyUnavailable(item))) {
+      keys.add(key);
+    }
+  });
+  return keys;
+}
+
+let customerHomeSupplyRefreshTimer = null;
+let customerHomeSupplyRefreshToken = 0;
+let customerHomeSupplyCatalogRefreshPromise = null;
+let customerHomeSupplyCatalogRefreshedAt = 0;
+
+function scheduleCustomerHomeAutoHideSupplyRefresh(delayMs = 80) {
+  if (state.actor !== "customer" || state.customerView !== "home") return;
+  clearTimeout(customerHomeSupplyRefreshTimer);
+  customerHomeSupplyRefreshTimer = setTimeout(() => {
+    void refreshCustomerHomeAutoHideSupply();
+  }, Math.max(50, Number(delayMs) || 80));
+}
+
+function customerHomeAutoHideSupplySignature(rows = customerHomeExpandedDurationOptions(customerHomeDurationCategories(), { includeSupplyHidden: true })) {
+  return normalizeArray(rows)
+    .filter((item) => normalizeSupplyUnavailableAction(item.supplyUnavailableAction) === "auto_hide")
+    .map((item) => `${customerHomeSupplyAvailabilityKey(item)}:${customerHomeAutoHideSupplyUnavailable(item) ? "hidden" : "visible"}`)
+    .sort()
+    .join("|");
+}
+
+function refreshCustomerHomeSectionsInPlace() {
+  const body = document.querySelector(".portal-customer .zigo-home-body");
+  if (!body || state.actor !== "customer" || state.customerView !== "home") return false;
+  body.innerHTML = customerHomeSections();
+  attachCustomerHomeDurationSlider();
+  startCustomerHomeCategoryImageSequence();
+  return true;
+}
+
+function invalidateCustomerHomeSupplyAvailability(clusterId = selectedCustomerClusterId()) {
+  const targetClusterId = String(clusterId || "").trim();
+  if (!targetClusterId || !state.customerSupplyAvailabilityByKey) return;
+  Object.keys(state.customerSupplyAvailabilityByKey).forEach((key) => {
+    if (String(key).startsWith(`${targetClusterId}|`)) {
+      delete state.customerSupplyAvailabilityByKey[key];
+    }
+  });
+}
+
+async function refreshCustomerHomeCatalogForSupply({ forceRefresh = false } = {}) {
+  const clusterId = selectedCustomerClusterId();
+  if (!clusterId || state.actor !== "customer") return false;
+  const recentlyRefreshed = customerHomeSupplyCatalogRefreshedAt
+    && Date.now() - customerHomeSupplyCatalogRefreshedAt < 15000;
+  if (!forceRefresh && recentlyRefreshed) return false;
+  if (customerHomeSupplyCatalogRefreshPromise) return customerHomeSupplyCatalogRefreshPromise;
+  customerHomeSupplyCatalogRefreshPromise = loadCustomerCatalog({ clusterId, forceRefresh: true })
+    .then(() => {
+      customerHomeSupplyCatalogRefreshedAt = Date.now();
+      return true;
+    })
+    .catch((error) => {
+      console.warn("Unable to refresh customer home catalog for supply policy.", error);
+      return false;
+    })
+    .finally(() => {
+      customerHomeSupplyCatalogRefreshPromise = null;
+    });
+  return customerHomeSupplyCatalogRefreshPromise;
+}
+
+function scheduleCustomerHomeSupplyRefreshForBookingEvent(eventType = "", eventPayload = {}) {
+  if (state.actor !== "customer") return;
+  const normalizedType = String(eventType || "").toLowerCase();
+  const status = String(eventPayload.statusCode || eventPayload.status || eventPayload.assignmentStatus || "").toLowerCase();
+  const supplyAffectingEvent = normalizedType === "booking.assigned"
+    || normalizedType === "booking.reassigned"
+    || normalizedType === "booking.cancelled"
+    || normalizedType === "booking.canceled"
+    || normalizedType === "booking.closed"
+    || normalizedType === "booking.completed"
+    || normalizedType === "booking.updated"
+    || normalizedType === "assistant.availability.changed"
+    || normalizedType === "assistant.location.changed"
+    || normalizedType === "assistant.heartbeat.changed"
+    || normalizedType === "assistant.online"
+    || normalizedType === "assistant.offline"
+    || normalizedType === "assistant.block.changed"
+    || ["assigned", "accepted", "working", "in_progress", "completed", "success", "cancelled", "canceled", "rejected", "failed"].includes(status);
+  if (!supplyAffectingEvent) return;
+  invalidateCustomerHomeSupplyAvailability();
+  if (state.customerView !== "home") return;
+  scheduleCustomerHomeAutoHideSupplyRefresh(50);
+}
+
+async function refreshCustomerHomeAutoHideSupply() {
+  const clusterId = selectedCustomerClusterId();
+  if (!clusterId) return;
+  const forceRefresh = state.customerHomeSupplyForceRefreshOnce === true;
+  state.customerHomeSupplyForceRefreshOnce = false;
+  if (forceRefresh) {
+    await refreshCustomerHomeCatalogForSupply({ forceRefresh: true });
+  }
+  let rows = customerHomeExpandedDurationOptions(customerHomeDurationCategories(), { includeSupplyHidden: true })
+    .filter((item) => normalizeSupplyUnavailableAction(item.supplyUnavailableAction) === "auto_hide");
+  if (!rows.length) {
+    await refreshCustomerHomeCatalogForSupply({ forceRefresh: false });
+    rows = customerHomeExpandedDurationOptions(customerHomeDurationCategories(), { includeSupplyHidden: true })
+      .filter((item) => normalizeSupplyUnavailableAction(item.supplyUnavailableAction) === "auto_hide");
+    if (!rows.length) return;
+  }
+  state.customerSupplyAvailabilityByKey = state.customerSupplyAvailabilityByKey || {};
+  state.customerSupplyAvailabilityLoadingKeys = state.customerSupplyAvailabilityLoadingKeys || {};
+  const beforeSignature = customerHomeAutoHideSupplySignature(rows);
+  const pendingRows = rows.filter((item) => {
+    const key = customerHomeSupplyAvailabilityKey(item);
+    return (forceRefresh || !customerHomeSupplyAvailabilityFresh(state.customerSupplyAvailabilityByKey[key])) && !state.customerSupplyAvailabilityLoadingKeys[key];
+  });
+  const hadStaleHiddenRows = pendingRows.some((item) => {
+    const key = customerHomeSupplyAvailabilityKey(item);
+    const cached = state.customerSupplyAvailabilityByKey[key];
+    return cached?.unavailable === true && !customerHomeSupplyAvailabilityFresh(cached);
+  });
+  if (!pendingRows.length) {
+    scheduleCustomerHomeAutoHideSupplyRefresh(8000);
+    return;
+  }
+  const token = ++customerHomeSupplyRefreshToken;
+  let markedPendingUnavailable = false;
+  pendingRows.forEach((item) => {
+    const key = customerHomeSupplyAvailabilityKey(item);
+    const cached = state.customerSupplyAvailabilityByKey[key];
+    if (!cached || !customerHomeSupplyAvailabilityFresh(cached)) {
+      state.customerSupplyAvailabilityByKey[key] = {
+        unavailable: false,
+        reason: cached?.reason || "checking_supply",
+        checking: true,
+        checkedAt: cached?.checkedAt || ""
+      };
+    }
+  });
+  if (markedPendingUnavailable && state.actor === "customer" && state.customerView === "home") {
+    refreshCustomerHomeSectionsInPlace();
+  }
+  await Promise.allSettled(pendingRows.map(async (item) => {
+    const key = customerHomeSupplyAvailabilityKey(item);
+    state.customerSupplyAvailabilityLoadingKeys[key] = true;
+    try {
+      const payload = await api("/portal/customer/bookings/availability", {
+        method: "POST",
+        body: JSON.stringify({
+          clusterId,
+          locationClusterIds: [clusterId],
+          serviceId: isUuid(item.serviceId) ? item.serviceId : null,
+          categoryId: isUuid(item.categoryId) ? item.categoryId : null,
+          durationMinutes: Math.max(1, Math.round(Number(item.durationMinutes || 30))),
+          waitWindowMinutes: 0,
+          latitude: state.selectedLocation?.latitude ?? null,
+          longitude: state.selectedLocation?.longitude ?? null
+        })
+      });
+      const decision = payload.data || {};
+      state.customerSupplyAvailabilityByKey[key] = {
+        unavailable: customerHomeSupplyDecisionUnavailable(decision),
+        reason: decision.supplyUnavailableReason || decision.instantSupplyUnavailableReason || decision.unavailableReason || "",
+        nextAvailableAt: decision.assistantNextAvailableAt || decision.finalAssistantAvailableAt || decision.earliestAssistantAvailableAt || null,
+        checkedAt: new Date().toISOString()
+      };
+    } catch (error) {
+      state.customerSupplyAvailabilityByKey[key] = {
+        unavailable: false,
+        error: error?.message || "Unable to check supply",
+        checkedAt: ""
+      };
+    } finally {
+      delete state.customerSupplyAvailabilityLoadingKeys[key];
+    }
+  }));
+  if (token === customerHomeSupplyRefreshToken && state.actor === "customer" && state.customerView === "home") {
+    const afterSignature = customerHomeAutoHideSupplySignature(rows);
+    if ((pendingRows.length || beforeSignature !== afterSignature || hadStaleHiddenRows) && !refreshCustomerHomeSectionsInPlace()) {
+      renderCustomerHome();
+    }
+    const hasPendingErrors = pendingRows.some((item) => {
+      const key = customerHomeSupplyAvailabilityKey(item);
+      return Boolean(state.customerSupplyAvailabilityByKey?.[key]?.error);
+    });
+    scheduleCustomerHomeAutoHideSupplyRefresh(hasPendingErrors ? 2000 : 8000);
+  }
+}
+
+async function openCustomerScheduleForHomeDuration(categoryId = "", durationId = "", selectedDuration = {}) {
+  state.bookingType = "schedule";
+  state.customerHomeScheduleSheetCategoryId = categoryId;
+  const forcedScheduleOverride = normalizeSupplyUnavailableAction(selectedDuration?.supplyUnavailableAction) === "redirect_schedule";
+  state.customerHomeScheduleSupplyOverride = forcedScheduleOverride
+    ? {
+        categoryId: String(categoryId || selectedDuration?.categoryId || ""),
+        durationId: String(durationId || selectedDuration?.id || ""),
+        categoryPriceRuleId: String(selectedDuration?.categoryPriceRuleId || ""),
+        supplyUnavailableAction: "redirect_schedule",
+        supplyUnavailableMessage: selectedDuration?.supplyUnavailableMessage || ""
+      }
+    : null;
+  state.selectedHomeScheduleDate = customerHomeScheduleDates(customerHomeScheduleConfig())[0]?.value || "";
+  state.selectedHomeSchedulePeriod = "";
+  state.selectedHomeScheduleTime = "";
+  let scheduleDurations = [];
+  try {
+    scheduleDurations = await refreshCustomerCategoryDurationData(categoryId);
+  } catch (error) {
+    notify(error.message || "Unable to load category durations.", "error");
+    render();
+    return false;
+  }
+  if (!scheduleDurations.length) {
+    notify("Duration options are not configured yet.");
+    render();
+    return false;
+  }
+  if (forcedScheduleOverride) {
+    scheduleDurations.forEach((item) => {
+      const sameDuration = String(item.id || "") === String(durationId || selectedDuration?.id || "");
+      const sameRule = selectedDuration?.categoryPriceRuleId
+        && String(item.categoryPriceRuleId || "") === String(selectedDuration.categoryPriceRuleId || "");
+      if (sameDuration || sameRule) {
+        item.supplyScheduleOverride = true;
+        item.supplyUnavailableAction = "redirect_schedule";
+        item.supplyUnavailableMessage = selectedDuration?.supplyUnavailableMessage || item.supplyUnavailableMessage || "";
+        item.bookingType = "schedule";
+      }
+    });
+  }
+  state.selectedHomeScheduleDurationId = scheduleDurations.some((item) => String(item.id || "") === String(durationId)) ? durationId : scheduleDurations[0]?.id || "";
+  if (selectedDuration && typeof selectedDuration === "object") {
+    selectedDuration.supplyScheduleOverride = true;
+    selectedDuration.bookingType = "schedule";
+  }
+  state.customerHomeScheduleSheetOpen = false;
+  state.customerHomeDurationSheetOpen = false;
+  state.customerHomeCategorySheetOpen = false;
+  state.customerHomeCategorySheetServiceId = "";
+  state.customerHomeCategorySheetExpanded = false;
+  state.customerView = "homeSchedule";
+  invalidateCustomerAvailabilityDecision();
+  await refreshCustomerAvailabilityDecision();
+  ensureCustomerHomeScheduleSelection();
+  render();
+  return true;
 }
 
 function customerHomeExpandCopyForDurationRows(rows = [], categories = customerHomeCategories()) {
@@ -8258,7 +8644,7 @@ function customerHomeExpandedDurationsSection(categories = customerHomeCategorie
   </section>`;
 }
 
-function customerHomeExpandedDurationGroups(categories = customerHomeCategories({ includeHiddenHome: true })) {
+function customerHomeExpandedDurationGroups(categories = customerHomeDurationCategories()) {
   const rows = customerHomeExpandedDurationOptions(categories);
   if (!rows.length) return [];
   const groups = new Map();
@@ -8313,7 +8699,7 @@ function customerHomeExpandedDurationServiceSection(group = {}) {
   </section>`;
 }
 
-function customerHomeExpandedDurationsByServiceSections(categories = customerHomeCategories({ includeHiddenHome: true })) {
+function customerHomeExpandedDurationsByServiceSections(categories = customerHomeDurationCategories()) {
   return customerHomeExpandedDurationGroups(categories)
     .map(customerHomeExpandedDurationServiceSection)
     .filter(Boolean)
@@ -8818,7 +9204,7 @@ function customerHomeQuickActions(services = []) {
 
 function customerHomeSections() {
   const categories = customerHomeCategories();
-  const durationCategories = customerHomeCategories({ includeHiddenHome: true });
+  const durationCategories = customerHomeDurationCategories();
   const hasDurations = customerHomeExpandedDurationOptions(durationCategories).length > 0;
   if (!categories.length && !hasDurations) {
     const cluster = customerLocationCluster(state.selectedLocation || {});
@@ -10727,6 +11113,12 @@ function focusCustomerHomeDurationCard(card) {
 }
 
 function renderCustomerHome() {
+  const forceSupplyRefresh = state.customerHomeSupplyRefreshRequired === true;
+  state.customerHomeSupplyRefreshRequired = false;
+  if (forceSupplyRefresh) {
+    invalidateCustomerHomeSupplyAvailability();
+    state.customerHomeSupplyForceRefreshOnce = true;
+  }
   root.innerHTML = `<section class="mobile-app home-screen customer-flow-screen zigo-commerce-home">
     ${customerHomeHeader()}
     ${customerHomeSearch()}
@@ -10737,11 +11129,13 @@ function renderCustomerHome() {
     ${bottomCartBar()}
     ${customerHomeLocationPickerSheet()}
     ${customerLocationPermissionPopupHtml()}
+    ${customerSupplyUnavailablePopupHtml()}
   </section>`;
   startCustomerSearchPlaceholderRotation();
   attachCustomerOngoingBookingDots();
   attachCustomerHomeDurationSlider();
   startCustomerHomeCategoryImageSequence();
+  scheduleCustomerHomeAutoHideSupplyRefresh(forceSupplyRefresh ? 0 : 80);
 }
 
 function renderCustomerHomeSchedulePage() {
@@ -10756,6 +11150,7 @@ function renderCustomerHomeSchedulePage() {
     </section>
     ${customerHomeScheduleBodyHtml()}
     ${customerHomeScheduleFooterHtml()}
+    ${customerSupplyUnavailablePopupHtml()}
   </section>`;
   attachCustomerHomeScheduleTimeScrollSpy();
 }
@@ -13686,6 +14081,13 @@ function customerTrackTaskPinHtml(booking = {}, trackStatus = "") {
 }
 
 function customerTrackLiveRoutePoint(input = {}) {
+  if (Array.isArray(input)) {
+    const longitude = Number(input[0]);
+    const latitude = Number(input[1]);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+    if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
+    return { latitude, longitude };
+  }
   input = input && typeof input === "object" ? input : {};
   const latitude = Number(input.latitude ?? input.lat);
   const longitude = Number(input.longitude ?? input.lng ?? input.lon);
@@ -13708,31 +14110,56 @@ function customerTrackLiveRouteTileUrl(x, y, z) {
   return `https://${subdomain}.tile.openstreetmap.org/${z}/${x}/${y}.png`;
 }
 
-function customerTrackLiveRouteMapHtml(route = {}) {
-  const assistant = customerTrackLiveRoutePoint(route.assistantLocation || {});
-  const destination = customerTrackLiveRoutePoint(route.destinationLocation || {});
-  if (!assistant && !destination) {
-    return `<div class="customer-track-live-map-fallback">
-      <span>${customerIcon("location")}</span>
-      <b>Live route tracking</b>
-      <small>Waiting for assistant location.</small>
-    </div>`;
+function customerTrackLiveRouteTileBounds(zoom) {
+  const tileZoom = Math.max(1, Math.min(19, Math.round(Number(zoom) || 1)));
+  const maxTile = 2 ** tileZoom;
+  return { tileZoom, maxTile };
+}
+
+function customerTrackLiveRouteWrapTileX(x, maxTile) {
+  if (!Number.isFinite(x) || !Number.isFinite(maxTile) || maxTile <= 0) return null;
+  return ((x % maxTile) + maxTile) % maxTile;
+}
+
+function customerTrackLiveRouteClampTileY(y, maxTile) {
+  if (!Number.isFinite(y) || !Number.isFinite(maxTile) || maxTile <= 0) return null;
+  return Math.max(0, Math.min(maxTile - 1, y));
+}
+
+function customerTrackLiveRouteMapSize() {
+  const map = document.querySelector(".customer-track-live-map");
+  const width = Math.max(304, Math.round(map?.clientWidth || 0) || 304);
+  const height = Math.max(172, Math.round(map?.clientHeight || 0) || 172);
+  return { width, height };
+}
+
+function customerTrackLiveRefreshIcon() {
+  return `<svg class="customer-lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 0-15.4-6.4L3 8"></path><path d="M3 3v5h5"></path><path d="M3 12a9 9 0 0 0 15.4 6.4L21 16"></path><path d="M16 16h5v5"></path></svg>`;
+}
+
+let customerTrackLiveRouteViewport = null;
+let customerTrackLiveRouteDrag = null;
+let customerTrackLiveRoutePinchDistance = 0;
+
+function customerTrackLiveRouteViewportKey(route = {}, points = []) {
+  const bookingId = String(route.bookingId || route.serviceRequestId || route.id || state.confirmedBooking?.id || state.confirmedBooking?.bookingId || "").trim();
+  const stablePoints = points.filter(Boolean).map((point) => `${point.longitude.toFixed(5)},${point.latitude.toFixed(5)}`).join("|");
+  return `${bookingId || "track"}:${stablePoints}`;
+}
+
+function customerTrackLiveRouteFitViewport(points = [], width = 304, height = 172) {
+  const allPoints = points.filter(Boolean);
+  if (!allPoints.length) {
+    return { zoom: 15, centerWorld: customerTrackLiveRouteMercator({ latitude: 28.6139, longitude: 77.209 }, 15) };
   }
-  const rawPath = normalizeArray(route.routePolyline || route.routePath).map(customerTrackLiveRoutePoint).filter(Boolean);
-  const hasRoadRoute = route.status === "live" && rawPath.length >= 2;
-  const path = hasRoadRoute ? rawPath : [];
-  const stops = normalizeArray(route.stopLocations || route.locations).map(customerTrackLiveRoutePoint).filter(Boolean);
-  const allPoints = [...(hasRoadRoute ? path : []), ...stops, assistant, destination].filter(Boolean);
   const minLat = Math.min(...allPoints.map((point) => point.latitude));
   const maxLat = Math.max(...allPoints.map((point) => point.latitude));
   const minLng = Math.min(...allPoints.map((point) => point.longitude));
   const maxLng = Math.max(...allPoints.map((point) => point.longitude));
-  const width = 304;
-  const height = 172;
-  const paddingX = 54;
-  const paddingY = 42;
-  let zoom = 15;
-  for (let candidate = 17; candidate >= 10; candidate -= 1) {
+  const paddingX = 42;
+  const paddingY = 32;
+  let zoom = 16;
+  for (let candidate = 18; candidate >= 3; candidate -= 1) {
     const topLeft = customerTrackLiveRouteMercator({ latitude: maxLat, longitude: minLng }, candidate);
     const bottomRight = customerTrackLiveRouteMercator({ latitude: minLat, longitude: maxLng }, candidate);
     if (Math.abs(bottomRight.x - topLeft.x) <= width - paddingX * 2 && Math.abs(bottomRight.y - topLeft.y) <= height - paddingY * 2) {
@@ -13740,22 +14167,62 @@ function customerTrackLiveRouteMapHtml(route = {}) {
       break;
     }
   }
-  zoom = Math.max(3, Math.min(19, zoom + Number(state.customerTrackLiveRouteZoomDelta || 0)));
   const fitTopLeft = customerTrackLiveRouteMercator({ latitude: maxLat, longitude: minLng }, zoom);
   const fitBottomRight = customerTrackLiveRouteMercator({ latitude: minLat, longitude: maxLng }, zoom);
-  const centerWorld = {
-    x: (fitTopLeft.x + fitBottomRight.x) / 2,
-    y: (fitTopLeft.y + fitBottomRight.y) / 2
+  return {
+    zoom,
+    centerWorld: {
+      x: (fitTopLeft.x + fitBottomRight.x) / 2,
+      y: (fitTopLeft.y + fitBottomRight.y) / 2
+    }
   };
+}
+
+function customerTrackLiveRouteMapHtml(route = {}) {
+  const assistant = customerTrackLiveRoutePoint(route.assistantLocation || {});
+  const destination = customerTrackLiveRoutePoint(route.destinationLocation || {});
+  if (!assistant && !destination) {
+    return `<div class="customer-track-live-map-fallback">
+      <span>${customerIcon("map")}</span>
+      <small>Waiting for assistant location</small>
+    </div>`;
+  }
+  const rawPath = normalizeArray(route.routePolyline || route.routePath).map(customerTrackLiveRoutePoint).filter(Boolean);
+  const hasRoadRoute = route.status === "live" && rawPath.length >= 2;
+  const path = hasRoadRoute ? rawPath : [];
+  const stops = normalizeArray(route.stopLocations || route.locations).map(customerTrackLiveRoutePoint).filter(Boolean);
+  const allPoints = [...(hasRoadRoute ? path : []), ...stops, assistant, destination].filter(Boolean);
+  const stableFitPoints = [...stops, destination].filter(Boolean);
+  const { width, height } = customerTrackLiveRouteMapSize();
+  const viewportKey = customerTrackLiveRouteViewportKey(route, stableFitPoints.length ? stableFitPoints : allPoints);
+  if (!customerTrackLiveRouteViewport || customerTrackLiveRouteViewport.key !== viewportKey || customerTrackLiveRouteViewport.width !== width || customerTrackLiveRouteViewport.height !== height) {
+    customerTrackLiveRouteViewport = { key: viewportKey, ...customerTrackLiveRouteFitViewport(allPoints, width, height), panX: 0, panY: 0 };
+    customerTrackLiveRouteViewport.width = width;
+    customerTrackLiveRouteViewport.height = height;
+    state.customerTrackLiveRouteZoomDelta = 0;
+  }
+  const zoom = Math.max(3, Math.min(19, Number(customerTrackLiveRouteViewport.zoom || 15) + Number(state.customerTrackLiveRouteZoomDelta || 0)));
+  const { tileZoom, maxTile } = customerTrackLiveRouteTileBounds(zoom);
+  const centerWorld = customerTrackLiveRouteViewport.centerWorld || customerTrackLiveRouteFitViewport(allPoints, width, height).centerWorld;
   const topLeftWorld = { x: centerWorld.x - width / 2, y: centerWorld.y - height / 2 };
+  topLeftWorld.x -= Number(customerTrackLiveRouteViewport.panX || 0);
+  topLeftWorld.y -= Number(customerTrackLiveRouteViewport.panY || 0);
+  const tileScale = 2 ** (zoom - tileZoom);
+  const tileTopLeftWorld = {
+    x: topLeftWorld.x / tileScale,
+    y: topLeftWorld.y / tileScale
+  };
   const tiles = [];
-  const startTileX = Math.floor(topLeftWorld.x / 256);
-  const startTileY = Math.floor(topLeftWorld.y / 256);
-  const endTileX = Math.floor((topLeftWorld.x + width) / 256);
-  const endTileY = Math.floor((topLeftWorld.y + height) / 256);
+  const startTileX = Math.floor(tileTopLeftWorld.x / 256);
+  const startTileY = Math.floor(tileTopLeftWorld.y / 256);
+  const endTileX = Math.floor((tileTopLeftWorld.x + width / tileScale) / 256);
+  const endTileY = Math.floor((tileTopLeftWorld.y + height / tileScale) / 256);
   for (let x = startTileX; x <= endTileX; x += 1) {
     for (let y = startTileY; y <= endTileY; y += 1) {
-      tiles.push(`<img src="${escapeHtml(customerTrackLiveRouteTileUrl(x, y, zoom))}" alt="" style="left:${Math.round(x * 256 - topLeftWorld.x)}px;top:${Math.round(y * 256 - topLeftWorld.y)}px">`);
+      const wrappedX = customerTrackLiveRouteWrapTileX(x, maxTile);
+      const clampedY = customerTrackLiveRouteClampTileY(y, maxTile);
+      if (wrappedX === null || clampedY === null) continue;
+      tiles.push(`<img src="${escapeHtml(customerTrackLiveRouteTileUrl(wrappedX, clampedY, tileZoom))}" alt="" style="left:${Math.round((x * 256 - tileTopLeftWorld.x) * tileScale)}px;top:${Math.round((y * 256 - tileTopLeftWorld.y) * tileScale)}px;width:${Math.ceil(256 * tileScale)}px;height:${Math.ceil(256 * tileScale)}px">`);
     }
   }
   const toScreen = (point) => {
@@ -13785,8 +14252,6 @@ function customerTrackLiveRouteMapHtml(route = {}) {
   </div>`;
 }
 
-let customerTrackLiveRoutePinchDistance = 0;
-
 function customerTrackLiveRouteTouchDistance(touches) {
   if (!touches || touches.length < 2) return 0;
   const first = touches[0];
@@ -13798,24 +14263,84 @@ function handleCustomerTrackLiveRouteTouchStart(event) {
   if (!event.target.closest?.(".customer-track-live-map")) return;
   if (event.touches.length >= 2) {
     customerTrackLiveRoutePinchDistance = customerTrackLiveRouteTouchDistance(event.touches);
+  } else if (event.touches.length === 1) {
+    customerTrackLiveRouteDrag = {
+      pointerId: "touch",
+      x: event.touches[0].clientX,
+      y: event.touches[0].clientY,
+      panX: Number(customerTrackLiveRouteViewport?.panX || 0),
+      panY: Number(customerTrackLiveRouteViewport?.panY || 0)
+    };
   }
 }
 
 function handleCustomerTrackLiveRouteTouchMove(event) {
   if (!event.target.closest?.(".customer-track-live-map")) return;
+  if (event.touches.length === 1 && customerTrackLiveRouteDrag && customerTrackLiveRouteViewport) {
+    event.preventDefault();
+    const touch = event.touches[0];
+    customerTrackLiveRouteViewport.panX = customerTrackLiveRouteDrag.panX + touch.clientX - customerTrackLiveRouteDrag.x;
+    customerTrackLiveRouteViewport.panY = customerTrackLiveRouteDrag.panY + touch.clientY - customerTrackLiveRouteDrag.y;
+    renderTrackRealtimeUpdate();
+    return;
+  }
   if (event.touches.length < 2 || !customerTrackLiveRoutePinchDistance) return;
   const nextDistance = customerTrackLiveRouteTouchDistance(event.touches);
   const difference = nextDistance - customerTrackLiveRoutePinchDistance;
-  if (Math.abs(difference) < 14) return;
+  if (Math.abs(difference) < 10) return;
   event.preventDefault();
   const current = Number(state.customerTrackLiveRouteZoomDelta || 0);
-  state.customerTrackLiveRouteZoomDelta = Math.max(-8, Math.min(8, current + (difference > 0 ? 1 : -1)));
+  state.customerTrackLiveRouteZoomDelta = Math.max(-8, Math.min(8, current + (difference > 0 ? 0.5 : -0.5)));
   customerTrackLiveRoutePinchDistance = nextDistance;
   renderTrackRealtimeUpdate();
 }
 
 function handleCustomerTrackLiveRouteTouchEnd() {
   customerTrackLiveRoutePinchDistance = 0;
+  customerTrackLiveRouteDrag = null;
+}
+
+function handleCustomerTrackLiveRoutePointerDown(event) {
+  const map = event.target.closest?.(".customer-track-live-map");
+  if (!map || event.button !== 0) return;
+  customerTrackLiveRouteDrag = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    panX: Number(customerTrackLiveRouteViewport?.panX || 0),
+    panY: Number(customerTrackLiveRouteViewport?.panY || 0)
+  };
+  map.setPointerCapture?.(event.pointerId);
+}
+
+function handleCustomerTrackLiveRoutePointerMove(event) {
+  if (!customerTrackLiveRouteDrag || customerTrackLiveRouteDrag.pointerId !== event.pointerId || !customerTrackLiveRouteViewport) return;
+  if (!event.target.closest?.(".customer-track-live-map")) return;
+  event.preventDefault();
+  customerTrackLiveRouteViewport.panX = customerTrackLiveRouteDrag.panX + event.clientX - customerTrackLiveRouteDrag.x;
+  customerTrackLiveRouteViewport.panY = customerTrackLiveRouteDrag.panY + event.clientY - customerTrackLiveRouteDrag.y;
+  renderTrackRealtimeUpdate();
+}
+
+function handleCustomerTrackLiveRoutePointerEnd(event) {
+  if (!customerTrackLiveRouteDrag || customerTrackLiveRouteDrag.pointerId !== event.pointerId) return;
+  customerTrackLiveRouteDrag = null;
+}
+
+function handleCustomerTrackLiveRouteWheel(event) {
+  if (!event.target.closest?.(".customer-track-live-map")) return;
+  event.preventDefault();
+  const current = Number(state.customerTrackLiveRouteZoomDelta || 0);
+  state.customerTrackLiveRouteZoomDelta = Math.max(-8, Math.min(8, current + (event.deltaY < 0 ? 0.5 : -0.5)));
+  renderTrackRealtimeUpdate();
+}
+
+function handleCustomerTrackLiveRouteDoubleClick(event) {
+  if (!event.target.closest?.(".customer-track-live-map")) return;
+  event.preventDefault();
+  const current = Number(state.customerTrackLiveRouteZoomDelta || 0);
+  state.customerTrackLiveRouteZoomDelta = Math.max(-8, Math.min(8, current + 0.5));
+  renderTrackRealtimeUpdate();
 }
 
 function customerTrackLiveRouteHtml(booking = {}, trackStatus = "") {
@@ -13824,30 +14349,23 @@ function customerTrackLiveRouteHtml(booking = {}, trackStatus = "") {
   const isWorking = normalizedStatus === "working";
   const hasAssistant = Boolean(customerTrackHasAssignment(booking));
   if (!isWorking || !hasAssistant) return "";
-  const updatedAt = route.updatedAt ? customerTrackMessageTime(route.updatedAt) : "updating now";
-  const assistantName = booking.assistantName || booking.metadata?.assistant?.name || "Assistant";
-  const trackLocations = normalizeArray(booking.locations);
-  const destinationAddress = trackLocations[trackLocations.length - 1]?.address || trackLocations[0]?.address || "Task location";
+  const assistantPoint = customerTrackLiveRoutePoint(route.assistantLocation || {});
+  const routePoints = normalizeArray(route.routePolyline || route.routePath).map(customerTrackLiveRoutePoint).filter(Boolean);
+  const isLive = Boolean(assistantPoint) && String(route.status || "").toLowerCase() === "live" && routePoints.length >= 2;
+  const badgeClass = isLive ? "live" : "updating";
+  const badgeText = isLive ? "Live" : "Updating...";
+  const badgeIcon = isLive ? customerIcon("map") : customerTrackLiveRefreshIcon();
   return `<section class="customer-track-live-route-card" data-customer-live-route-card>
     <div class="customer-track-live-route-head">
       <div>
         <h2>Live route tracking</h2>
-        <small>${escapeHtml(route.status === "route_pending" ? "Route is being calculated." : "Assistant is on the way.")}</small>
       </div>
-      <button type="button" data-live-route-recenter aria-label="Recenter route">${customerIcon("location")}</button>
+      <button type="button" data-live-route-recenter aria-label="Refresh live route">${customerTrackLiveRefreshIcon()}</button>
     </div>
-    <div class="customer-track-live-map">${customerTrackLiveRouteMapHtml(route)}</div>
-    <div class="customer-track-live-route-foot">
-      <div>
-        <b>${escapeHtml(assistantName)}</b>
-        <span>${escapeHtml(route.distanceText || "Location updating")}</span>
-      </div>
-      <div>
-        <b>${escapeHtml(route.etaMinutes ? `${route.etaMinutes} min` : "Live")}</b>
-        <span>Updated ${escapeHtml(updatedAt)}</span>
-      </div>
+    <div class="customer-track-live-map">
+      <span class="customer-track-live-status-badge ${escapeHtml(badgeClass)}">${badgeIcon}<b>${escapeHtml(badgeText)}</b></span>
+      ${customerTrackLiveRouteMapHtml(route)}
     </div>
-    <p>${escapeHtml(destinationAddress)}</p>
   </section>`;
 }
 
@@ -15027,6 +15545,50 @@ function assistantTaskStartAt(task = {}) {
   return null;
 }
 
+function assistantTaskReachByAt(task = {}) {
+  const metadata = task.metadata || {};
+  const assignmentMetadata = task.assignmentMetadata || {};
+  const bookingMetadata = metadata.booking || {};
+  const scheduleMetadata = metadata.schedule || {};
+  const plannedStartAt = assistantTaskStartAt(task);
+  const initiateMinutes = Math.max(0, Math.round(Number(
+    task.initiateMinutes
+    ?? task.initiate_minutes
+    ?? metadata.initiateMinutes
+    ?? metadata.initiate_minutes
+    ?? bookingMetadata.initiateMinutes
+    ?? scheduleMetadata.initiateMinutes
+    ?? assignmentMetadata.initiateMinutes
+    ?? assignmentMetadata.initiate_minutes
+    ?? 0
+  )));
+  if (plannedStartAt && !Number.isNaN(plannedStartAt.getTime()) && initiateMinutes > 0) {
+    return new Date(plannedStartAt.getTime() - initiateMinutes * 60_000);
+  }
+  const createdAt = portalValidDateValue(
+    task.assignmentOfferedAt,
+    task.assignmentAssignedAt,
+    task.createdAt,
+    metadata.createdAt,
+    bookingMetadata.createdAt
+  );
+  const etaMinutes = Math.max(0, Math.round(Number(
+    task.etaMinutes
+    ?? task.eta_minutes
+    ?? metadata.etaMinutes
+    ?? metadata.eta_minutes
+    ?? bookingMetadata.etaMinutes
+    ?? scheduleMetadata.etaMinutes
+    ?? assignmentMetadata.etaMinutes
+    ?? assignmentMetadata.eta_minutes
+    ?? 0
+  )));
+  if (createdAt && !Number.isNaN(createdAt.getTime()) && etaMinutes > 0) {
+    return new Date(createdAt.getTime() + etaMinutes * 60_000);
+  }
+  return plannedStartAt;
+}
+
 function assistantTaskEndAt(task = {}) {
   const metadata = task.metadata || {};
   const assignmentMetadata = task.assignmentMetadata || {};
@@ -15202,7 +15764,7 @@ function assistantTaskCountdown(task = {}) {
       <b>${escapeHtml(assistantTaskStatusText(task))}</b>
     </span>`;
   }
-  if (assistantTaskTabFor(task) === "accepted") return assistantPendingCountdownCircle(task, startAt);
+  if (assistantTaskTabFor(task) === "accepted") return assistantPendingCountdownCircle(task, assistantTaskReachByAt(task));
   if (assistantTaskTabFor(task) === "working") return assistantWorkingCountdownCircle(task);
   const info = countdownInfo(startAt);
   const baseTab = assistantTaskBaseTabFor(task);
@@ -16683,7 +17245,10 @@ async function addCategoryToCart(categoryId, shouldRender = true, pricingOverrid
     categoryName: category.name,
     serviceId: itemService?.id || null,
     serviceMasterId: category.serviceMasterId || category.service_master_id || pricingOverride?.serviceMasterId || "",
-    bookingType: pricingOverride?.bookingType || pricingOverride?.serviceMasterBookingType || customerHomeDurationBookingType(pricingOverride || {}),
+    bookingType: pricingOverride?.supplyScheduleOverride ? "schedule" : (pricingOverride?.bookingType || pricingOverride?.serviceMasterBookingType || customerHomeDurationBookingType(pricingOverride || {})),
+    supplyUnavailableAction: normalizeSupplyUnavailableAction(pricingOverride?.supplyUnavailableAction || category.supplyUnavailableAction),
+    supplyUnavailableMessage: pricingOverride?.supplyUnavailableMessage || category.supplyUnavailableMessage || "",
+    supplyScheduleOverride: Boolean(pricingOverride?.supplyScheduleOverride),
     name: category.name,
     serviceName: itemService?.name || itemService?.serviceName || itemService?.serviceTitle || "Service",
     imageUrl: category.imageUrl || "",
@@ -17711,6 +18276,7 @@ async function completeCustomerLocationSelection(form) {
     const returnToSavedLocations = state.locationConfirmReturnStep === "savedLocations";
     state.customerCategorySheetOpen = false;
     state.customerHomeCategorySheetOpen = false;
+    state.customerHomeCategorySheetServiceId = "";
     state.customerHomeCategorySheetExpanded = false;
     state.customerHomeDurationSheetOpen = false;
     state.customerHomeScheduleSheetOpen = false;
@@ -17855,6 +18421,9 @@ async function confirmCustomerBooking() {
     categoryImageUrl: selectedCartItem?.categoryImageUrl || selectedCartItem?.imageUrl || selectedCategory.imageUrl || "",
     serviceImageUrl: selectedCartItem?.serviceImageUrl || selectedService.imageUrl || "",
     durationMinutes: bookingDurationMinutes,
+    supplyUnavailableAction: selectedCartItem?.supplyUnavailableAction || selectedCategory.supplyUnavailableAction || "",
+    supplyUnavailableMessage: selectedCartItem?.supplyUnavailableMessage || selectedCategory.supplyUnavailableMessage || "",
+    supplyScheduleOverride: Boolean(selectedCartItem?.supplyScheduleOverride),
     basePrice: bookingBasePrice,
     sellingPrice: bookingSellingPrice,
     price: bookingSellingPrice,
@@ -17971,6 +18540,8 @@ async function confirmCustomerBooking() {
   }
   state.confirmedBooking = booking.data;
   upsertCustomerBookingInState(booking.data);
+  invalidateCustomerHomeSupplyAvailability(primaryLocation.clusterId || selectedLocation.clusterId || selectedCustomerClusterId());
+  state.customerHomeSupplyRefreshRequired = true;
   state.cart = [];
   state.customerCartNote = "";
   revokeCustomerCartUploadUrls(state.cartUploads);
@@ -18204,6 +18775,9 @@ async function handleCustomerCancelSubmit(event) {
     await loadMe({ forceRefresh: true });
     await loadCustomerTrackedBooking(form.dataset.bookingId || "", { silent: true });
     state.confirmedBooking = state.bookings.find((booking) => booking.id === form.dataset.bookingId) || state.confirmedBooking;
+    invalidateCustomerHomeSupplyAvailability();
+    state.customerHomeSupplyRefreshRequired = true;
+    state.customerHomeSupplyForceRefreshOnce = true;
     notify("Booking cancelled.");
     render();
   } catch (error) {
@@ -18593,6 +19167,12 @@ document.addEventListener("submit", handleCustomerDisputeSubmit);
 document.addEventListener("submit", handleCustomerPaymentProofSubmit);
 document.addEventListener("submit", handleCustomerProfileEditSubmit);
 document.addEventListener("submit", handleCustomerSupportSubmit);
+document.addEventListener("pointerdown", handleCustomerTrackLiveRoutePointerDown, { passive: true });
+document.addEventListener("pointermove", handleCustomerTrackLiveRoutePointerMove, { passive: false });
+document.addEventListener("pointerup", handleCustomerTrackLiveRoutePointerEnd, { passive: true });
+document.addEventListener("pointercancel", handleCustomerTrackLiveRoutePointerEnd, { passive: true });
+document.addEventListener("wheel", handleCustomerTrackLiveRouteWheel, { passive: false });
+document.addEventListener("dblclick", handleCustomerTrackLiveRouteDoubleClick, { passive: false });
 document.addEventListener("touchstart", handleCustomerTrackLiveRouteTouchStart, { passive: true });
 document.addEventListener("touchmove", handleCustomerTrackLiveRouteTouchMove, { passive: false });
 document.addEventListener("touchend", handleCustomerTrackLiveRouteTouchEnd, { passive: true });
@@ -18842,6 +19422,15 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("click", async (event) => {
   removeCustomerRippleArtifacts();
+
+  const closeSupplyPolicyPopup = event.target.closest("[data-close-supply-policy-popup]");
+  if (closeSupplyPolicyPopup) {
+    event.preventDefault();
+    event.stopPropagation();
+    state.customerSupplyUnavailablePopupMessage = "";
+    render();
+    return;
+  }
 
   const supportErrorClose = event.target.closest("[data-customer-support-error-close]");
   if (supportErrorClose) {
@@ -20332,6 +20921,7 @@ document.addEventListener("click", async (event) => {
       state.selectedCategoryId = "";
       state.customerCategorySheetOpen = false;
       state.customerHomeCategorySheetOpen = false;
+      state.customerHomeCategorySheetServiceId = "";
       state.customerHomeCategorySheetExpanded = false;
       try {
         await loadCustomerCatalog({ clusterId: selectedCustomerClusterId() });
@@ -20412,6 +21002,8 @@ document.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
     state.customerHomeCategorySheetId = openHomeCategorySheetButton.dataset.openHomeCategoryDetail || "";
+    const sheetCategory = customerHomeCategoryById(state.customerHomeCategorySheetId) || {};
+    state.customerHomeCategorySheetServiceId = customerHomeCategorySheetServiceId(sheetCategory);
     state.customerHomeCategorySheetExpanded = false;
     state.customerHomeCategorySheetOpen = true;
     invalidateCustomerAvailabilityDecision();
@@ -20434,6 +21026,12 @@ document.addEventListener("click", async (event) => {
     const categoryId = homeExpandDurationButton.dataset.categoryId || "";
     state.customerHomeDurationSheetCategoryId = categoryId;
     state.customerHomeCategorySheetId = categoryId;
+    state.customerHomeCategorySheetServiceId = String(
+      selectedDuration?.serviceMasterId
+      || selectedDuration?.serviceId
+      || categoryServiceId(customerHomeCategoryById(categoryId) || {})
+      || ""
+    );
     state.customerHomeCategorySheetExpanded = false;
     document.querySelectorAll(".portal-customer [data-home-expand-duration]").forEach((button) => {
       const isActive = button === homeExpandDurationButton;
@@ -20451,8 +21049,22 @@ document.addEventListener("click", async (event) => {
       state.customerAvailabilityLoading = true;
       await refreshCustomerAvailabilityDecision();
       if (!customerInstantAvailableForCurrentContext()) {
+        const policyAction = normalizeSupplyUnavailableAction(selectedDuration.supplyUnavailableAction);
+        if (policyAction === "redirect_schedule") {
+          await openCustomerScheduleForHomeDuration(categoryId, durationId, selectedDuration);
+          return;
+        }
+        if (policyAction === "show_popup") {
+          showCustomerSupplyUnavailablePopup(selectedDuration.supplyUnavailableMessage);
+          return;
+        }
+        if (policyAction === "auto_hide") {
+          scheduleCustomerHomeAutoHideSupplyRefresh(50);
+          refreshCustomerHomeSectionsInPlace();
+          return;
+        }
         notify("Instant booking is not available for this duration.", "warning");
-        render();
+        if (!refreshCustomerHomeSectionsInPlace()) render();
         return;
       }
       await addCategoryToCart(categoryId, false, selectedDuration);
@@ -20465,34 +21077,7 @@ document.addEventListener("click", async (event) => {
       return;
     }
     if (bookingType === "schedule") {
-      state.bookingType = "schedule";
-      state.customerHomeScheduleSheetCategoryId = categoryId;
-      state.selectedHomeScheduleDate = customerHomeScheduleDates(customerHomeScheduleConfig())[0]?.value || "";
-      state.selectedHomeSchedulePeriod = "";
-      state.selectedHomeScheduleTime = "";
-      let scheduleDurations = [];
-      try {
-        scheduleDurations = await refreshCustomerCategoryDurationData(categoryId);
-      } catch (error) {
-        notify(error.message || "Unable to load category durations.", "error");
-        render();
-        return;
-      }
-      if (!scheduleDurations.length) {
-        notify("Duration options are not configured yet.");
-        render();
-        return;
-      }
-      state.selectedHomeScheduleDurationId = scheduleDurations.some((item) => String(item.id || "") === String(durationId)) ? durationId : scheduleDurations[0]?.id || "";
-      state.customerHomeScheduleSheetOpen = false;
-      state.customerHomeDurationSheetOpen = false;
-      state.customerHomeCategorySheetOpen = false;
-      state.customerHomeCategorySheetExpanded = false;
-      state.customerView = "homeSchedule";
-      invalidateCustomerAvailabilityDecision();
-      await refreshCustomerAvailabilityDecision();
-      ensureCustomerHomeScheduleSelection();
-      render();
+      await openCustomerScheduleForHomeDuration(categoryId, durationId, selectedDuration);
       return;
     }
     state.customerHomeCategorySheetOpen = true;
@@ -20508,6 +21093,8 @@ document.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
     state.customerHomeCategorySheetId = selectHomeCategorySheetButton.dataset.selectHomeCategoryDetail || "";
+    const selectedSheetCategory = customerHomeCategoryById(state.customerHomeCategorySheetId) || {};
+    state.customerHomeCategorySheetServiceId = customerHomeCategorySheetServiceId(selectedSheetCategory);
     invalidateCustomerAvailabilityDecision();
     await refreshCustomerAvailabilityDecision();
     if (!refreshCustomerHomeCategorySheetUi()) render();
@@ -20560,6 +21147,20 @@ document.addEventListener("click", async (event) => {
     refreshCustomerHomeDurationSheetSelection();
     await refreshCustomerAvailabilityDecision();
     if (!customerInstantSlaAvailable()) {
+      const policyAction = normalizeSupplyUnavailableAction(selected.supplyUnavailableAction);
+      if (policyAction === "redirect_schedule") {
+        await openCustomerScheduleForHomeDuration(selected.categoryId || state.customerHomeDurationSheetCategoryId || selected.id, selected.id || state.selectedHomeDurationId || "", selected);
+        return;
+      }
+      if (policyAction === "show_popup") {
+        showCustomerSupplyUnavailablePopup(selected.supplyUnavailableMessage);
+        return;
+      }
+      if (policyAction === "auto_hide") {
+        scheduleCustomerHomeAutoHideSupplyRefresh(50);
+        if (!refreshCustomerHomeDurationSheetSelection()) refreshCustomerHomeSectionsInPlace();
+        return;
+      }
       if (!refreshCustomerHomeDurationSheetSelection()) render();
       return;
     }
@@ -20573,6 +21174,7 @@ document.addEventListener("click", async (event) => {
     state.customerScheduleSheetOpen = false;
     state.customerHomeDurationSheetOpen = false;
     state.customerHomeCategorySheetOpen = false;
+    state.customerHomeCategorySheetServiceId = "";
     state.customerHomeCategorySheetExpanded = false;
     state.customerView = "cart";
     render();
@@ -20687,7 +21289,21 @@ document.addEventListener("click", async (event) => {
     state.selectedScheduleDate = state.selectedHomeScheduleDate;
     state.selectedScheduleTime = state.selectedHomeScheduleTime;
     state.selectedSchedulePeriod = state.selectedHomeSchedulePeriod;
-    await addCategoryToCart(selected.categoryId || state.customerHomeScheduleSheetCategoryId || selected.id, false, selected);
+    const scheduleOverride = state.customerHomeScheduleSupplyOverride;
+    const selectedForCart = { ...selected };
+    const overrideMatches = scheduleOverride
+      && normalizeSupplyUnavailableAction(scheduleOverride.supplyUnavailableAction) === "redirect_schedule"
+      && (
+        String(scheduleOverride.durationId || "") === String(selected.id || "")
+        || (scheduleOverride.categoryPriceRuleId && String(scheduleOverride.categoryPriceRuleId || "") === String(selected.categoryPriceRuleId || ""))
+      );
+    if (overrideMatches) {
+      selectedForCart.supplyScheduleOverride = true;
+      selectedForCart.supplyUnavailableAction = "redirect_schedule";
+      selectedForCart.supplyUnavailableMessage = scheduleOverride.supplyUnavailableMessage || selected.supplyUnavailableMessage || "";
+      selectedForCart.bookingType = "schedule";
+    }
+    await addCategoryToCart(selectedForCart.categoryId || state.customerHomeScheduleSheetCategoryId || selectedForCart.id, false, selectedForCart);
     if (state.customerCartReplace) {
       state.customerHomeScheduleSheetOpen = false;
       render();
@@ -20698,8 +21314,10 @@ document.addEventListener("click", async (event) => {
     state.customerHomeScheduleSheetOpen = false;
     state.customerHomeDurationSheetOpen = false;
     state.customerHomeCategorySheetOpen = false;
+    state.customerHomeCategorySheetServiceId = "";
     state.customerHomeCategorySheetExpanded = false;
     state.customerView = "cart";
+    state.customerHomeScheduleSupplyOverride = null;
     render();
     return;
   }
@@ -20744,35 +21362,8 @@ document.addEventListener("click", async (event) => {
       render();
       return;
     }
-    state.customerHomeScheduleSheetCategoryId = categoryId;
-    state.selectedHomeScheduleDate = customerHomeScheduleDates(customerHomeScheduleConfig())[0]?.value || "";
-    let scheduleDurations = [];
-    try {
-      scheduleDurations = await refreshCustomerCategoryDurationData(categoryId);
-    } catch (error) {
-      notify(error.message || "Unable to load category durations.", "error");
-      render();
-      return;
-    }
     const preferredScheduleDurationId = state.selectedHomeScheduleDurationId || state.selectedHomeDurationId || "";
-    state.selectedHomeScheduleDurationId = scheduleDurations.some((item) => String(item.id || "") === String(preferredScheduleDurationId))
-      ? preferredScheduleDurationId
-      : scheduleDurations[0]?.id || "";
-    state.selectedHomeSchedulePeriod = "";
-    state.selectedHomeScheduleTime = "";
-    if (!scheduleDurations.length) {
-      notify("Duration options are not configured yet.");
-      render();
-      return;
-    }
-    state.customerHomeScheduleSheetOpen = false;
-    state.customerHomeDurationSheetOpen = false;
-    state.customerHomeCategorySheetOpen = false;
-    state.customerHomeCategorySheetExpanded = false;
-    state.customerView = "homeSchedule";
-    await refreshCustomerAvailabilityDecision();
-    ensureCustomerHomeScheduleSelection();
-    render();
+    await openCustomerScheduleForHomeDuration(categoryId, preferredScheduleDurationId, {});
     return;
   }
 
@@ -21413,7 +22004,7 @@ document.addEventListener("click", async (event) => {
       if (!isAvailabilityConflict) console.error("Unable to confirm customer booking.", error);
       notify(error.message || "Unable to confirm booking.", isAvailabilityConflict ? "info" : "error", { show: isAvailabilityConflict });
       confirmButton.disabled = false;
-      confirmButton.innerHTML = `<span>Confirm</span>${customerIcon("chevronRight")}`;
+      confirmButton.innerHTML = `<span>Proceed to Pay</span>`;
     }
     return;
   }
@@ -21456,6 +22047,7 @@ document.addEventListener("click", async (event) => {
   const liveRouteRecenterButton = event.target.closest("[data-live-route-recenter]");
   if (liveRouteRecenterButton) {
     state.customerTrackLiveRouteZoomDelta = 0;
+    customerTrackLiveRouteViewport = null;
     await refreshCustomerTrackBookingRealtime();
     return;
   }
@@ -21464,7 +22056,7 @@ document.addEventListener("click", async (event) => {
   if (liveRouteZoomButton) {
     const current = Number(state.customerTrackLiveRouteZoomDelta || 0);
     const direction = liveRouteZoomButton.dataset.liveRouteZoom;
-    state.customerTrackLiveRouteZoomDelta = Math.max(-8, Math.min(8, current + (direction === "in" ? 1 : -1)));
+    state.customerTrackLiveRouteZoomDelta = Math.max(-8, Math.min(8, current + (direction === "in" ? 0.5 : -0.5)));
     renderTrackRealtimeUpdate();
     return;
   }

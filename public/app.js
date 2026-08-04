@@ -3861,8 +3861,8 @@ function bookingEngineRows(items = []) {
     const calendar = item.serviceControlMode === "auto"
       ? `<b>Auto</b><div class="row-note">${escapeHtml(bookingEngineTimeText(autoStart))} to ${escapeHtml(bookingEngineTimeText(autoEnd))}</div>`
       : `<b>Manual</b><div class="row-note">${escapeHtml(item.manualServiceStatus === "start" ? "Booking Started" : "Booking Stopped")}</div>`;
-    const instant = `ETA ${item.instantEtaMinutes || 0}m | Wrap ${item.instantWrapUpMinutes || 0}m | Travel ${item.instantTravelMinutes || 0}m`;
-    const schedule = `ETA ${item.scheduleEtaMinutes || 0}m | Wrap ${item.scheduleWrapUpMinutes || 0}m | Travel ${item.scheduleTravelMinutes || 0}m`;
+    const instant = `ETA ${item.instantEtaMinutes || 0}m | Initiate ${item.instantInitiateMinutes || 0}m | Wrap ${item.instantWrapUpMinutes || 0}m | Travel ${item.instantTravelMinutes || 0}m`;
+    const schedule = `ETA ${item.scheduleEtaMinutes || 0}m | Initiate ${item.scheduleInitiateMinutes || 0}m | Wrap ${item.scheduleWrapUpMinutes || 0}m | Travel ${item.scheduleTravelMinutes || 0}m`;
     return `<tr>
       <td><b>${escapeHtml(bookingEngineScopeText(item))}</b>${item.imageUrl ? `<div class="row-note">${imageCell(item.imageUrl)}</div>` : ""}</td>
       <td>${calendar}</td>
@@ -13679,6 +13679,15 @@ async function loadCategories() {
               ${priceMasterFloatingField("Grid Rows", `<input class="form-control" name="priceGridRows" type="number" min="1" max="10" step="1" value="3" placeholder=" ">`)}
               ${priceMasterFloatingField("Grid Columns", `<input class="form-control" name="priceGridColumns" type="number" min="1" max="10" step="1" value="3" placeholder=" ">`)}
             </div>
+            <div class="category-price-duration-card" data-category-supply-policy-controls>
+              <div class="control-title"><div><p>Supply</p><h3>If supply is not available</h3></div></div>
+              <label class="form-check module-switch"><input class="form-check-input" type="radio" name="supplyUnavailableAction" value="auto_hide"> Auto Hide</label>
+              <label class="form-check module-switch"><input class="form-check-input" type="radio" name="supplyUnavailableAction" value="show_popup"> Show Popup</label>
+              <label class="form-check module-switch"><input class="form-check-input" type="radio" name="supplyUnavailableAction" value="redirect_schedule"> Redirect to Schedule</label>
+              <div class="d-none" data-category-supply-popup-message>
+                ${priceMasterFloatingField("Popup Message", `<textarea class="form-control" name="supplyUnavailableMessage" rows="2" maxlength="500" placeholder=" "></textarea>`)}
+              </div>
+            </div>
           </div>
         </div>
         <div class="category-guidance-editor" data-category-guidance-editor></div>
@@ -14189,6 +14198,7 @@ async function loadBookingEngine() {
         <div class="control-title"><div><p>Instant</p><h3>Instant Booking Timing</h3></div><span>Minutes</span></div>
         <div class="master-form compact mb-0">
           ${priceMasterFloatingField("ETA value", `<input class="form-control" name="instantEtaMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
+          ${priceMasterFloatingField("Initiate Time", `<input class="form-control" name="instantInitiateMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
           ${priceMasterFloatingField("Booking Wrap-Up Time", `<input class="form-control" name="instantWrapUpMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
           ${priceMasterFloatingField("Travel Time To Reach", `<input class="form-control" name="instantTravelMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
         </div>
@@ -14197,6 +14207,7 @@ async function loadBookingEngine() {
         <div class="control-title"><div><p>Schedule</p><h3>Schedule Booking Timing</h3></div><span>Minutes</span></div>
         <div class="master-form compact mb-0">
           ${priceMasterFloatingField("ETA value", `<input class="form-control" name="scheduleEtaMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
+          ${priceMasterFloatingField("Initiate Time", `<input class="form-control" name="scheduleInitiateMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
           ${priceMasterFloatingField("Booking Wrap-Up Time", `<input class="form-control" name="scheduleWrapUpMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
           ${priceMasterFloatingField("Travel Time To Reach", `<input class="form-control" name="scheduleTravelMinutes" type="number" min="0" max="1440" step="1" value="0">`)}
         </div>
@@ -15338,6 +15349,8 @@ function resetCategoryMasterForm() {
   form.elements.priceDisplayMode.value = "row";
   form.elements.priceGridRows.value = "3";
   form.elements.priceGridColumns.value = "3";
+  if (form.elements.supplyUnavailableAction) [...form.elements.supplyUnavailableAction].forEach((input) => { input.checked = false; });
+  if (form.elements.supplyUnavailableMessage) form.elements.supplyUnavailableMessage.value = "";
   form.elements.isRecommended.checked = false;
   form.elements.isEnabled.checked = true;
   form.elements.isActive.checked = true;
@@ -15393,6 +15406,8 @@ function toggleCategoryMasterHomeDisplayControls(form = $("#categoryMasterForm")
   const customImageSize = (form.elements.categoryImageSizeMode?.value || "default") === "custom";
   const priceControls = form.querySelector("[data-category-price-display-controls]");
   const gridControls = form.querySelector("[data-category-price-grid-controls]");
+  const supplyControls = form.querySelector("[data-category-supply-policy-controls]");
+  const supplyPopupMessage = form.querySelector("[data-category-supply-popup-message]");
   const imageSizeModeControls = form.querySelector("[data-category-image-size-mode-controls]");
   const imageSizeControls = form.querySelector("[data-category-image-size-controls]");
   if (imageSizeModeControls) imageSizeModeControls.classList.toggle("d-none", categoryPrice);
@@ -15405,6 +15420,16 @@ function toggleCategoryMasterHomeDisplayControls(form = $("#categoryMasterForm")
   }
   if (priceControls) priceControls.classList.toggle("d-none", !categoryPrice);
   if (gridControls) gridControls.classList.toggle("d-none", !categoryPrice || !grid);
+  if (supplyControls) supplyControls.classList.toggle("d-none", !categoryPrice);
+  const showPopupMessage = categoryPrice && String(form.elements.supplyUnavailableAction?.value || "") === "show_popup";
+  if (supplyPopupMessage) supplyPopupMessage.classList.toggle("d-none", !showPopupMessage);
+  if (form.elements.supplyUnavailableMessage) {
+    form.elements.supplyUnavailableMessage.disabled = !showPopupMessage;
+    if (!showPopupMessage) form.elements.supplyUnavailableMessage.value = "";
+  }
+  if (!categoryPrice && form.elements.supplyUnavailableAction) {
+    [...form.elements.supplyUnavailableAction].forEach((input) => { input.checked = false; });
+  }
 }
 
 function resetBookingTypeForm() {
@@ -16075,6 +16100,10 @@ document.addEventListener("submit", async (event) => {
       const path = editingCategoryMasterId ? `/masters/categories/${editingCategoryMasterId}` : "/masters/categories";
       const imageUrls = categoryMasterImageUrlsFromItem({ imageUrl: data.imageUrl, imageUrls: data.imageUrls });
       const useCustomImageSize = data.homeDisplayMode !== "categoryPrice" && data.categoryImageSizeMode === "custom";
+      const supplyUnavailableAction = data.homeDisplayMode === "categoryPrice" ? String(data.supplyUnavailableAction || "") : "";
+      if (supplyUnavailableAction === "show_popup" && !String(data.supplyUnavailableMessage || "").trim()) {
+        throw new Error("Popup message is required when Show Popup is selected.");
+      }
       await api(path, {
         method,
         body: JSON.stringify({
@@ -16102,6 +16131,8 @@ document.addEventListener("submit", async (event) => {
           priceDisplayMode: data.priceDisplayMode === "grid" ? "grid" : "row",
           priceGridRows: Math.max(1, Number(data.priceGridRows || 3)),
           priceGridColumns: Math.max(1, Number(data.priceGridColumns || 3)),
+          supplyUnavailableAction,
+          supplyUnavailableMessage: supplyUnavailableAction === "show_popup" ? data.supplyUnavailableMessage || null : null,
           addWithOtherCategory: Boolean(data.addWithOtherCategory),
           ...collectCategoryMasterGuidance(form),
           isRecommended: Boolean(data.isRecommended),
@@ -16253,9 +16284,11 @@ document.addEventListener("submit", async (event) => {
           autoStartTime: serviceControlMode === "auto" ? data.autoStartTime || null : null,
           autoEndTime: serviceControlMode === "auto" ? data.autoEndTime || null : null,
           instantEtaMinutes: Number(data.instantEtaMinutes || 0),
+          instantInitiateMinutes: Number(data.instantInitiateMinutes || 0),
           instantWrapUpMinutes: Number(data.instantWrapUpMinutes || 0),
           instantTravelMinutes: Number(data.instantTravelMinutes || 0),
           scheduleEtaMinutes: Number(data.scheduleEtaMinutes || 0),
+          scheduleInitiateMinutes: Number(data.scheduleInitiateMinutes || 0),
           scheduleWrapUpMinutes: Number(data.scheduleWrapUpMinutes || 0),
           scheduleTravelMinutes: Number(data.scheduleTravelMinutes || 0),
           assistantAssignmentMode: data.assistantAssignmentMode || "manual",
@@ -17103,7 +17136,7 @@ document.addEventListener("change", async (event) => {
     toggleCategoryMasterLocationLimit(input.closest("#categoryMasterForm"));
     return;
   }
-  if (input.closest?.("#categoryMasterForm") && ["homeDisplayMode", "priceDisplayMode", "categoryImageSizeMode"].includes(input.name)) {
+  if (input.closest?.("#categoryMasterForm") && ["homeDisplayMode", "priceDisplayMode", "categoryImageSizeMode", "supplyUnavailableAction"].includes(input.name)) {
     toggleCategoryMasterHomeDisplayControls(input.closest("#categoryMasterForm"));
     return;
   }
@@ -19191,6 +19224,12 @@ document.addEventListener("click", async (event) => {
       form.elements.priceDisplayMode.value = item.priceDisplayMode === "grid" ? "grid" : "row";
       form.elements.priceGridRows.value = item.priceGridRows || 3;
       form.elements.priceGridColumns.value = item.priceGridColumns || 3;
+      if (form.elements.supplyUnavailableAction) {
+        [...form.elements.supplyUnavailableAction].forEach((input) => {
+          input.checked = String(input.value || "") === String(item.supplyUnavailableAction || "");
+        });
+      }
+      if (form.elements.supplyUnavailableMessage) form.elements.supplyUnavailableMessage.value = item.supplyUnavailableMessage || "";
       form.elements.isRecommended.checked = Boolean(item.isRecommended);
       form.elements.isEnabled.checked = item.isEnabled !== false;
       form.elements.isActive.checked = item.isActive !== false;
@@ -19356,9 +19395,11 @@ document.addEventListener("click", async (event) => {
       form.elements.autoStartTime.value = bookingEngineTimeValue(item.autoStartTime) || bookingEngineDateTimeValue(item.autoStartAt).slice(11, 16);
       form.elements.autoEndTime.value = bookingEngineTimeValue(item.autoEndTime) || bookingEngineDateTimeValue(item.autoEndAt).slice(11, 16);
       form.elements.instantEtaMinutes.value = item.instantEtaMinutes ?? 0;
+      if (form.elements.instantInitiateMinutes) form.elements.instantInitiateMinutes.value = item.instantInitiateMinutes ?? 0;
       form.elements.instantWrapUpMinutes.value = item.instantWrapUpMinutes ?? 0;
       form.elements.instantTravelMinutes.value = item.instantTravelMinutes ?? 0;
       form.elements.scheduleEtaMinutes.value = item.scheduleEtaMinutes ?? 0;
+      if (form.elements.scheduleInitiateMinutes) form.elements.scheduleInitiateMinutes.value = item.scheduleInitiateMinutes ?? 0;
       form.elements.scheduleWrapUpMinutes.value = item.scheduleWrapUpMinutes ?? 0;
       form.elements.scheduleTravelMinutes.value = item.scheduleTravelMinutes ?? 0;
       form.elements.assistantAssignmentMode.value = item.assistantAssignmentMode || "manual";

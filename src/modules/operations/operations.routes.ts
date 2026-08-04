@@ -10,6 +10,14 @@ import { addBookingRealtimeClient, emitBookingRealtimeEvent, ensureBookingRealti
 import { pokeBookingOrchestrationWorker } from "./bookingOrchestrator.js";
 import { getRazorpayPaymentDetail, listRazorpayPayments, listRazorpayPaymentsForBooking, reconcileRazorpayPayment } from "../payments/payments.repository.js";
 import {
+  assignAssistantWithCalendarBlock,
+  checkDispatchAvailability,
+  createTemporaryHold,
+  getNextAvailableTime,
+  recalculateAssistantAvailability,
+  releaseTemporaryHold
+} from "./assistantDispatchEngine.js";
+import {
   assignBooking,
   addCustomerDisputeMessage,
   cancelBookingByAdmin,
@@ -126,6 +134,47 @@ const bookingAvailabilityBodySchema = z.object({
   waitWindowMinutes: z.coerce.number().int().min(0).max(1440).optional().default(0),
   latitude: z.coerce.number().min(-90).max(90).nullable().optional(),
   longitude: z.coerce.number().min(-180).max(180).nullable().optional()
+});
+const dispatchAvailabilityBodySchema = z.object({
+  bookingType: z.enum(["instant", "schedule"]),
+  clusterId: z.string().uuid(),
+  serviceId: z.string().uuid().nullable().optional(),
+  categoryId: z.string().uuid().nullable().optional(),
+  durationMinutes: z.coerce.number().int().min(1).max(1440),
+  startAt: z.coerce.date().nullable().optional(),
+  latitude: z.coerce.number().min(-90).max(90).nullable().optional(),
+  longitude: z.coerce.number().min(-180).max(180).nullable().optional()
+});
+const dispatchNextAvailableQuerySchema = z.object({
+  assistantId: z.string().uuid().nullable().optional(),
+  clusterId: z.string().uuid().nullable().optional()
+});
+const dispatchHoldBodySchema = z.object({
+  assistantId: z.string().uuid(),
+  clusterId: z.string().uuid(),
+  startAt: z.coerce.date(),
+  endAt: z.coerce.date().nullable().optional(),
+  sourceType: z.string().trim().max(80).nullable().optional(),
+  sourceId: z.string().uuid().nullable().optional(),
+  metadata: z.record(z.unknown()).optional().default({})
+});
+const dispatchReleaseHoldBodySchema = z.object({
+  holdId: z.string().uuid().nullable().optional(),
+  sourceId: z.string().uuid().nullable().optional(),
+  assistantId: z.string().uuid().nullable().optional(),
+  reason: z.string().trim().max(300).nullable().optional()
+});
+const dispatchAssignBodySchema = z.object({
+  assistantId: z.string().uuid(),
+  bookingId: z.string().uuid(),
+  clusterId: z.string().uuid(),
+  startAt: z.coerce.date(),
+  endAt: z.coerce.date(),
+  metadata: z.record(z.unknown()).optional().default({})
+});
+const dispatchRecalculateBodySchema = z.object({
+  assistantId: z.string().uuid().nullable().optional(),
+  bookingId: z.string().uuid().nullable().optional()
 });
 const bookingLocationValidationBodySchema = z.object({
   customerId: z.string().uuid(),
@@ -472,6 +521,70 @@ operationsRouter.post("/bookings/availability", requireBookingMasterAccess, asyn
   try {
     const body = bookingAvailabilityBodySchema.parse(req.body);
     res.json({ data: await getBookingAvailabilityDecision(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.post("/dispatch/availability", requireBookingMasterAccess, async (req, res, next) => {
+  try {
+    const body = dispatchAvailabilityBodySchema.parse(req.body);
+    res.json({
+      data: await checkDispatchAvailability({
+        bookingType: body.bookingType,
+        clusterId: body.clusterId,
+        serviceId: body.serviceId,
+        categoryId: body.categoryId,
+        durationMinutes: body.durationMinutes,
+        startAt: body.startAt,
+        destination: body.latitude != null && body.longitude != null ? { latitude: body.latitude, longitude: body.longitude } : null
+      })
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.get("/dispatch/next-available", requireBookingMasterAccess, async (req, res, next) => {
+  try {
+    const query = dispatchNextAvailableQuerySchema.parse(req.query);
+    res.json({ data: await getNextAvailableTime(query) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.post("/dispatch/holds", requireBookingMasterAccess, async (req, res, next) => {
+  try {
+    const body = dispatchHoldBodySchema.parse(req.body);
+    res.status(201).json({ data: await createTemporaryHold(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.post("/dispatch/holds/release", requireBookingMasterAccess, async (req, res, next) => {
+  try {
+    const body = dispatchReleaseHoldBodySchema.parse(req.body);
+    res.json({ data: await releaseTemporaryHold(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.post("/dispatch/assignments", requireBookingMasterAccess, async (req, res, next) => {
+  try {
+    const body = dispatchAssignBodySchema.parse(req.body);
+    res.status(201).json({ data: await assignAssistantWithCalendarBlock(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.post("/dispatch/recalculate", requireBookingMasterAccess, async (req, res, next) => {
+  try {
+    const body = dispatchRecalculateBodySchema.parse(req.body);
+    res.json({ data: await recalculateAssistantAvailability(body) });
   } catch (error) {
     next(error);
   }

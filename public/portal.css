@@ -22218,7 +22218,7 @@ body.portal-customer .customer-cart-bar.cart-confirm-bar {
 
 body.portal-customer .customer-pay-main {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(124px, 36vw, 152px);
+  grid-template-columns: minmax(0, 1fr) clamp(150px, 42vw, 184px);
   gap: 0 12px;
   align-items: center;
   width: 100%;
@@ -22234,19 +22234,20 @@ body.portal-customer .customer-pay-left {
 
 body.portal-customer .customer-payment-mode-field {
   position: relative;
-  width: max-content;
+  width: min(100%, 172px);
   max-width: 100%;
-  min-height: 30px;
+  min-height: 36px;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  justify-content: space-between;
+  gap: 8px;
   border: 0;
   border-radius: 999px;
-  padding: 0 10px 0 12px;
+  padding: 0 12px 0 14px;
   background: #eef5ff;
   color: #07183c;
   font-family: Inter, sans-serif;
-  font-size: 12px;
+  font-size: 16px;
   font-weight: 950;
   box-shadow: inset 0 0 0 1px rgba(7, 94, 234, 0.05);
   cursor: pointer;
@@ -22256,6 +22257,20 @@ body.portal-customer .customer-payment-mode-field .customer-lucide {
   width: 14px;
   height: 14px;
   color: var(--zigo-blue);
+  flex: 0 0 auto;
+}
+
+body.portal-customer .customer-payment-mode-field span {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.portal-customer .customer-payment-mode-field .customer-lucide:last-child {
+  margin-left: auto;
 }
 
 body.portal-customer .customer-payment-mode-field.static {
@@ -22599,20 +22614,22 @@ body.portal-customer .customer-pay-mode .customer-lucide {
 
 body.portal-customer .customer-pay-amount {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 8px;
+  gap: 4px 8px;
   min-width: 0;
 }
 
 body.portal-customer .customer-pay-amount b {
   color: #07183c;
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 950;
+  line-height: 1;
 }
 
 body.portal-customer .customer-pay-amount b span {
   margin-right: 2px;
-  font-size: 15px;
+  font-size: 20px;
 }
 
 body.portal-customer .customer-pay-amount del {
@@ -22622,6 +22639,9 @@ body.portal-customer .customer-pay-amount del {
 }
 
 body.portal-customer .customer-pay-amount em {
+  flex: 0 0 auto;
+  order: 3;
+  margin-top: 1px;
   min-height: 24px;
   display: inline-flex;
   align-items: center;
@@ -22637,6 +22657,7 @@ body.portal-customer .customer-pay-amount em {
 body.portal-customer .customer-pay-submit {
   grid-column: 2;
   grid-row: 1;
+  align-self: center;
   width: 100%;
   min-width: 0;
   min-height: 64px;
@@ -23841,8 +23862,14 @@ body.portal-customer .customer-cart-bar.cart-confirm-bar {
 }
 
 body.portal-customer .customer-pay-submit {
-  min-height: 46px !important;
-  height: 46px !important;
+  min-height: 56px !important;
+  height: 56px !important;
+  font-size: 15px !important;
+  align-self: center !important;
+}
+
+body.portal-customer .customer-pay-submit span {
+  font-size: 15px !important;
 }
 
 /* The native wrapper owns its top loading indicator; the web surface stays clean. */
@@ -23972,6 +23999,47 @@ body.portal-customer {
   border-radius: 12px;
   background: #edf4ff;
   touch-action: none;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.portal-customer .customer-track-live-status-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  max-width: calc(100% - 70px);
+  padding: 0 9px;
+  border-radius: 999px;
+  background: rgba(236, 253, 245, 0.96);
+  color: #16a34a;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
+  pointer-events: none;
+}
+
+.portal-customer .customer-track-live-status-badge.updating {
+  background: rgba(254, 252, 232, 0.97);
+  color: #b7791f;
+}
+
+.portal-customer .customer-track-live-status-badge .customer-lucide {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.portal-customer .customer-track-live-status-badge b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .portal-customer .customer-track-live-map-inner,
@@ -23983,15 +24051,21 @@ body.portal-customer {
 
 .portal-customer .customer-track-live-map-inner {
   top: 0;
-  left: 50%;
-  width: min(304px, 100%);
+  left: 0;
+  width: 100%;
   height: 100%;
-  transform: translateX(-50%);
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.portal-customer .customer-track-live-map:active .customer-track-live-map-inner {
+  cursor: grabbing;
 }
 
 .portal-customer .customer-track-live-map-tiles,
 .portal-customer .customer-track-live-map-route {
   inset: 0;
+  pointer-events: auto;
 }
 
 .portal-customer .customer-track-live-map-tiles img {
@@ -24085,6 +24159,7 @@ body.portal-customer {
   z-index: 6;
   display: grid;
   gap: 6px;
+  pointer-events: auto;
 }
 
 .portal-customer .customer-track-live-map-controls button {
@@ -24121,6 +24196,18 @@ body.portal-customer {
   border-radius: 999px;
   background: #dceaff;
   color: #0866e8;
+}
+
+.portal-customer .customer-track-live-map-fallback .customer-lucide {
+  width: 22px;
+  height: 22px;
+}
+
+.portal-customer .customer-track-live-map-fallback small {
+  color: #071637;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .portal-customer .customer-track-live-route-foot b {

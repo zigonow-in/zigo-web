@@ -52,12 +52,17 @@ const cache = {
   categoryPrices: [],
   taxMasterRules: [],
   paymentModes: [],
+  offerCustomers: [],
+  offers: [],
+  offersPagination: null,
   bookingEngineRules: [],
   bookingEngineQuickReplies: [],
   payments: [],
   paymentsPagination: null,
   reviewsReport: [],
   reviewsReportPagination: null,
+  unserviceableLocationsReport: [],
+  unserviceableLocationsReportPagination: null,
   customerDisputes: [],
   supportTickets: [],
   supportTicketsPagination: null,
@@ -85,9 +90,11 @@ let editingCategoryPriceId = null;
 let categoryPriceDeletedDurationIds = [];
 let editingTaxMasterRuleId = null;
 let editingPaymentModeId = null;
+let editingOfferId = null;
 let editingBookingEngineRuleId = null;
 let editingBookingEngineQuickReplyId = null;
 let serviceCategoryFilters = { search: "", serviceId: "" };
+let offerFilters = { search: "", status: "all", offerType: "all", page: 1, pageSize: 20 };
 let categoryPriceFilters = { search: "", scopeType: "", stateId: "", cityId: "", zoneId: "", clusterId: "", serviceId: "", categoryId: "", status: "" };
 let bookingEngineFilters = { search: "", scopeType: "", stateId: "", cityId: "", zoneId: "", clusterId: "", categoryId: "", status: "" };
 let bookingEngineQuickReplyFilters = { search: "", actor: "", bookingStage: "", actionType: "", status: "" };
@@ -469,6 +476,14 @@ function multiOptionRows(items, selected = [], labelKey = "name", valueKey = "id
     .join("");
 }
 
+function optionRowsSelected(items, selectedValue = "", labelKey = "name", valueKey = "id") {
+  const selected = String(selectedValue || "");
+  return items.map((item) => {
+    const value = String(item[valueKey] || "");
+    return `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(item[labelKey] || item.code || item.id)}</option>`;
+  }).join("");
+}
+
 function selectedValues(select) {
   if (!select) return [];
   if (select instanceof RadioNodeList) {
@@ -836,6 +851,27 @@ async function uploadImageFile(file, fieldName) {
     wrapper.querySelector('input[name="imageUrl"]').value = payload.data.imageUrl;
     const preview = wrapper.querySelector(".upload-preview");
     if (preview) preview.innerHTML = imageCell(payload.data.imageUrl);
+  }
+  return payload.data;
+}
+
+async function uploadOfferImageFile(file, uploadBox = null) {
+  const dataBase64 = await fileToDataUrl(file);
+  const payload = await api("/settings/media-images", {
+    method: "POST",
+    body: JSON.stringify({
+      originalName: file.name,
+      mimeType: file.type,
+      dataBase64
+    })
+  });
+  const imageUrl = payload.data?.imageUrl || "";
+  const wrapper = uploadBox;
+  if (wrapper) {
+    const input = wrapper.querySelector("[data-offer-upload-value]");
+    const preview = wrapper.querySelector(".upload-preview");
+    if (input) input.value = imageUrl;
+    if (preview) preview.innerHTML = imageCell(imageUrl);
   }
   return payload.data;
 }
@@ -3272,6 +3308,8 @@ function categoryPriceDurationRowHtml(duration = {}) {
   const availableForDuration = duration.availableForDuration !== false;
   const availableForExtend = duration.availableForExtend === true;
   const availableForExpand = duration.availableForExpand === true;
+  const isDurationForOffers = duration.isDurationForOffers === true;
+  const isOfferEligible = duration.isOfferEligible !== false;
   const isEnabled = duration.isEnabled !== false;
   const isActive = duration.isActive !== false;
   return `<div class="category-price-duration-row" data-category-price-duration-row data-row-id="${escapeHtml(rowId)}" data-rule-id="${escapeHtml(duration.id || "")}">
@@ -3287,6 +3325,8 @@ function categoryPriceDurationRowHtml(duration = {}) {
       <label><input type="checkbox" data-category-price-duration-field="availableForDuration" ${availableForDuration ? "checked" : ""}> Duration</label>
       <label><input type="checkbox" data-category-price-duration-field="availableForExtend" ${availableForExtend ? "checked" : ""}> Extend</label>
       <label><input type="checkbox" data-category-price-duration-field="availableForExpand" ${availableForExpand ? "checked" : ""}> Expand</label>
+      <label><input type="checkbox" data-category-price-duration-field="isDurationForOffers" ${isDurationForOffers ? "checked" : ""}> Offer Duration</label>
+      <label><input type="checkbox" data-category-price-duration-field="isOfferEligible" ${isOfferEligible ? "checked" : ""}> Offer Eligible</label>
       <label><input type="checkbox" data-category-price-duration-field="isEnabled" ${isEnabled ? "checked" : ""}> Enable</label>
       <label><input type="checkbox" data-category-price-duration-field="isActive" ${isActive ? "checked" : ""}> Active</label>
     </div>
@@ -3319,6 +3359,8 @@ function collectCategoryPriceDurations(form = $("#categoryPriceForm")) {
     availableForDuration: row.querySelector('[data-category-price-duration-field="availableForDuration"]')?.checked !== false,
     availableForExtend: row.querySelector('[data-category-price-duration-field="availableForExtend"]')?.checked === true,
     availableForExpand: row.querySelector('[data-category-price-duration-field="availableForExpand"]')?.checked === true,
+    isDurationForOffers: row.querySelector('[data-category-price-duration-field="isDurationForOffers"]')?.checked === true,
+    isOfferEligible: row.querySelector('[data-category-price-duration-field="isOfferEligible"]')?.checked !== false,
     isEnabled: row.querySelector('[data-category-price-duration-field="isEnabled"]')?.checked !== false,
     isActive: row.querySelector('[data-category-price-duration-field="isActive"]')?.checked !== false
   }));
@@ -3477,6 +3519,8 @@ function categoryPriceRows(items = []) {
             ${item.availableForDuration !== false ? `<span>Duration</span>` : ""}
             ${item.availableForExtend === true ? `<span>Extend</span>` : ""}
             ${item.availableForExpand === true ? `<span>Expand</span>` : ""}
+            ${item.isDurationForOffers === true ? `<span>Offer Duration</span>` : ""}
+            ${item.isOfferEligible !== false ? `<span>Offer Eligible</span>` : ""}
           </div>
         </td>
         <td>${status(item.isActive === false ? "inactive" : item.isEnabled === false ? "disabled" : "active")}</td>
@@ -3503,6 +3547,612 @@ function renderCategoryPriceReport() {
   document.querySelectorAll("[data-category-price-filter]").forEach((input) => {
     input.value = categoryPriceFilters[input.dataset.categoryPriceFilter] || "";
   });
+}
+
+function offerTypeLabel(value = "") {
+  const labels = {
+    PACKAGE: "Package",
+    DISCOUNT: "Discount",
+    BUY_X_GET_Y: "Buy X Get Y",
+    FREE_SERVICE: "Free Service",
+    CREDIT: "Credit",
+    FIXED_PRICE: "Fixed Price"
+  };
+  return labels[value] || value || "-";
+}
+
+function offerStatusText(value = "") {
+  return String(value || "DRAFT").toLowerCase();
+}
+
+function offerMoneyFromPaise(value = 0) {
+  return priceMasterMoneyText(Number(value || 0) / 100);
+}
+
+function offerIdsFromText(value = "") {
+  return String(value || "")
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function offerCheckedValues(name) {
+  return [...document.querySelectorAll(`[data-offer-picker="${name}"]:checked`)].map((input) => input.value);
+}
+
+function offerDatetimeLocal(value = "") {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return offsetDate.toISOString().slice(0, 16);
+}
+
+function offerUploadControl(key, inputName, currentUrl = "", label = "Upload Image") {
+  const inputId = `${key}Input`;
+  const preview = currentUrl ? imageCell(currentUrl) : "";
+  return `<div class="upload-box compact-upload offer-upload-box" data-offer-upload-box="${escapeHtml(key)}">
+    <input type="hidden" data-offer-upload-value name="${escapeHtml(inputName)}" value="${escapeHtml(currentUrl || "")}">
+    <input id="${escapeHtml(inputId)}" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-offer-image-upload>
+    <div class="upload-icon">UP</div>
+    <div class="upload-title">${escapeHtml(label)}</div>
+    <button class="btn btn-primary btn-sm" type="button" data-action="browse-image" data-target="${escapeHtml(inputId)}">Browse</button>
+    <div class="upload-preview">${preview}</div>
+  </div>`;
+}
+
+function offerContentRows(type) {
+  const rows = [];
+  document.querySelectorAll(`[data-offer-content-row="${type}"]`).forEach((row, index) => {
+    const title = row.querySelector('[data-offer-content-field="title"]')?.value?.trim() || "";
+    const subtitle = row.querySelector('[data-offer-content-field="subtitle"]')?.value?.trim() || "";
+    const body = row.querySelector('[data-offer-content-field="body"]')?.value?.trim() || "";
+    const iconUrl = row.querySelector('[data-offer-content-field="iconUrl"]')?.value?.trim() || "";
+    const imageUrl = row.querySelector('[data-offer-content-field="imageUrl"]')?.value?.trim() || "";
+    if (title || subtitle || body || iconUrl || imageUrl) {
+      rows.push({ contentType: type, title, subtitle, body, iconUrl, imageUrl, sortOrder: index });
+    }
+  });
+  return rows;
+}
+
+function offerContentRowHtml(type, item = {}) {
+  const rowId = `${type}-${crypto.randomUUID?.() || Date.now()}`;
+  const iconTarget = `offer-${type}-${rowId}-icon`;
+  const imageTarget = `offer-${type}-${rowId}-image`;
+  return `<div class="category-price-duration-row" data-offer-content-row="${escapeHtml(type)}">
+    ${priceMasterFloatingField("Title", `<input class="form-control" data-offer-content-field="title" value="${escapeHtml(item.title || "")}" placeholder="Title">`)}
+    ${priceMasterFloatingField("Sub-title", `<input class="form-control" data-offer-content-field="subtitle" value="${escapeHtml(item.subtitle || "")}" placeholder="Sub-title">`)}
+    ${priceMasterFloatingField("Note", `<input class="form-control" data-offer-content-field="body" value="${escapeHtml(item.body || "")}" placeholder="What customers should know">`)}
+    <div class="offer-content-upload-grid">
+      <div data-offer-upload-box="${escapeHtml(iconTarget)}">
+        <input type="hidden" data-offer-upload-value data-offer-content-field="iconUrl" value="${escapeHtml(item.iconUrl || "")}">
+        <button class="btn btn-outline-primary btn-sm" type="button" data-action="browse-image" data-target="${escapeHtml(iconTarget)}Input">Upload Icon</button>
+        <input id="${escapeHtml(iconTarget)}Input" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-offer-image-upload>
+        <div class="upload-preview">${item.iconUrl ? imageCell(item.iconUrl) : ""}</div>
+      </div>
+      <div data-offer-upload-box="${escapeHtml(imageTarget)}">
+        <input type="hidden" data-offer-upload-value data-offer-content-field="imageUrl" value="${escapeHtml(item.imageUrl || "")}">
+        <button class="btn btn-outline-primary btn-sm" type="button" data-action="browse-image" data-target="${escapeHtml(imageTarget)}Input">Upload Image</button>
+        <input id="${escapeHtml(imageTarget)}Input" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-offer-image-upload>
+        <div class="upload-preview">${item.imageUrl ? imageCell(item.imageUrl) : ""}</div>
+      </div>
+    </div>
+    <button class="btn btn-outline-danger btn-sm" data-action="remove-offer-content-row" type="button">Delete</button>
+  </div>`;
+}
+
+function renderOfferContentRows(type, items = [{}]) {
+  const host = document.querySelector(`[data-offer-content-host="${type}"]`);
+  if (!host) return;
+  const rows = items.length ? items : [{}];
+  host.innerHTML = rows.map((item) => offerContentRowHtml(type, item)).join("");
+}
+
+function offerCheckboxGroup(name, items = [], labelField = "name", selected = []) {
+  const selectedSet = new Set(selected.map(String));
+  if (!items.length) return `<p class="helper-text mb-0">No records available.</p>`;
+  return `<div class="category-price-available-group offer-picker-group" role="group">
+    ${items.map((item) => `<label><input type="checkbox" data-offer-picker="${escapeHtml(name)}" value="${escapeHtml(item.id)}" ${selectedSet.has(String(item.id)) ? "checked" : ""}> ${escapeHtml(item[labelField] || item.name || item.serviceTitle || item.title || item.label || item.id)}</label>`).join("")}
+  </div>`;
+}
+
+function offerServicePickerGroup(selected = []) {
+  const services = activeItems(cache.categoryServices || []);
+  const selectedSet = new Set(selected.map(String));
+  const allSelected = services.length > 0 && services.every((item) => selectedSet.has(String(item.id)));
+  if (!services.length) return `<p class="helper-text mb-0">No Service Master records available.</p>`;
+  return `<div class="category-price-available-group offer-picker-group" role="group">
+    <label><input type="checkbox" data-offer-select-all="serviceMasterIds" ${allSelected ? "checked" : ""}> Select All Services</label>
+    ${services.map((item) => `<label><input type="checkbox" data-offer-picker="serviceMasterIds" value="${escapeHtml(item.id)}" ${selectedSet.has(String(item.id)) ? "checked" : ""}> ${escapeHtml(item.serviceTitle || item.title || item.name || item.id)}</label>`).join("")}
+  </div>`;
+}
+
+function offerSelectedServiceIds(form = $("#offerMasterForm")) {
+  if (!form) return [];
+  return [...form.querySelectorAll('[data-offer-picker="serviceMasterIds"]:checked')].map((input) => String(input.value || ""));
+}
+
+function offerCategoryPickerHtml(selectedCategoryIds = [], selectedServiceIds = []) {
+  const selectedCategorySet = new Set(selectedCategoryIds.map(String));
+  const selectedServiceSet = new Set(selectedServiceIds.map(String));
+  const services = activeItems(cache.categoryServices || []).filter((service) => selectedServiceSet.has(String(service.id || "")));
+  const categories = activeItems(cache.categories || []).filter((category) => {
+    if (category.parentCategoryId || category.parent_category_id) return false;
+    return selectedServiceSet.has(categoryPriceCategoryServiceId(category));
+  });
+  if (!selectedServiceSet.size) return `<p class="helper-text mb-0">Select service(s) first to choose categories.</p>`;
+  if (!categories.length) return `<p class="helper-text mb-0">No categories mapped with the selected service(s).</p>`;
+  const allSelected = categories.every((category) => selectedCategorySet.has(String(category.id || "")));
+  return `<div class="offer-category-picker">
+    <div class="category-price-available-group offer-picker-group" role="group">
+      <label><input type="checkbox" data-offer-select-all="categoryIds" ${allSelected ? "checked" : ""}> Select All Categories</label>
+    </div>
+    ${services.map((service) => {
+      const serviceId = String(service.id || "");
+      const groupCategories = categories.filter((category) => categoryPriceCategoryServiceId(category) === serviceId);
+      if (!groupCategories.length) return "";
+      const groupSelected = groupCategories.every((category) => selectedCategorySet.has(String(category.id || "")));
+      return `<div class="category-price-duration-card offer-category-service-group" data-offer-category-service-group="${escapeHtml(serviceId)}">
+        <div class="control-title">
+          <div><p>Service</p><h3>${escapeHtml(service.serviceTitle || service.title || service.name || "Service")}</h3></div>
+          <label class="form-check mb-0"><input class="form-check-input" type="checkbox" data-offer-select-service-categories="${escapeHtml(serviceId)}" ${groupSelected ? "checked" : ""}> Select group</label>
+        </div>
+        <div class="category-price-available-group offer-picker-group" role="group">
+          ${groupCategories.map((category) => `<label><input type="checkbox" data-offer-picker="categoryIds" data-offer-category-service-id="${escapeHtml(serviceId)}" value="${escapeHtml(category.id)}" ${selectedCategorySet.has(String(category.id)) ? "checked" : ""}> ${escapeHtml(category.name || category.title || category.id)}</label>`).join("")}
+        </div>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function offerPrimaryScope(offer = {}) {
+  const scope = Array.isArray(offer.scopes) && offer.scopes.length ? offer.scopes[0] : {};
+  const metadataScope = offer.metadata?.eligibility?.scope || {};
+  return {
+    scopeType: scope.scopeType || metadataScope.scopeType || "all",
+    stateId: scope.stateId || metadataScope.stateId || "",
+    cityId: scope.cityId || metadataScope.cityId || "",
+    zoneId: scope.zoneId || metadataScope.zoneId || "",
+    clusterId: scope.clusterId || metadataScope.clusterId || ""
+  };
+}
+
+function offerScopeFromForm(form = $("#offerMasterForm")) {
+  const data = form ? formObject(form) : {};
+  return {
+    scopeType: data.scopeType || "all",
+    stateId: data.stateId || "",
+    cityId: data.cityId || "",
+    zoneId: data.zoneId || "",
+    clusterId: data.clusterId || ""
+  };
+}
+
+function offerScopeDropdownsHtml(scope = {}) {
+  return `<div class="master-form compact mb-0">
+    ${priceMasterFloatingField("Scope", `<select class="form-select" name="scopeType"><option value="all" ${scope.scopeType === "all" || !scope.scopeType ? "selected" : ""}>All</option><option value="state" ${scope.scopeType === "state" ? "selected" : ""}>State</option><option value="city" ${scope.scopeType === "city" ? "selected" : ""}>City</option><option value="zone" ${scope.scopeType === "zone" ? "selected" : ""}>Zone</option><option value="cluster" ${scope.scopeType === "cluster" ? "selected" : ""}>Cluster</option></select>`)}
+    ${priceMasterFloatingField("State", `<select class="form-select" name="stateId"><option value="">All States</option>${optionRowsSelected(activeItems(cache.states || []), scope.stateId)}</select>`)}
+    ${priceMasterFloatingField("City", `<select class="form-select" name="cityId"><option value="">All Cities</option>${optionRowsSelected(activeItems(cache.cities || []), scope.cityId)}</select>`)}
+    ${priceMasterFloatingField("Zone", `<select class="form-select" name="zoneId"><option value="">All Zones</option>${optionRowsSelected(activeItems(cache.zones || []), scope.zoneId)}</select>`)}
+    ${priceMasterFloatingField("Cluster", `<select class="form-select" name="clusterId"><option value="">All Clusters</option>${optionRowsSelected(activeClusters(cache.clusters || []), scope.clusterId)}</select>`)}
+  </div>`;
+}
+
+function hydrateOfferScopeDropdowns(form = $("#offerMasterForm"), scope = offerScopeFromForm(form)) {
+  if (!form) return;
+  const stateSelect = form.elements.stateId;
+  const citySelect = form.elements.cityId;
+  const zoneSelect = form.elements.zoneId;
+  const clusterSelect = form.elements.clusterId;
+  if (stateSelect) stateSelect.value = scope.stateId || "";
+  if (citySelect) citySelect.value = scope.cityId || "";
+  if (zoneSelect) zoneSelect.value = scope.zoneId || "";
+  if (clusterSelect) clusterSelect.value = scope.clusterId || "";
+}
+
+function offerCustomerUserId(customer = {}) {
+  return String(customer.userId || customer.user_id || customer.userID || "");
+}
+
+function offerCustomerScopeIds(customer = {}) {
+  const clusterId = customer.clusterId || customer.currentClusterId || customer.defaultClusterId || "";
+  const cluster = clusterId ? (cache.clusters || []).find((item) => String(item.id) === String(clusterId)) : null;
+  const cityId = customer.cityId || customer.defaultCityId || cluster?.cityId || "";
+  const zoneId = customer.zoneId || customer.defaultZoneId || cluster?.zoneId || "";
+  const city = cityId ? (cache.cities || []).find((item) => String(item.id) === String(cityId)) : null;
+  return {
+    stateId: customer.stateId || customer.defaultStateId || cluster?.stateId || city?.stateId || "",
+    cityId,
+    zoneId,
+    clusterId
+  };
+}
+
+function offerScopedCustomers(scope = {}) {
+  const rows = cache.offerCustomers?.length ? cache.offerCustomers : customerRows;
+  const scopeType = scope.scopeType || "all";
+  return (rows || []).filter((customer) => {
+    if (!offerCustomerUserId(customer)) return false;
+    const ids = offerCustomerScopeIds(customer);
+    if (scopeType === "state" && scope.stateId) return String(ids.stateId) === String(scope.stateId);
+    if (scopeType === "city" && scope.cityId) return String(ids.cityId) === String(scope.cityId);
+    if (scopeType === "zone" && scope.zoneId) return String(ids.zoneId) === String(scope.zoneId);
+    if (scopeType === "cluster" && scope.clusterId) return String(ids.clusterId) === String(scope.clusterId);
+    return true;
+  });
+}
+
+function offerCustomerLabel(customer = {}) {
+  const name = customer.displayName || customer.customerName || customer.name || "Customer";
+  const phone = customer.phone || customer.mobile || "";
+  const location = customer.clusterName || customer.cityName || customer.address || "";
+  return [name, phone, location].filter(Boolean).join(" - ");
+}
+
+function offerUserPickerHtml(name, title, selected = [], mode = "selected", scope = {}) {
+  const selectedSet = new Set((selected || []).map(String));
+  const rows = offerScopedCustomers(scope);
+  const allChecked = mode === "all" || (rows.length > 0 && rows.every((customer) => selectedSet.has(offerCustomerUserId(customer))));
+  const listClass = mode === "selected" ? "" : " d-none";
+  return `<div class="category-price-duration-card offer-user-picker" data-offer-user-picker="${escapeHtml(name)}">
+    <div class="control-title">
+      <div><p>${escapeHtml(title)}</p><h3>Customers</h3></div>
+      <span>${escapeHtml(rows.length)} users</span>
+    </div>
+    <div class="category-price-available-group offer-picker-group" role="group">
+      <label><input type="radio" name="${escapeHtml(`${name}Mode`)}" value="all" ${mode === "all" ? "checked" : ""}> All User</label>
+      <label><input type="radio" name="${escapeHtml(`${name}Mode`)}" value="selected" ${mode !== "all" ? "checked" : ""}> List user</label>
+    </div>
+    <div class="offer-user-list${listClass}" data-offer-user-list="${escapeHtml(name)}">
+      ${rows.length ? `<div class="category-price-available-group offer-picker-group" role="group">
+        <label><input type="checkbox" data-offer-select-all-users="${escapeHtml(name)}" ${allChecked ? "checked" : ""}> Select All Users</label>
+        ${rows.map((customer) => {
+          const userId = offerCustomerUserId(customer);
+          return `<label><input type="checkbox" data-offer-picker="${escapeHtml(name)}" value="${escapeHtml(userId)}" ${selectedSet.has(userId) ? "checked" : ""}> ${escapeHtml(offerCustomerLabel(customer))}</label>`;
+        }).join("")}
+      </div>` : `<p class="helper-text mb-0">No users found for selected scope.</p>`}
+    </div>
+  </div>`;
+}
+
+function offerUserPickersHtml(offer = {}, scope = offerPrimaryScope(offer)) {
+  const eligibility = offer.metadata?.eligibility || {};
+  const includedMode = eligibility.includedUserIdsMode || eligibility.offerForMode || (offer.audienceType === "selected_users" ? "selected" : "all");
+  const excludedMode = eligibility.excludedUserIdsMode || eligibility.offerNotForMode || "selected";
+  return `<div id="offerUserPickers" class="offer-user-pickers">
+    ${offerUserPickerHtml("includedUserIds", "Offer For", offer.includedUserIds || [], includedMode, scope)}
+    ${offerUserPickerHtml("excludedUserIds", "Offer not for", offer.excludedUserIds || [], excludedMode, scope)}
+  </div>`;
+}
+
+function refreshOfferUserPickers(form = $("#offerMasterForm")) {
+  const host = $("#offerUserPickers");
+  if (!form || !host) return;
+  const scope = offerScopeFromForm(form);
+  const offer = {
+    audienceType: form.elements.includedUserIdsMode?.value === "selected" ? "selected_users" : "all",
+    includedUserIds: offerCheckedValues("includedUserIds"),
+    excludedUserIds: offerCheckedValues("excludedUserIds"),
+    metadata: {
+      eligibility: {
+        includedUserIdsMode: form.elements.includedUserIdsMode?.value || "all",
+        excludedUserIdsMode: form.elements.excludedUserIdsMode?.value || "selected"
+      }
+    }
+  };
+  host.outerHTML = offerUserPickersHtml(offer, scope);
+}
+
+function offerSyncUserSelectAll(form = $("#offerMasterForm")) {
+  if (!form) return;
+  ["includedUserIds", "excludedUserIds"].forEach((name) => {
+    const boxes = [...form.querySelectorAll(`[data-offer-picker="${name}"]`)];
+    const all = form.querySelector(`[data-offer-select-all-users="${name}"]`);
+    if (all) all.checked = boxes.length > 0 && boxes.every((input) => input.checked);
+  });
+}
+
+function syncOfferPickerSelectAll(form = $("#offerMasterForm")) {
+  if (!form) return;
+  const serviceBoxes = [...form.querySelectorAll('[data-offer-picker="serviceMasterIds"]')];
+  const serviceAll = form.querySelector('[data-offer-select-all="serviceMasterIds"]');
+  if (serviceAll) serviceAll.checked = serviceBoxes.length > 0 && serviceBoxes.every((input) => input.checked);
+  const categoryBoxes = [...form.querySelectorAll('[data-offer-picker="categoryIds"]')];
+  const categoryAll = form.querySelector('[data-offer-select-all="categoryIds"]');
+  if (categoryAll) categoryAll.checked = categoryBoxes.length > 0 && categoryBoxes.every((input) => input.checked);
+  form.querySelectorAll("[data-offer-select-service-categories]").forEach((input) => {
+    const serviceId = input.dataset.offerSelectServiceCategories || "";
+    const groupBoxes = [...form.querySelectorAll("[data-offer-category-service-id]")]
+      .filter((box) => String(box.dataset.offerCategoryServiceId || "") === String(serviceId));
+    input.checked = groupBoxes.length > 0 && groupBoxes.every((box) => box.checked);
+  });
+  offerSyncUserSelectAll(form);
+}
+
+function refreshOfferCategoryPicker() {
+  const form = $("#offerMasterForm");
+  const host = $("#offerCategoryPicker");
+  if (!form || !host) return;
+  const selectedCategories = offerCheckedValues("categoryIds");
+  const selectedServices = offerSelectedServiceIds(form);
+  host.innerHTML = offerCategoryPickerHtml(selectedCategories, selectedServices);
+  syncOfferPickerSelectAll(form);
+}
+
+function offerDurationOptions(selected = []) {
+  const selectedSet = new Set(selected.map(String));
+  const rows = (cache.categoryPrices || []).filter((item) => item.isDurationForOffers === true && item.isOfferEligible !== false);
+  if (!rows.length) return `<p class="helper-text mb-0">No offer-enabled durations configured in Category Price.</p>`;
+  return `<div class="category-price-available-group offer-picker-group" role="group">
+    ${rows.map((item) => {
+      const title = [item.categoryName, item.label || `${item.timeDurationMinutes || 0} min`, priceMasterMoneyText(item.sellingPrice || 0)].filter(Boolean).join(" - ");
+      return `<label><input type="checkbox" data-offer-picker="durationIds" value="${escapeHtml(item.id)}" ${selectedSet.has(String(item.id)) ? "checked" : ""}> ${escapeHtml(title)}</label>`;
+    }).join("")}
+  </div>`;
+}
+
+function offerFormHtml(offer = {}) {
+  const serviceMasterIds = offer.serviceMasterIds || [];
+  const categoryIds = offer.categoryIds || [];
+  const durationIds = offer.durationIds || [];
+  const paymentModeIds = offer.paymentModeIds || [];
+  const bookingTypes = offer.bookingTypes || [];
+  const contentItems = offer.contentItems || [];
+  const priceRule = offer.metadata?.priceRule || {};
+  const scope = offerPrimaryScope(offer);
+  return `<form class="master-form stack" data-form="offer-master" id="offerMasterForm">
+    <input type="hidden" name="id" value="${escapeHtml(offer.id || "")}">
+    <div class="control-title"><div><p>Basic Information</p><h3>Offer Setup</h3></div><span>${escapeHtml(offer.status || "DRAFT")}</span></div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Internal Name", `<input class="form-control" name="internalName" maxlength="160" value="${escapeHtml(offer.internalName || offer.title || "")}" required>`)}
+      ${priceMasterFloatingField("Offer Type", `<select class="form-select" name="offerType" required><option value="PACKAGE" ${offer.offerType === "PACKAGE" ? "selected" : ""}>Package</option><option value="DISCOUNT" ${offer.offerType === "DISCOUNT" ? "selected" : ""}>Discount</option><option value="BUY_X_GET_Y" ${offer.offerType === "BUY_X_GET_Y" ? "selected" : ""}>Buy X Get Y</option><option value="FREE_SERVICE" ${offer.offerType === "FREE_SERVICE" ? "selected" : ""}>Free Service</option><option value="CREDIT" ${offer.offerType === "CREDIT" ? "selected" : ""}>Credit</option><option value="FIXED_PRICE" ${offer.offerType === "FIXED_PRICE" ? "selected" : ""}>Fixed Price</option></select>`)}
+      ${priceMasterFloatingField("Status", `<select class="form-select" name="status"><option value="DRAFT" ${offer.status === "DRAFT" || !offer.status ? "selected" : ""}>Draft</option><option value="SCHEDULED" ${offer.status === "SCHEDULED" ? "selected" : ""}>Scheduled</option><option value="ACTIVE" ${offer.status === "ACTIVE" ? "selected" : ""}>Active</option><option value="PAUSED" ${offer.status === "PAUSED" ? "selected" : ""}>Paused</option><option value="ARCHIVED" ${offer.status === "ARCHIVED" ? "selected" : ""}>Archived</option></select>`)}
+      ${priceMasterFloatingField("Priority", `<input class="form-control" name="priority" type="number" min="0" step="1" value="${escapeHtml(offer.priority ?? 0)}">`)}
+    </div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Offer Title", `<input class="form-control" name="title" maxlength="180" value="${escapeHtml(offer.title || "")}" required>`)}
+      ${priceMasterFloatingField("Offer Sub-title", `<input class="form-control" name="subtitle" maxlength="300" value="${escapeHtml(offer.subtitle || "")}">`)}
+    </div>
+    <textarea class="form-control" name="description" rows="2" placeholder="Offer description">${escapeHtml(offer.description || "")}</textarea>
+    <textarea class="form-control" name="note" rows="2" placeholder="Offer note / terms">${escapeHtml(offer.note || "")}</textarea>
+    <div class="master-form compact mb-0">
+      ${offerUploadControl("offerIcon", "iconUrl", offer.iconUrl || "", "Offer Icon")}
+      ${offerUploadControl("offerImage", "imageUrl", offer.imageUrl || "", "Offer Image / GIF")}
+    </div>
+    <div class="control-title"><div><p>Scope and Users</p><h3>Eligibility Audience</h3></div><span>fail closed</span></div>
+    ${offerScopeDropdownsHtml(scope)}
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("User Segment", `<select class="form-select" name="userSegment"><option value="all" ${offer.userSegment === "all" || !offer.userSegment ? "selected" : ""}>All users</option><option value="new" ${offer.userSegment === "new" ? "selected" : ""}>New users</option><option value="old" ${offer.userSegment === "old" ? "selected" : ""}>Old users</option></select>`)}
+    </div>
+    ${offerUserPickersHtml(offer, scope)}
+    <div class="control-title"><div><p>Services and Durations</p><h3>Targeting</h3></div><span>Category Master</span></div>
+    <p class="helper-text mb-0">Service Master</p>${offerServicePickerGroup(serviceMasterIds)}
+    <p class="helper-text mb-0">Categories</p><div id="offerCategoryPicker">${offerCategoryPickerHtml(categoryIds, serviceMasterIds)}</div>
+    <p class="helper-text mb-0">Booking Type</p>
+    <div class="category-price-available-group offer-picker-group">
+      ${["instant", "schedule", "both"].map((type) => `<label><input type="checkbox" data-offer-picker="bookingTypes" value="${type}" ${bookingTypes.includes(type) ? "checked" : ""}> ${escapeHtml(type)}</label>`).join("")}
+    </div>
+    <p class="helper-text mb-0">Offer-enabled durations</p>${offerDurationOptions(durationIds)}
+    <div class="control-title"><div><p>Price Rule</p><h3>Offer Price Setup</h3></div><span>server calculated</span></div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("No. of Bookings", `<input class="form-control" name="priceRuleBookings" type="number" min="1" step="1" value="${escapeHtml(priceRule.noOfBookings ?? offer.buyQuantity ?? 1)}">`)}
+      ${priceMasterFloatingField("Duration Per Booking (mins)", `<input class="form-control" name="priceRuleDurationMinutes" type="number" min="1" step="1" value="${escapeHtml(priceRule.durationPerBookingMinutes ?? "")}">`)}
+      ${priceMasterFloatingField("Base Price", `<input class="form-control" name="priceRuleBasePrice" type="number" min="0" step="0.01" value="${escapeHtml(priceRule.basePrice ?? "")}">`)}
+      ${priceMasterFloatingField("Discount Type", `<select class="form-select" name="discountType"><option value="none" ${offer.discountType === "none" || !offer.discountType ? "selected" : ""}>None</option><option value="percent" ${offer.discountType === "percent" ? "selected" : ""}>Percent</option><option value="flat" ${offer.discountType === "flat" ? "selected" : ""}>Flat</option></select>`)}
+      ${priceMasterFloatingField("Discount Value", `<input class="form-control" name="discountValue" type="number" min="0" step="0.01" value="${escapeHtml(offer.discountValue ?? 0)}">`)}
+      ${priceMasterFloatingField("Discount Amount", `<input class="form-control" name="priceRuleDiscountAmount" type="number" min="0" step="0.01" value="${escapeHtml(priceRule.discountAmount ?? "")}">`)}
+      ${priceMasterFloatingField("Selling Price", `<input class="form-control" name="priceRuleSellingPrice" type="number" min="0" step="0.01" value="${escapeHtml(priceRule.sellingPrice ?? (offer.packagePricePaise ? Number(offer.packagePricePaise || 0) / 100 : ""))}">`)}
+    </div>
+    <div class="control-title"><div><p>Validity and Redemption</p><h3>Limits</h3></div><span>ledger protected</span></div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Validity Mode", `<select class="form-select" name="validityMode"><option value="fixed_dates" ${offer.validityMode === "fixed_dates" || !offer.validityMode ? "selected" : ""}>Date range</option><option value="days_from_purchase" ${offer.validityMode === "days_from_purchase" ? "selected" : ""}>Days from purchase</option><option value="days_from_issue" ${offer.validityMode === "days_from_issue" ? "selected" : ""}>Days from issue</option><option value="days_from_first_use" ${offer.validityMode === "days_from_first_use" ? "selected" : ""}>Days from first use</option><option value="no_expiry" ${offer.validityMode === "no_expiry" ? "selected" : ""}>No expiry</option></select>`)}
+      ${priceMasterFloatingField("Active From", `<input class="form-control" name="activeFrom" type="datetime-local" value="${escapeHtml(offerDatetimeLocal(offer.activeFrom))}">`)}
+      ${priceMasterFloatingField("Active Until", `<input class="form-control" name="activeUntil" type="datetime-local" value="${escapeHtml(offerDatetimeLocal(offer.activeUntil))}">`)}
+      ${priceMasterFloatingField("Valid Days", `<input class="form-control" name="validDays" type="number" min="0" step="1" value="${escapeHtml(offer.validDays ?? "")}">`)}
+      ${priceMasterFloatingField("Redeem / User", `<input class="form-control" name="redeemLimitPerUser" type="number" min="1" step="1" value="${escapeHtml(offer.redeemLimitPerUser ?? 1)}">`)}
+      ${priceMasterFloatingField("Total Limit", `<input class="form-control" name="redeemLimitTotal" type="number" min="0" step="1" value="${escapeHtml(offer.redeemLimitTotal ?? "")}">`)}
+    </div>
+    <div class="control-title"><div><p>Payment, Codes and Referrals</p><h3>Restrictions</h3></div><span>optional</span></div>
+    <p class="helper-text mb-0">Payment Modes</p>${offerCheckboxGroup("paymentModeIds", activeItems(cache.paymentModes), "title", paymentModeIds)}
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Offer Code", `<input class="form-control" name="publicCode" maxlength="80" value="${escapeHtml(offer.publicCode || "")}">`)}
+      ${priceMasterFloatingField("Common Referral Code", `<input class="form-control" name="commonReferralCode" maxlength="80" value="${escapeHtml(offer.commonReferralCode || "")}">`)}
+      ${priceMasterFloatingField("Referral Scope", `<select class="form-select" name="referralScope"><option value="none" ${offer.referralScope === "none" || !offer.referralScope ? "selected" : ""}>None</option><option value="all_assistants" ${offer.referralScope === "all_assistants" ? "selected" : ""}>All assistants</option><option value="selected_assistants" ${offer.referralScope === "selected_assistants" ? "selected" : ""}>Selected assistants</option></select>`)}
+    </div>
+    <label class="form-check"><input class="form-check-input" type="checkbox" name="referralEnabled" ${offer.referralEnabled ? "checked" : ""}> Enable referral codes</label>
+    <textarea class="form-control" name="referralCodes" rows="2" placeholder="Referral codes, one per line. Format: code or assistantId:code">${escapeHtml((offer.referralCodes || []).map((item) => [item.assistantId, item.code].filter(Boolean).join(":")).join("\n"))}</textarea>
+    <div class="control-title"><div><p>Content and Terms</p><h3>Offer Details</h3></div><span>customer visible</span></div>
+    ${["service", "do", "dont"].map((type) => `<div class="category-price-duration-card"><div class="control-title"><div><p>${escapeHtml(type === "service" ? "Offer Services" : type === "do" ? "Offer Dos" : "Offer Don'ts")}</p><h3>${escapeHtml(type === "service" ? "What we'll provide" : type === "do" ? "What we'll do" : "What we'll not do")}</h3></div><button class="btn btn-soft btn-sm" data-action="add-offer-content-row" data-type="${escapeHtml(type)}" type="button">Add Row</button></div><div data-offer-content-host="${escapeHtml(type)}">${(contentItems.filter((item) => item.contentType === type).length ? contentItems.filter((item) => item.contentType === type) : [{}]).map((item) => offerContentRowHtml(type, item)).join("")}</div></div>`).join("")}
+    <div class="category-price-available-group">
+      <label><input type="checkbox" name="customOfferExclusive" ${offer.customOfferExclusive !== false ? "checked" : ""}> Custom offer exclusive</label>
+      <label><input type="checkbox" name="fallbackToGeneralOffer" ${offer.fallbackToGeneralOffer ? "checked" : ""}> Fallback to general offer</label>
+      <label><input type="checkbox" name="stackingAllowed" ${offer.stackingAllowed ? "checked" : ""}> Allow stacking</label>
+      <label><input type="checkbox" name="autoApply" ${offer.autoApply ? "checked" : ""}> Auto apply</label>
+      <label><input type="checkbox" name="isEnabled" ${offer.isEnabled !== false ? "checked" : ""}> Enable</label>
+      <label><input type="checkbox" name="isActive" ${offer.isActive !== false ? "checked" : ""}> Active</label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="offerMasterSubmitButton">${offer.id ? "Update Offer" : "Create Offer"}</button>
+      <button class="btn btn-outline-secondary ${offer.id ? "" : "d-none"}" id="cancelOfferEditButton" data-action="cancel-offer-edit" type="button">Cancel</button>
+    </div>
+  </form>`;
+}
+
+function offerRows(items = []) {
+  if (!items.length) return `<tr><td colspan="8">No offers found.</td></tr>`;
+  return items.map((item) => {
+    const dates = [item.activeFrom ? formatDate(item.activeFrom) : "Now", item.activeUntil ? formatDate(item.activeUntil) : "No expiry"].join(" - ");
+    const payment = item.paymentModes?.length ? item.paymentModes.join(", ") : "Any";
+    const redemptions = `${item.consumedCount || 0}/${item.redemptionCount || 0}`;
+    return `<tr>
+      <td><b>${escapeHtml(item.title || "-")}</b><br><span class="text-secondary">${escapeHtml(item.internalName || "")}</span></td>
+      <td>${escapeHtml(offerTypeLabel(item.offerType))}</td>
+      <td>${escapeHtml(item.audienceType === "selected_users" ? "Selected users" : "All users")}<br><span class="text-secondary">${escapeHtml(item.userSegment || "all")}</span></td>
+      <td>${escapeHtml(dates)}</td>
+      <td>${escapeHtml(payment)}</td>
+      <td>${escapeHtml(redemptions)}</td>
+      <td>${status(offerStatusText(item.status))}</td>
+      <td class="text-end">
+        <button class="btn btn-sm btn-outline-primary" data-action="edit-offer" data-id="${escapeHtml(item.id)}" type="button">Edit</button>
+        <button class="btn btn-sm btn-outline-secondary" data-action="validate-offer" data-id="${escapeHtml(item.id)}" type="button">Validate</button>
+        <button class="btn btn-sm btn-primary" data-action="publish-offer" data-id="${escapeHtml(item.id)}" type="button">Publish</button>
+        <button class="btn btn-sm btn-outline-warning" data-action="pause-offer" data-id="${escapeHtml(item.id)}" type="button">Pause</button>
+        <button class="btn btn-sm btn-outline-danger" data-action="archive-offer" data-id="${escapeHtml(item.id)}" type="button">Archive</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+function offerFilterBar() {
+  return `<div class="report-filters">
+    ${priceMasterFloatingField("Search", `<input class="form-control" data-offer-filter="search" type="search" value="${escapeHtml(offerFilters.search || "")}" placeholder="Offer title, code, type">`)}
+    ${priceMasterFloatingField("Status", `<select class="form-select" data-offer-filter="status"><option value="all">All Status</option><option value="DRAFT">Draft</option><option value="SCHEDULED">Scheduled</option><option value="ACTIVE">Active</option><option value="PAUSED">Paused</option><option value="EXPIRED">Expired</option><option value="ARCHIVED">Archived</option></select>`)}
+    ${priceMasterFloatingField("Type", `<select class="form-select" data-offer-filter="offerType"><option value="all">All Types</option><option value="PACKAGE">Package</option><option value="DISCOUNT">Discount</option><option value="BUY_X_GET_Y">Buy X Get Y</option><option value="FREE_SERVICE">Free Service</option><option value="CREDIT">Credit</option><option value="FIXED_PRICE">Fixed Price</option></select>`)}
+    ${priceMasterFloatingField("Rows", `<select class="form-select" data-offer-filter="pageSize"><option value="20">20</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select>`)}
+    <button class="btn btn-primary" data-action="apply-offer-filters" type="button">Apply</button>
+  </div>`;
+}
+
+function renderOfferMasterReport() {
+  const report = $("#offerMasterReport");
+  if (!report) return;
+  report.innerHTML = table(["Title", "Type", "Audience", "Active Dates", "Payment Modes", "Redemptions", "Status", ""], offerRows(cache.offers || []));
+  document.querySelectorAll("[data-offer-filter]").forEach((input) => {
+    input.value = offerFilters[input.dataset.offerFilter] || (input.dataset.offerFilter === "pageSize" ? "20" : "all");
+  });
+}
+
+function collectOfferPayload(form) {
+  const data = formObject(form);
+  const sellingPricePaise = data.priceRuleSellingPrice === "" ? null : Math.round(Number(data.priceRuleSellingPrice || 0) * 100);
+  const scope = offerScopeFromForm(form);
+  const scopedUserIds = offerScopedCustomers(scope).map(offerCustomerUserId).filter(Boolean);
+  const includedUserIdsMode = data.includedUserIdsMode || "all";
+  const excludedUserIdsMode = data.excludedUserIdsMode || "selected";
+  const includedUserIds = includedUserIdsMode === "all" ? [] : offerCheckedValues("includedUserIds");
+  const excludedUserIds = excludedUserIdsMode === "all" ? scopedUserIds : offerCheckedValues("excludedUserIds");
+  const referralCodes = String(data.referralCodes || "").split(/\n+/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const parts = line.split(":").map((part) => part.trim()).filter(Boolean);
+    return parts.length > 1 ? { assistantId: parts[0], code: parts.slice(1).join(":") } : { code: parts[0] };
+  });
+  return {
+    internalName: data.internalName || data.title,
+    offerType: data.offerType || "DISCOUNT",
+    status: data.status || "DRAFT",
+    title: data.title || "",
+    subtitle: data.subtitle || null,
+    description: data.description || null,
+    note: data.note || null,
+    iconUrl: data.iconUrl || null,
+    imageUrl: data.imageUrl || null,
+    priority: Number(data.priority || 0),
+    customOfferExclusive: Boolean(data.customOfferExclusive),
+    fallbackToGeneralOffer: Boolean(data.fallbackToGeneralOffer),
+    stackingAllowed: Boolean(data.stackingAllowed),
+    audienceType: includedUserIdsMode === "selected" ? "selected_users" : "all",
+    userSegment: data.userSegment || "all",
+    validityMode: data.validityMode || "fixed_dates",
+    activeFrom: data.activeFrom || null,
+    activeUntil: data.activeUntil || null,
+    validDays: data.validDays === "" ? null : Number(data.validDays || 0),
+    redeemLimitPerUser: Number(data.redeemLimitPerUser || 1),
+    redeemLimitTotal: data.redeemLimitTotal === "" ? null : Number(data.redeemLimitTotal || 0),
+    autoApply: Boolean(data.autoApply),
+    publicCode: data.publicCode || null,
+    referralEnabled: Boolean(data.referralEnabled),
+    referralScope: data.referralScope || "none",
+    commonReferralCode: data.commonReferralCode || null,
+    discountType: data.discountType || "none",
+    discountValue: Number(data.discountValue || 0),
+    discountCapPaise: null,
+    fixedPricePaise: sellingPricePaise,
+    buyQuantity: data.priceRuleBookings === "" ? null : Number(data.priceRuleBookings || 0),
+    freeQuantity: null,
+    creditAmountPaise: null,
+    packagePricePaise: sellingPricePaise,
+    scopes: [{
+      scopeType: scope.scopeType || "all",
+      stateId: scope.stateId || null,
+      cityId: scope.cityId || null,
+      zoneId: scope.zoneId || null,
+      clusterId: scope.clusterId || null
+    }],
+    includedUserIds,
+    excludedUserIds,
+    serviceMasterIds: offerCheckedValues("serviceMasterIds"),
+    categoryIds: offerCheckedValues("categoryIds"),
+    bookingTypes: offerCheckedValues("bookingTypes"),
+    durationIds: offerCheckedValues("durationIds"),
+    paymentModeIds: offerCheckedValues("paymentModeIds"),
+    referralCodes,
+    contentItems: [...offerContentRows("service"), ...offerContentRows("do"), ...offerContentRows("dont")],
+    isEnabled: Boolean(data.isEnabled),
+    isActive: Boolean(data.isActive),
+    metadata: {
+      source: "admin_offer_master",
+      eligibility: {
+        includedUserIdsMode,
+        excludedUserIdsMode,
+        scope
+      },
+      priceRule: {
+        noOfBookings: data.priceRuleBookings === "" ? null : Number(data.priceRuleBookings || 0),
+        durationPerBookingMinutes: data.priceRuleDurationMinutes === "" ? null : Number(data.priceRuleDurationMinutes || 0),
+        basePrice: data.priceRuleBasePrice === "" ? null : Number(data.priceRuleBasePrice || 0),
+        discountType: data.discountType || "none",
+        discountValue: Number(data.discountValue || 0),
+        discountAmount: data.priceRuleDiscountAmount === "" ? null : Number(data.priceRuleDiscountAmount || 0),
+        sellingPrice: data.priceRuleSellingPrice === "" ? null : Number(data.priceRuleSellingPrice || 0)
+      }
+    }
+  };
+}
+
+function resetOfferMasterForm() {
+  editingOfferId = null;
+  const form = $("#offerMasterForm");
+  if (!form) return;
+  form.outerHTML = offerFormHtml({});
+}
+
+async function loadOfferMaster() {
+  const params = new URLSearchParams();
+  params.set("page", String(offerFilters.page || 1));
+  params.set("pageSize", String(offerFilters.pageSize || 20));
+  if (offerFilters.search) params.set("search", offerFilters.search);
+  if (offerFilters.status) params.set("status", offerFilters.status);
+  if (offerFilters.offerType) params.set("offerType", offerFilters.offerType);
+  const [offers, serviceMasters, categories, categoryPrices, paymentModes, states, cities, zones, clusters, customers] = await Promise.all([
+    safeApi(`/offers?${params.toString()}`),
+    safeApi("/masters/category-service-masters"),
+    safeApi("/masters/categories"),
+    safeApi("/masters/category-prices"),
+    safeApi("/masters/payment-modes"),
+    safeApi("/masters/states"),
+    safeApi("/masters/cities"),
+    safeApi("/masters/zones"),
+    safeApi("/masters/clusters"),
+    safeApi("/admin-customers")
+  ]);
+  cache.offers = offers.data || [];
+  cache.offersPagination = offers.pagination || null;
+  cache.categoryServices = serviceMasters.data || [];
+  cache.categories = categories.data || [];
+  cache.categoryPrices = categoryPrices.data || [];
+  cache.paymentModes = paymentModes.data || [];
+  cache.states = states.data || [];
+  cache.cities = cities.data || [];
+  cache.zones = zones.data || [];
+  cache.clusters = clusters.data || [];
+  cache.offerCustomers = customers.data || [];
+  $("#offerMasterSection").innerHTML =
+    pageTitleBlock("Offer Master", "Create packages, discounts, referral offers, redemption rules, and customer entitlements") +
+    `<div class="master-grid single-column">
+      ${panel("Create / Edit Offer", "Backend validates eligibility, pricing, payment mode restrictions, and redemption safety", offerFormHtml({}))}
+      ${panel("Offers", "Validate, publish, pause, archive, and audit offer configurations", offerFilterBar() + `<div id="offerMasterReport"></div>`)}
+    </div>`;
+  renderOfferMasterReport();
 }
 
 function taxMasterLabel(value = "") {
@@ -6934,6 +7584,73 @@ function renderReviewsReport() {
     </div>`;
 }
 
+function unserviceableLocationsReportRows(items = []) {
+  return items.map((row) => `<tr>
+    <td><b>${escapeHtml(row.customerName || row.customerCode || "Customer")}</b>${reportIdWithCopy(row.customerId, "customer ID")}${reportCellNote(reportMobileNumber(row.customerPhone))}</td>
+    <td><b>${escapeHtml(row.locationTitle || "Location not serviceable")}</b>${reportCellNote(row.address || "-")}</td>
+    <td><b>${escapeHtml([row.cityName, row.stateName].filter(Boolean).join(", ") || "-")}</b>${reportCellNote(row.postalCode || "-")}</td>
+    <td>${escapeHtml([row.latitude, row.longitude].filter((value) => value !== null && value !== undefined && value !== "").join(", ") || "-")}</td>
+    <td><span class="mini-badge warning">${escapeHtml(String(row.hitCount || 0))}</span></td>
+    <td>${escapeHtml(formatDate(row.lastSeenAt))}${reportCellNote(`First seen: ${formatDate(row.firstSeenAt)}`)}</td>
+  </tr>`).join("");
+}
+
+function unserviceableLocationReportQuery(page, pageSize) {
+  const filters = getAdminReportFilter("unserviceableLocationsReport");
+  const params = new URLSearchParams({
+    page: String(page),
+    pageSize: String(pageSize),
+    startDate: filters.startDate,
+    endDate: filters.endDate,
+    search: filters.search || ""
+  });
+  return params.toString();
+}
+
+async function fetchAllUnserviceableLocationReportRows() {
+  const rows = [];
+  let page = 1;
+  let totalPages = 1;
+  do {
+    const payload = await api(`/operations/unserviceable-locations?${unserviceableLocationReportQuery(page, 1000)}`);
+    const data = payload.data || {};
+    rows.push(...(data.rows || []));
+    totalPages = Math.max(1, Number(data.pagination?.totalPages || 1));
+    page += 1;
+  } while (page <= totalPages);
+  return rows;
+}
+
+async function loadUnserviceableLocationsReport() {
+  const filters = getAdminReportFilter("unserviceableLocationsReport");
+  const showAll = String(filters.pageSize).toLowerCase() === "all";
+  if (showAll) {
+    cache.unserviceableLocationsReport = await fetchAllUnserviceableLocationReportRows();
+    cache.unserviceableLocationsReportPagination = { page: 1, pageSize: Math.max(1, cache.unserviceableLocationsReport.length), totalRecords: cache.unserviceableLocationsReport.length, totalPages: 1 };
+  } else {
+    const pageSize = Math.max(5, Math.min(1000, Number(filters.pageSize || 50)));
+    const payload = await api(`/operations/unserviceable-locations?${unserviceableLocationReportQuery(filters.page, pageSize)}`);
+    const data = payload.data || {};
+    cache.unserviceableLocationsReport = data.rows || [];
+    cache.unserviceableLocationsReportPagination = data.pagination || { page: 1, pageSize, totalRecords: 0, totalPages: 1 };
+  }
+  renderUnserviceableLocationsReport();
+}
+
+function renderUnserviceableLocationsReport() {
+  const pagination = cache.unserviceableLocationsReportPagination || { page: 1, pageSize: 50, totalRecords: 0, totalPages: 1 };
+  const normalized = {
+    ...pagination,
+    start: pagination.totalRecords ? (pagination.page - 1) * pagination.pageSize + 1 : 0,
+    end: Math.min(pagination.totalRecords, pagination.page * pagination.pageSize)
+  };
+  $("#unserviceableLocationsReportSection").innerHTML =
+    pageTitleBlock("Not Serviceable Locations", "Customer demand captured outside active service clusters") +
+    `<div class="master-grid single-column">
+      ${panel("Not Serviceable Locations", "Search and filter locations customers tried to confirm outside active clusters", adminReportToolbar("unserviceableLocationsReport", "Search customer, phone, address, city, state, pincode") + table(["Customer", "Location", "Area", "Coordinates", "Hits", "Last Seen"], unserviceableLocationsReportRows(cache.unserviceableLocationsReport)) + adminReportPagination("unserviceableLocationsReport", normalized))}
+    </div>`;
+}
+
 function adminReportDefinition(reportKey) {
   if (reportKey === "bookingsReport") {
     return {
@@ -6987,6 +7704,15 @@ function adminReportDefinition(reportKey) {
       exportRow: (review) => [review.bookingNumber || review.bookingId, review.customerName || review.customerCode, review.customerId || review.customerUserId, reportMobileNumber(review.customerPhone), review.assistantName || review.assistantCode, review.assistantId, reportMobileNumber(review.assistantPhone), review.categoryName, reportPlainText(review.serviceMasterName), reviewRatingValue(review.overallRating), reviewRatingValue(review.zigoRating), reviewRatingValue(review.serviceRating), reviewRatingValue(review.assistantRating), review.reviewText, formatDate(review.createdAt)]
     };
   }
+  if (reportKey === "unserviceableLocationsReport") {
+    return {
+      rows: cache.unserviceableLocationsReport || [],
+      dateAccessor: (row) => row.lastSeenAt,
+      render: renderUnserviceableLocationsReport,
+      headers: ["Customer", "Customer ID", "Mobile", "Location Title", "Address", "State", "City", "Pincode", "Latitude", "Longitude", "Hits", "First Seen", "Last Seen"],
+      exportRow: (row) => [row.customerName || row.customerCode, row.customerId, reportMobileNumber(row.customerPhone), row.locationTitle, row.address, row.stateName, row.cityName, row.postalCode, row.latitude, row.longitude, row.hitCount, formatDate(row.firstSeenAt), formatDate(row.lastSeenAt)]
+    };
+  }
   return null;
 }
 
@@ -7003,6 +7729,7 @@ async function applyAdminReportFilters(reportKey) {
   if (reportKey === "bookingsReport") await loadBookingsReport();
   else if (reportKey === "assistantTaskReport") await loadAssistantTaskReport();
   else if (reportKey === "reviewsReport") await loadReviewsReport();
+  else if (reportKey === "unserviceableLocationsReport") await loadUnserviceableLocationsReport();
   else definition.render();
 }
 
@@ -7011,6 +7738,11 @@ async function exportAdminReport(reportKey) {
   if (!definition) return;
   if (reportKey === "reviewsReport") {
     const rows = await fetchAllReviewReportRows();
+    downloadAdminReportCsv(reportKey, definition.headers, rows.map(definition.exportRow));
+    return;
+  }
+  if (reportKey === "unserviceableLocationsReport") {
+    const rows = await fetchAllUnserviceableLocationReportRows();
     downloadAdminReportCsv(reportKey, definition.headers, rows.map(definition.exportRow));
     return;
   }
@@ -15096,11 +15828,13 @@ const loaders = {
   operations: loadOperations,
   bookings: loadBookings,
   payments: loadPayments,
+  offerMaster: loadOfferMaster,
   bookingsReport: loadBookingsReport,
   customerReport: loadCustomerReport,
   assistantReport: loadAssistantReport,
   assistantTaskReport: loadAssistantTaskReport,
   reviewsReport: loadReviewsReport,
+  unserviceableLocationsReport: loadUnserviceableLocationsReport,
   customerDisputes: loadCustomerDisputes,
   supportTickets: loadSupportTickets,
   bookingMaster: loadBookingMaster,
@@ -15137,11 +15871,13 @@ const titles = {
   operations: "Operations",
   bookings: "Bookings",
   payments: "Payments",
+  offerMaster: "Offer Master",
   bookingsReport: "Bookings Report",
   customerReport: "Customer Report",
   assistantReport: "Assistant Report",
   assistantTaskReport: "Assistant Task Report",
   reviewsReport: "Reviews Report",
+  unserviceableLocationsReport: "Not Serviceable Locations",
   customerDisputes: "Customer Disputes",
   supportTickets: "Customer Support",
   bookingMaster: "Booking Master",
@@ -15937,6 +16673,19 @@ document.addEventListener("submit", async (event) => {
   try {
     const data = formObject(form);
     const formName = form.dataset.form;
+    if (formName === "offer-master") {
+      const payload = collectOfferPayload(form);
+      if (editingOfferId) {
+        await api(`/offers/${editingOfferId}`, { method: "PUT", body: JSON.stringify(payload) });
+        showAlert("Offer updated successfully.", "success");
+      } else {
+        await api("/offers", { method: "POST", body: JSON.stringify(payload) });
+        showAlert("Offer created successfully.", "success");
+      }
+      editingOfferId = null;
+      await loadOfferMaster();
+      return;
+    }
     if (formName === "module") {
       const body = { Name: data.Name, Description: data.Description || null, IsActive: form.elements.IsActive.checked };
       if (editingModuleId) await api(`/access/modules/${editingModuleId}`, { method: "PUT", body: JSON.stringify(body) });
@@ -16986,6 +17735,7 @@ document.addEventListener("input", (event) => {
     if (adminReportSearchTimers[reportKey]) clearTimeout(adminReportSearchTimers[reportKey]);
     adminReportSearchTimers[reportKey] = setTimeout(() => {
       if (reportKey === "reviewsReport") loadReviewsReport().catch((error) => showAlert(error.message));
+      else if (reportKey === "unserviceableLocationsReport") loadUnserviceableLocationsReport().catch((error) => showAlert(error.message));
       else definition.render();
     }, 250);
     return;
@@ -16994,6 +17744,72 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   const input = event.target;
+  if (input instanceof HTMLInputElement && input.matches("[data-offer-image-upload]")) {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const box = input.closest("[data-offer-upload-box]");
+      await uploadOfferImageFile(file, box);
+    } catch (error) {
+      showAlert(error.message || "Unable to upload offer image.");
+    } finally {
+      input.value = "";
+    }
+    return;
+  }
+  if (input.closest?.("#offerMasterForm") && (input instanceof HTMLInputElement || input instanceof HTMLSelectElement)) {
+    const form = input.closest("#offerMasterForm");
+    if (["scopeType", "stateId", "cityId", "zoneId", "clusterId"].includes(input.name || "")) {
+      refreshOfferUserPickers(form);
+      return;
+    }
+    if (["includedUserIdsMode", "excludedUserIdsMode"].includes(input.name || "")) {
+      refreshOfferUserPickers(form);
+      return;
+    }
+    if (input.dataset.offerSelectAllUsers) {
+      const pickerName = input.dataset.offerSelectAllUsers || "";
+      form.querySelectorAll(`[data-offer-picker="${pickerName}"]`).forEach((box) => {
+        box.checked = input.checked;
+      });
+      offerSyncUserSelectAll(form);
+      return;
+    }
+    if (input.dataset.offerPicker === "includedUserIds" || input.dataset.offerPicker === "excludedUserIds") {
+      offerSyncUserSelectAll(form);
+      return;
+    }
+    if (input.dataset.offerSelectAll === "serviceMasterIds") {
+      form.querySelectorAll('[data-offer-picker="serviceMasterIds"]').forEach((box) => {
+        box.checked = input.checked;
+      });
+      refreshOfferCategoryPicker();
+      return;
+    }
+    if (input.dataset.offerPicker === "serviceMasterIds") {
+      refreshOfferCategoryPicker();
+      return;
+    }
+    if (input.dataset.offerSelectAll === "categoryIds") {
+      form.querySelectorAll('[data-offer-picker="categoryIds"]').forEach((box) => {
+        box.checked = input.checked;
+      });
+      syncOfferPickerSelectAll(form);
+      return;
+    }
+    if (input.dataset.offerSelectServiceCategories !== undefined) {
+      const serviceId = String(input.dataset.offerSelectServiceCategories || "");
+      form.querySelectorAll("[data-offer-category-service-id]").forEach((box) => {
+        if (String(box.dataset.offerCategoryServiceId || "") === serviceId) box.checked = input.checked;
+      });
+      syncOfferPickerSelectAll(form);
+      return;
+    }
+    if (input.dataset.offerPicker === "categoryIds") {
+      syncOfferPickerSelectAll(form);
+      return;
+    }
+  }
   if (input.closest?.("#taxMasterForm")) {
     taxMasterEvaluateFormula(input.closest("#taxMasterForm"));
   }
@@ -17938,6 +18754,7 @@ document.addEventListener("click", async (event) => {
     if (!definition) return;
     getAdminReportFilter(reportKey).page = Math.max(1, Number(button.dataset.page || 1));
     if (reportKey === "reviewsReport") await loadReviewsReport();
+    else if (reportKey === "unserviceableLocationsReport") await loadUnserviceableLocationsReport();
     else definition.render();
     return;
   }
@@ -18096,6 +18913,76 @@ document.addEventListener("click", async (event) => {
     }
     if (action === "browse-image") {
       document.getElementById(button.dataset.target)?.click();
+      return;
+    }
+    if (action === "add-offer-content-row") {
+      const type = button.dataset.type || "service";
+      const host = document.querySelector(`[data-offer-content-host="${type}"]`);
+      if (!host) return;
+      host.insertAdjacentHTML("beforeend", offerContentRowHtml(type, {}));
+      host.lastElementChild?.querySelector("input")?.focus();
+      return;
+    }
+    if (action === "remove-offer-content-row") {
+      const row = button.closest("[data-offer-content-row]");
+      const type = row?.dataset.offerContentRow || "";
+      if (!row) return;
+      const rows = [...document.querySelectorAll(`[data-offer-content-row="${type}"]`)];
+      if (rows.length > 1) row.remove();
+      else {
+        row.querySelectorAll("input, textarea").forEach((input) => {
+          input.value = "";
+        });
+        row.querySelectorAll(".upload-preview").forEach((preview) => {
+          preview.innerHTML = "";
+        });
+      }
+      return;
+    }
+    if (action === "cancel-offer-edit") {
+      resetOfferMasterForm();
+      return;
+    }
+    if (action === "apply-offer-filters") {
+      document.querySelectorAll("[data-offer-filter]").forEach((input) => {
+        offerFilters[input.dataset.offerFilter] = input.value || "";
+      });
+      offerFilters.page = 1;
+      await loadOfferMaster();
+      return;
+    }
+    if (action === "edit-offer") {
+      const result = await api(`/offers/${button.dataset.id}`);
+      editingOfferId = button.dataset.id || result.data?.id || null;
+      const form = $("#offerMasterForm");
+      if (form) form.outerHTML = offerFormHtml(result.data || {});
+      $("#offerMasterForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    if (action === "validate-offer") {
+      const result = await api(`/offers/${button.dataset.id}/validate`, { method: "POST", body: JSON.stringify({}) });
+      const errors = result.data?.errors || [];
+      const warnings = result.data?.warnings || [];
+      showAlert(errors.length ? errors.join(" ") : warnings.length ? warnings.join(" ") : "Offer validation passed.", errors.length ? "danger" : warnings.length ? "warning" : "success");
+      return;
+    }
+    if (action === "publish-offer") {
+      await api(`/offers/${button.dataset.id}/publish`, { method: "POST", body: JSON.stringify({}) });
+      showAlert("Offer published.", "success");
+      await loadOfferMaster();
+      return;
+    }
+    if (action === "pause-offer") {
+      await api(`/offers/${button.dataset.id}/pause`, { method: "POST", body: JSON.stringify({}) });
+      showAlert("Offer paused.", "success");
+      await loadOfferMaster();
+      return;
+    }
+    if (action === "archive-offer") {
+      if (!confirm("Archive this offer? Existing historical versions remain available for audit.")) return;
+      await api(`/offers/${button.dataset.id}/archive`, { method: "POST", body: JSON.stringify({}) });
+      showAlert("Offer archived.", "success");
+      await loadOfferMaster();
       return;
     }
     if (action === "close-alert") {
@@ -19305,6 +20192,8 @@ document.addEventListener("click", async (event) => {
         availableForDuration: duration.availableForDuration !== false,
         availableForExtend: duration.availableForExtend === true,
         availableForExpand: duration.availableForExpand === true,
+        isDurationForOffers: duration.isDurationForOffers === true,
+        isOfferEligible: duration.isOfferEligible !== false,
         isEnabled: duration.isEnabled !== false,
         isActive: duration.isActive !== false
       })));

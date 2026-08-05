@@ -6,7 +6,7 @@ import { addBookingRealtimeClient, emitBookingRealtimeEvent, getBookingRealtimeS
 import { runBookingOrchestrationCycle } from "../operations/bookingEngine.js";
 import { pokeBookingOrchestrationWorker } from "../operations/bookingOrchestrator.js";
 import { getBookingEngineSetting } from "../settings/settings.repository.js";
-import { addCustomerPortalCartItem, approvePortalTimeExtension, cancelCustomerPortalBooking, createCustomerPortalBooking, createCustomerPortalDispute, createPortalTaskUpdate, deleteCustomerPortalCartItem, deleteCustomerPortalAddress, getCustomerPortalBookingAvailability, getCustomerPortalDefaultLocation, getCustomerPortalBooking, getCustomerPortalCatalog, getCustomerPortalCart, getPortalConfig, getPortalMe, listPortalBookingQuickReplies, listCustomerPortalAddresses, listCustomerPortalPreviousUsedLocations, listCustomerPortalServiceBoundaries, recordAssistantPortalLocationPing, listAssistantPortalTasks, listCustomerPortalAssistants, listCustomerPortalBookings, loginAssistantPortalWithPassword, markPortalBookingTaskUpdatesRead, requestPortalCode, reverseCustomerPortalLocation, saveCustomerPortalAddress, saveCustomerPortalDefaultLocation, saveCustomerPortalPreviousUsedLocation, setCustomerPortalDefaultAddress, saveCustomerPortalCart, searchCustomerPortalLocations, sendAssistantPasswordResetCode, setAssistantPortalOnline, saveCustomerPortalBookingReview, saveCustomerPortalFavorites, updateAssistantPortalTaskStatus, updateCustomerPortalProfile, updateCustomerPortalBookingTip, updateCustomerPortalAddress, validateCustomerPortalLocation, verifyAssistantPasswordResetCode, verifyPortalCode, verifyPortalToken } from "./portal.repository.js";
+import { addCustomerPortalCartItem, approvePortalTimeExtension, cancelCustomerPortalBooking, createCustomerPortalBooking, createCustomerPortalDispute, createPortalTaskUpdate, deleteCustomerPortalCartItem, deleteCustomerPortalAddress, getCustomerPortalBookingAvailability, getCustomerPortalDefaultLocation, getCustomerPortalBooking, getCustomerPortalCatalog, getCustomerPortalCart, getPortalConfig, getPortalMe, listPortalBookingQuickReplies, listCustomerPortalAddresses, listCustomerPortalPreviousUsedLocations, listCustomerPortalServiceBoundaries, recordAssistantPortalLocationPing, recordCustomerPortalUnserviceableLocation, listAssistantPortalTasks, listCustomerPortalAssistants, listCustomerPortalBookings, loginAssistantPortalWithPassword, markPortalBookingTaskUpdatesRead, requestPortalCode, reverseCustomerPortalLocation, saveCustomerPortalAddress, saveCustomerPortalDefaultLocation, saveCustomerPortalPreviousUsedLocation, setCustomerPortalDefaultAddress, saveCustomerPortalCart, searchCustomerPortalLocations, sendAssistantPasswordResetCode, setAssistantPortalOnline, saveCustomerPortalBookingReview, saveCustomerPortalFavorites, updateAssistantPortalTaskStatus, updateCustomerPortalProfile, updateCustomerPortalBookingTip, updateCustomerPortalAddress, validateCustomerPortalLocation, verifyAssistantPasswordResetCode, verifyPortalCode, verifyPortalToken } from "./portal.repository.js";
 import { pokeBookingInvoiceEmailWorker } from "./bookingInvoice.worker.js";
 import { saveDocumentUpload } from "../settings/settings.repository.js";
 import { createRazorpayPaymentOrder, getCustomerRazorpayOrderStatus, verifyAndSaveRazorpayPayment } from "../payments/payments.repository.js";
@@ -89,6 +89,14 @@ const customerPreviousUsedLocationBodySchema = customerLocationValidationBodySch
     address: z.string().trim().min(3).max(2000),
     stateName: z.string().trim().max(150).nullable().optional(),
     postalCode: z.string().trim().max(20).nullable().optional()
+});
+const customerUnserviceableLocationBodySchema = customerLocationValidationBodySchema.extend({
+    title: z.string().trim().max(200).nullable().optional(),
+    address: z.string().trim().min(3).max(2000),
+    stateName: z.string().trim().max(150).nullable().optional(),
+    cityName: z.string().trim().max(150).nullable().optional(),
+    postalCode: z.string().trim().max(20).nullable().optional(),
+    metadata: z.record(z.unknown()).optional().default({})
 });
 const customerAddressBodySchema = z.object({
     label: z.string().trim().min(2).max(80).default("Home"),
@@ -373,14 +381,33 @@ portalRouter.get("/customer/events", async (req, res, next) => {
         req.socket?.setKeepAlive(true);
         res.flushHeaders();
         res.write("retry: 1000\n\n");
+        const sendSessionRevoked = (error) => {
+            const status = error instanceof HttpError ? error.statusCode : 401;
+            res.write(`event: customer_session_revoked\ndata: ${JSON.stringify({
+                at: new Date().toISOString(),
+                status,
+                message: error instanceof Error ? error.message : "Customer session expired."
+            })}\n\n`);
+            res.flush?.();
+        };
+        try {
+            await getPortalMe({ userId: auth.userId, actor: "customer" });
+        }
+        catch (error) {
+            sendSessionRevoked(error);
+            res.end();
+            return;
+        }
         res.write(`event: connected\ndata: ${JSON.stringify({ connectedAt: new Date().toISOString(), stats: getBookingRealtimeStats() })}\n\n`);
         addBookingRealtimeClient();
         let cleanedUp = false;
+        let keepAlive = null;
         const cleanup = () => {
             if (cleanedUp)
                 return;
             cleanedUp = true;
-            clearInterval(keepAlive);
+            if (keepAlive)
+                clearInterval(keepAlive);
             unsubscribe();
             removeBookingRealtimeClient();
         };
@@ -407,11 +434,23 @@ portalRouter.get("/customer/events", async (req, res, next) => {
             }
         })
             .catch(() => undefined);
-        const keepAlive = setInterval(() => {
+        keepAlive = setInterval(() => {
             if (res.writableEnded || res.destroyed)
                 return;
-            res.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString(), stats: getBookingRealtimeStats() })}\n\n`);
-        }, 25000);
+            getPortalMe({ userId: auth.userId, actor: "customer" })
+                .then(() => {
+                if (res.writableEnded || res.destroyed)
+                    return;
+                res.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString(), stats: getBookingRealtimeStats() })}\n\n`);
+            })
+                .catch((error) => {
+                if (res.writableEnded || res.destroyed)
+                    return;
+                sendSessionRevoked(error);
+                cleanup();
+                res.end();
+            });
+        }, 10000);
         req.on("close", cleanup);
         res.on("close", cleanup);
         res.on("error", cleanup);
@@ -676,6 +715,15 @@ portalRouter.post("/customer/locations/validate", requirePortalAuth("customer"),
     try {
         const body = customerLocationValidationBodySchema.parse(req.body);
         res.json({ data: await validateCustomerPortalLocation(req.portalAuth.userId, body) });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+portalRouter.post("/customer/unserviceable-locations", requirePortalAuth("customer"), async (req, res, next) => {
+    try {
+        const body = customerUnserviceableLocationBodySchema.parse(req.body);
+        res.status(201).json({ data: await recordCustomerPortalUnserviceableLocation(req.portalAuth.userId, body) });
     }
     catch (error) {
         next(error);

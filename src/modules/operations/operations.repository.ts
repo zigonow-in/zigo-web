@@ -563,6 +563,119 @@ export async function listBookingReviews(input: {
   };
 }
 
+async function ensureCustomerUnserviceableLocationSchema(client: Queryable = pool) {
+  await client.query(`
+    create table if not exists zigo.customer_unserviceable_locations (
+      id uuid primary key default gen_random_uuid(),
+      customer_id uuid references zigo.customers(id) on delete set null,
+      user_id uuid references zigo.users(id) on delete set null,
+      latitude numeric(10,7) not null,
+      longitude numeric(10,7) not null,
+      location_title text,
+      address_text text not null,
+      state_name text,
+      city_name text,
+      postal_code text,
+      hit_count integer not null default 1,
+      first_seen_at timestamptz not null default now(),
+      last_seen_at timestamptz not null default now(),
+      metadata jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists idx_customer_unserviceable_locations_customer
+      on zigo.customer_unserviceable_locations(customer_id, last_seen_at desc);
+    create index if not exists idx_customer_unserviceable_locations_seen
+      on zigo.customer_unserviceable_locations(last_seen_at desc);
+    create index if not exists idx_customer_unserviceable_locations_area
+      on zigo.customer_unserviceable_locations(state_name, city_name, postal_code);
+  `);
+}
+
+export async function listCustomerUnserviceableLocationsReport(input: {
+  search?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number;
+  pageSize?: number;
+} = {}) {
+  await ensureCustomerUnserviceableLocationSchema();
+  const page = Math.max(1, Math.round(Number(input.page || 1)));
+  const pageSize = Math.max(5, Math.min(1000, Math.round(Number(input.pageSize || 50))));
+  const offset = (page - 1) * pageSize;
+  const search = String(input.search || "").trim();
+  const params: unknown[] = [];
+  const where: string[] = [];
+  if (input.startDate) {
+    params.push(input.startDate);
+    where.push(`(cul.last_seen_at at time zone 'Asia/Kolkata')::date >= $${params.length}::date`);
+  }
+  if (input.endDate) {
+    params.push(input.endDate);
+    where.push(`(cul.last_seen_at at time zone 'Asia/Kolkata')::date <= $${params.length}::date`);
+  }
+  if (search) {
+    params.push(`%${search.toLowerCase()}%`);
+    where.push(`(
+      lower(coalesce(cul.location_title, '')) like $${params.length}
+      or lower(coalesce(cul.address_text, '')) like $${params.length}
+      or lower(coalesce(cul.state_name, '')) like $${params.length}
+      or lower(coalesce(cul.city_name, '')) like $${params.length}
+      or lower(coalesce(cul.postal_code, '')) like $${params.length}
+      or lower(coalesce(c.customer_code, '')) like $${params.length}
+      or lower(coalesce(u.display_name, '')) like $${params.length}
+      or lower(coalesce(u.phone, '')) like $${params.length}
+      or cul.latitude::text like $${params.length}
+      or cul.longitude::text like $${params.length}
+    )`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const result = await pool.query(
+    `
+      select
+        cul.id,
+        cul.customer_id as "customerId",
+        c.customer_code as "customerCode",
+        u.display_name as "customerName",
+        u.phone as "customerPhone",
+        cul.location_title as "locationTitle",
+        cul.address_text as address,
+        cul.state_name as "stateName",
+        cul.city_name as "cityName",
+        cul.postal_code as "postalCode",
+        cul.latitude,
+        cul.longitude,
+        cul.hit_count as "hitCount",
+        cul.first_seen_at as "firstSeenAt",
+        cul.last_seen_at as "lastSeenAt",
+        cul.created_at as "createdAt",
+        cul.updated_at as "updatedAt"
+      from zigo.customer_unserviceable_locations cul
+      left join zigo.customers c on c.id = cul.customer_id
+      left join zigo.users u on u.id = coalesce(c.user_id, cul.user_id)
+      ${whereSql}
+      order by cul.last_seen_at desc, cul.hit_count desc
+      limit $${params.length + 1} offset $${params.length + 2}
+    `,
+    [...params, pageSize, offset]
+  );
+  const total = await pool.query<{ total: string }>(
+    `
+      select count(*)::text as total
+      from zigo.customer_unserviceable_locations cul
+      left join zigo.customers c on c.id = cul.customer_id
+      left join zigo.users u on u.id = coalesce(c.user_id, cul.user_id)
+      ${whereSql}
+    `,
+    params
+  );
+  const totalRecords = Number(total.rows[0]?.total || 0);
+  return {
+    rows: result.rows,
+    pagination: { page, pageSize, totalRecords, totalPages: Math.max(1, Math.ceil(totalRecords / pageSize)) }
+  };
+}
+
 export async function searchCustomersForBooking(search: string) {
   const term = `%${search.trim()}%`;
   await ensureCustomerProfilesForSearch(pool, term);

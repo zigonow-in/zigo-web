@@ -27,6 +27,7 @@ import { verificationRouter } from "./modules/verification/verification.routes.j
 import { mastersRouter } from "./modules/masters/masters.routes.js";
 import { operationsRouter, reportsRouter } from "./modules/operations/operations.routes.js";
 import { adminCustomersRouter } from "./modules/customers/customers.routes.js";
+import { offersRouter } from "./modules/offers/offers.routes.js";
 import { storesRouter } from "./modules/stores/stores.routes.js";
 import { settingsRouter } from "./modules/settings/settings.routes.js";
 import { vehiclesRouter } from "./modules/vehicles/vehicles.routes.js";
@@ -216,6 +217,7 @@ function mountAppRoutes(
   app.use(joinBasePath(basePath, "/access"), requireAdminAuth, requireSuperAdmin, accessRouter);
   app.use(joinBasePath(basePath, "/verification"), requireAdminAuth, verificationRouter);
   app.use(joinBasePath(basePath, "/masters"), requireAdminAuth, mastersRouter);
+  app.use(joinBasePath(basePath, "/offers"), requireAdminAuth, offersRouter);
   app.use(joinBasePath(basePath, "/admin-customers"), requireAdminAuth, adminCustomersRouter);
   app.use(joinBasePath(basePath, "/assistant-master"), requireAdminAuth, assistantMasterRouter);
   app.use(joinBasePath(basePath, "/stores"), requireAdminAuth, storesRouter);

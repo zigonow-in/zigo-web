@@ -85,6 +85,26 @@ export async function listAdminCustomers() {
     left join zigo.zones z on z.id = cl.zone_id
     left join zigo.cities city on city.id = cl.city_id
     where u.deleted_at is null
+      and exists (
+        select 1
+        from zigo.user_roles ur
+        join zigo.roles r on r.id = ur.role_id
+        where ur.user_id = u.id
+          and coalesce(ur.is_deleted, false) = false
+          and coalesce(ur.is_active, true) = true
+          and coalesce(r.is_deleted, false) = false
+          and lower(r.code) = 'customer'
+      )
+      and not exists (
+        select 1
+        from zigo.user_roles ur
+        join zigo.roles r on r.id = ur.role_id
+        where ur.user_id = u.id
+          and coalesce(ur.is_deleted, false) = false
+          and coalesce(ur.is_active, true) = true
+          and coalesce(r.is_deleted, false) = false
+          and lower(r.code) in ('assistant', 'admin', 'super_admin', 'super-admin')
+      )
     order by c.created_at desc
   `);
   return result.rows;

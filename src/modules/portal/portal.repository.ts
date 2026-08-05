@@ -982,6 +982,40 @@ async function roleIdByCode(client: Queryable, code: string) {
   return result.rows[0]?.id ?? null;
 }
 
+const customerPortalBlockedRoleCodes = new Set(["assistant", "admin", "super_admin", "super-admin"]);
+
+async function activeRoleCodesForUser(client: Queryable, userId: string) {
+  const result = await client.query<{ code: string }>(
+    `
+      select lower(r.code) as code
+      from zigo.user_roles ur
+      join zigo.roles r on r.id = ur.role_id
+      where ur.user_id = $1
+        and coalesce(ur.is_deleted, false) = false
+        and coalesce(ur.is_active, true) = true
+        and coalesce(r.is_deleted, false) = false
+    `,
+    [userId]
+  );
+  return result.rows.map((row) => row.code);
+}
+
+async function assertCustomerPortalRoleOnly(client: Queryable, userId: string) {
+  const roleCodes = await activeRoleCodesForUser(client, userId);
+  const hasCustomerRole = roleCodes.includes("customer");
+  const hasBlockedRole = roleCodes.some((code) => customerPortalBlockedRoleCodes.has(code));
+  if (!hasCustomerRole || hasBlockedRole) {
+    throw new HttpError(403, "Only Customer users can login to the customer app.");
+  }
+}
+
+async function assertNoCustomerPortalBlockedRole(client: Queryable, userId: string) {
+  const roleCodes = await activeRoleCodesForUser(client, userId);
+  if (roleCodes.some((code) => customerPortalBlockedRoleCodes.has(code))) {
+    throw new HttpError(403, "Only Customer users can login to the customer app.");
+  }
+}
+
 async function findPortalUserByPhone(client: Queryable, actor: PortalActor, phone: string) {
   const digits = phoneDigits(phone);
   const result = await client.query<{ userId: string; customerId: string | null; assistantId: string | null }>(
@@ -1187,6 +1221,7 @@ async function createCustomerPortalUser(client: Queryable, input: { phone: strin
 async function ensureCustomerPortalIdentity(client: Queryable, input: { phone: string; displayName?: string | null }) {
   const existing = await findAnyUserByPhone(client, input.phone);
   if (!existing) return createCustomerPortalUser(client, input);
+  await assertNoCustomerPortalBlockedRole(client, existing.userId);
   const roleId = await roleIdByCode(client, "customer");
   if (!roleId) throw new HttpError(500, "Customer role is not configured.");
   await client.query(
@@ -1279,6 +1314,7 @@ export async function requestPortalCode(input: { actor: PortalActor; phone: stri
       identity = await ensureCustomerPortalIdentity(client, input);
     }
     if (!identity) throw new HttpError(404, input.actor === "assistant" ? "Assistant not found for this mobile number." : "Customer not found.");
+    if (input.actor === "customer") await assertCustomerPortalRoleOnly(client, identity.userId);
     if (isNewCustomerRegistration) {
       await client.query("commit");
       committed = true;
@@ -1305,6 +1341,7 @@ export async function requestPortalCode(input: { actor: PortalActor; phone: stri
 export async function verifyPortalCode(input: { actor: PortalActor; phone: string; code: string }) {
   const identity = await findPortalUserByPhone(pool, input.actor, input.phone);
   if (!identity) throw new HttpError(404, "Account not found.");
+  if (input.actor === "customer") await assertCustomerPortalRoleOnly(pool, identity.userId);
   const existingUser = await getUserById(identity.userId);
   assertPortalUserCanLogin(existingUser, input.actor, { allowPendingPortalOtp: true });
   await verifyUserOtpChallenge({ userId: identity.userId, otps: { mobile: input.code }, actorUserId: identity.userId });
@@ -2942,6 +2979,136 @@ export async function validateCustomerPortalLocation(userId: string, input: {
   return validateBookingLocation({ customerId, ...input });
 }
 
+async function ensureCustomerUnserviceableLocationSchema(client: Queryable = pool) {
+  await client.query(`
+    create table if not exists zigo.customer_unserviceable_locations (
+      id uuid primary key default gen_random_uuid(),
+      customer_id uuid references zigo.customers(id) on delete set null,
+      user_id uuid references zigo.users(id) on delete set null,
+      latitude numeric(10,7) not null,
+      longitude numeric(10,7) not null,
+      location_title text,
+      address_text text not null,
+      state_name text,
+      city_name text,
+      postal_code text,
+      hit_count integer not null default 1,
+      first_seen_at timestamptz not null default now(),
+      last_seen_at timestamptz not null default now(),
+      metadata jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists idx_customer_unserviceable_locations_customer
+      on zigo.customer_unserviceable_locations(customer_id, last_seen_at desc);
+    create index if not exists idx_customer_unserviceable_locations_seen
+      on zigo.customer_unserviceable_locations(last_seen_at desc);
+    create index if not exists idx_customer_unserviceable_locations_area
+      on zigo.customer_unserviceable_locations(state_name, city_name, postal_code);
+    create index if not exists idx_customer_unserviceable_locations_coords
+      on zigo.customer_unserviceable_locations(customer_id, latitude, longitude);
+  `);
+}
+
+function mapCustomerUnserviceableLocationRow(row: any) {
+  return {
+    id: row.id,
+    customerId: row.customerId,
+    userId: row.userId,
+    latitude: Number(row.latitude),
+    longitude: Number(row.longitude),
+    locationTitle: row.locationTitle || "",
+    address: row.address || "",
+    stateName: row.stateName || "",
+    cityName: row.cityName || "",
+    postalCode: row.postalCode || "",
+    hitCount: Number(row.hitCount || 0),
+    firstSeenAt: row.firstSeenAt,
+    lastSeenAt: row.lastSeenAt,
+    metadata: row.metadata || {}
+  };
+}
+
+export async function recordCustomerPortalUnserviceableLocation(userId: string, input: {
+  title?: string | null;
+  address: string;
+  latitude: number;
+  longitude: number;
+  stateName?: string | null;
+  cityName?: string | null;
+  postalCode?: string | null;
+  source?: string | null;
+  metadata?: Record<string, unknown> | null;
+}) {
+  const customerId = await requireCustomerPortalCustomerId(userId);
+  await ensureCustomerUnserviceableLocationSchema();
+  const title = String(input.title || input.address.split(",")[0] || "Location not serviceable").trim();
+  const metadata = {
+    ...(input.metadata || {}),
+    source: input.source || "map",
+    recordedAt: new Date().toISOString()
+  };
+  const updated = await pool.query(
+    `
+      update zigo.customer_unserviceable_locations
+      set hit_count = hit_count + 1,
+          last_seen_at = now(),
+          updated_at = now(),
+          user_id = $2::uuid,
+          location_title = $5,
+          address_text = $6,
+          state_name = $7,
+          city_name = $8,
+          postal_code = $9,
+          metadata = coalesce(metadata, '{}'::jsonb) || $10::jsonb
+      where customer_id = $1::uuid
+        and round(latitude::numeric, 6) = round($3::numeric, 6)
+        and round(longitude::numeric, 6) = round($4::numeric, 6)
+      returning
+        id,
+        customer_id as "customerId",
+        user_id as "userId",
+        latitude,
+        longitude,
+        location_title as "locationTitle",
+        address_text as address,
+        state_name as "stateName",
+        city_name as "cityName",
+        postal_code as "postalCode",
+        hit_count as "hitCount",
+        first_seen_at as "firstSeenAt",
+        last_seen_at as "lastSeenAt",
+        metadata
+    `,
+    [customerId, userId, input.latitude, input.longitude, title, input.address, input.stateName || null, input.cityName || null, input.postalCode || null, JSON.stringify(metadata)]
+  );
+  if (updated.rows[0]) return mapCustomerUnserviceableLocationRow(updated.rows[0]);
+  const inserted = await pool.query(
+    `
+      insert into zigo.customer_unserviceable_locations
+        (customer_id, user_id, latitude, longitude, location_title, address_text, state_name, city_name, postal_code, metadata)
+      values ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+      returning
+        id,
+        customer_id as "customerId",
+        user_id as "userId",
+        latitude,
+        longitude,
+        location_title as "locationTitle",
+        address_text as address,
+        state_name as "stateName",
+        city_name as "cityName",
+        postal_code as "postalCode",
+        hit_count as "hitCount",
+        first_seen_at as "firstSeenAt",
+        last_seen_at as "lastSeenAt",
+        metadata
+    `,
+    [customerId, userId, input.latitude, input.longitude, title, input.address, input.stateName || null, input.cityName || null, input.postalCode || null, JSON.stringify(metadata)]
+  );
+  return mapCustomerUnserviceableLocationRow(inserted.rows[0]);
+}
+
 export async function listCustomerPortalServiceBoundaries(userId: string) {
   await requireCustomerPortalCustomerId(userId);
   return listBookingLocationServiceBoundaries();
@@ -3143,9 +3310,9 @@ export async function saveCustomerPortalDefaultLocation(userId: string, input: {
     longitude: input.longitude,
     source: input.source || "manual"
   });
-  if (!serviceability.isServiceable || !serviceability.cluster?.clusterId) {
-    throw new HttpError(400, serviceability.message || "Selected location is outside active working clusters.");
-  }
+  const serviceableClusterId = serviceability.isServiceable && serviceability.cluster?.clusterId
+    ? serviceability.cluster.clusterId
+    : null;
   const metadata = {
     addressKind: "current_default",
     landmark: input.landmark || "",
@@ -3204,7 +3371,7 @@ export async function saveCustomerPortalDefaultLocation(userId: string, input: {
             input.address,
             input.latitude,
             input.longitude,
-            serviceability.cluster.clusterId,
+            serviceableClusterId,
             JSON.stringify(metadata),
             userId
           ]
@@ -3221,7 +3388,7 @@ export async function saveCustomerPortalDefaultLocation(userId: string, input: {
             input.address,
             input.latitude,
             input.longitude,
-            serviceability.cluster.clusterId,
+            serviceableClusterId,
             JSON.stringify(metadata),
             userId
           ]
@@ -3233,10 +3400,10 @@ export async function saveCustomerPortalDefaultLocation(userId: string, input: {
       address: input.address,
       latitude: input.latitude,
       longitude: input.longitude,
-      clusterId: serviceability.cluster.clusterId,
-      clusterName: serviceability.cluster.name,
-      zoneName: serviceability.cluster.zoneName,
-      cityName: serviceability.cluster.cityName,
+      clusterId: serviceableClusterId,
+      clusterName: serviceability.cluster?.name || "",
+      zoneName: serviceability.cluster?.zoneName || "",
+      cityName: serviceability.cluster?.cityName || input.cityName || "",
       isDefault: true,
       metadata
     };

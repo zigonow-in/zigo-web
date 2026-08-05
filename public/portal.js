@@ -1,4 +1,4 @@
-﻿const root = document.querySelector("#portalRoot");
+const root = document.querySelector("#portalRoot");
 const toast = document.querySelector("#portalToast");
 const actor = location.pathname.includes("assistant") ? "assistant" : "customer";
 const zigoBasePath = (() => {
@@ -844,6 +844,9 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(payload.error?.message || payload.message || "Request failed.");
     error.status = response.status;
+    if (shouldClearPortalSessionForError(error)) {
+      forcePortalSessionLogout(error.message);
+    }
     throw error;
   }
   return payload;
@@ -1437,6 +1440,36 @@ function clearPortalSession() {
   stopCustomerRealtime();
 }
 
+function shouldClearPortalSessionForError(error) {
+  const status = Number(error?.status || 0);
+  if (!state.token || ![401, 403, 404].includes(status)) return false;
+  const message = String(error?.message || "").toLowerCase();
+  if (status === 401) return true;
+  if (actor === "customer") {
+    return message.includes("customer account is deactive")
+      || message.includes("only customer users can login")
+      || message.includes("customer profile not found")
+      || message.includes("account not found")
+      || message.includes("portal token required")
+      || message.includes("invalid portal authorization token");
+  }
+  return message.includes("assistant account is deactive")
+    || message.includes("assistant profile not found")
+    || message.includes("account not found")
+    || message.includes("portal token required")
+    || message.includes("invalid portal authorization token");
+}
+
+function forcePortalSessionLogout(message = "") {
+  const text = String(message || "").trim();
+  clearPortalSession();
+  state.codeSent = false;
+  state.loginPhone = "";
+  state.loginError = text || "Your account session ended. Please login again.";
+  state.splashDone = true;
+  render();
+}
+
 function portalLogoutConfirmHtml() {
   if (!state.logoutConfirmOpen) return "";
   return `<div class="portal-logout-confirm" role="dialog" aria-modal="true" aria-label="Confirm logout">
@@ -1996,6 +2029,16 @@ function startCustomerRealtime(force = false) {
     } catch (error) {
       scheduleCustomerBookingRefresh("Booking updated.");
     }
+  });
+  customerRealtimeSource.addEventListener("customer_session_revoked", (event) => {
+    let message = "Customer account is no longer active. Please contact support.";
+    try {
+      const payload = JSON.parse(event.data || "{}");
+      message = payload.message || message;
+    } catch {
+      // Keep default message.
+    }
+    forcePortalSessionLogout(message);
   });
   customerRealtimeSource.addEventListener("connected", () => {});
   customerRealtimeSource.onerror = () => {
@@ -2811,7 +2854,7 @@ function catalogItemAvailableInCluster(item = {}, clusterId = selectedCustomerCl
 
 function activeCatalog() {
   const fallback = fallbackCatalog();
-  const useFallback = Boolean(state.catalog.isFallback) || (!selectedCustomerClusterId() && !state.catalog.services?.length);
+  const useFallback = !state.catalog.disableFallback && (Boolean(state.catalog.isFallback) || (!selectedCustomerClusterId() && !state.catalog.services?.length));
   const base = {
     ...state.catalog,
     clusters: state.catalog.clusters?.length ? state.catalog.clusters : (useFallback ? fallback.clusters : []),
@@ -3158,7 +3201,7 @@ function customerCancelSectionHtml(booking = {}) {
 }
 
 function homeStartingPriceLabel(value) {
-  return `Starting @ â‚¹ ${Number(value || 0).toFixed(0)}`;
+  return `Starting @ ₹ ${Number(value || 0).toFixed(0)}`;
 }
 
 function isUuid(value) {
@@ -3628,7 +3671,7 @@ function customerBookingTypeSummaryHtml() {
       seen.add(key);
       return true;
     })
-    .map((service) => `<span class="customer-booking-type-chip ${escapeHtml(service.mode || "instant")}"><b>${escapeHtml(service.categoryName || service.serviceName)}</b>${escapeHtml(customerBookingTypeLabel(service.mode))} Â· ${escapeHtml(customerAssignmentLabel(service.instantMode))}</span>`)
+    .map((service) => `<span class="customer-booking-type-chip ${escapeHtml(service.mode || "instant")}"><b>${escapeHtml(service.categoryName || service.serviceName)}</b>${escapeHtml(customerBookingTypeLabel(service.mode))} · ${escapeHtml(customerAssignmentLabel(service.instantMode))}</span>`)
     .join("");
   const helper = plan.isMixed ? `<p class="customer-booking-helper">Selected items have different booking types. Choose the available option for this booking.</p>` : "";
   return `<div class="customer-booking-type-summary">${chips}${helper}</div>`;
@@ -4156,7 +4199,7 @@ customerScheduleSummaryHtml = function customerScheduleSummaryHtmlOverride(confi
     <span>${customerIcon("calendar")}</span>
     <div>
       <small>${valid ? "Scheduled slot" : "Schedule required"}</small>
-      <b>${escapeHtml(valid ? `${dateLabel} Â· ${timeLabel}` : "Choose day and time slot")}</b>
+      <b>${escapeHtml(valid ? `${dateLabel} · ${timeLabel}` : "Choose day and time slot")}</b>
     </div>
     <strong>${valid ? "Change" : "Choose"}</strong>
   </button>`;
@@ -4319,7 +4362,7 @@ customerCartConfirmBarHtml = function customerCartConfirmBarHtmlOverride(totals 
         <span class="customer-payment-select static">Cash payment</span>
       </div>
       <div class="customer-pay-amount">
-        <b><span>â‚¹</span>${escapeHtml(amount.toFixed(0))}</b>
+        <b><span>₹</span>${escapeHtml(amount.toFixed(0))}</b>
         ${discount > 0 ? `<del>${escapeHtml(money(total))}</del><em>Save ${escapeHtml(money(discount))}</em>` : ""}
       </div>
       <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length ? "" : "disabled"}><span>Proceed to Pay</span></button>
@@ -4390,7 +4433,7 @@ function customerCartConfirmBarHtml(totals = cartTotals(), activeBookingType = c
         <span class="customer-payment-select static">Cash payment</span>
       </div>
       <div class="customer-pay-amount">
-        <b><span>Ã¢â€šÂ¹</span>${escapeHtml(amount.toFixed(0))}</b>
+        <b><span>â‚¹</span>${escapeHtml(amount.toFixed(0))}</b>
         ${discount > 0 ? `<del>${escapeHtml(money(total))}</del><em>Save ${escapeHtml(money(discount))}</em>` : ""}
       </div>
       <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length ? "" : "disabled"}><span>Proceed to Pay</span></button>
@@ -6422,7 +6465,7 @@ function customerCartUploadPopupHtml() {
         ${isImage ? `<img src="${escapeHtml(assetUrl(url))}" alt="${escapeHtml(active.name || "Upload preview")}">` : isVideo ? `<video src="${escapeHtml(assetUrl(url))}" controls playsinline></video>` : `<div class="customer-cart-upload-preview-file">${customerIcon("package")}<b>${escapeHtml((active.name || "FILE").split(".").pop()?.slice(0, 5).toUpperCase() || "FILE")}</b></div>`}
         <div class="customer-cart-upload-preview-meta">
           <b>${escapeHtml(active.name || `Upload ${activeIndex + 1}`)}</b>
-          <span>${escapeHtml(active.type || "Unknown type")} â€¢ ${escapeHtml(formatFileSize(active.size || 0))}</span>
+          <span>${escapeHtml(active.type || "Unknown type")} • ${escapeHtml(formatFileSize(active.size || 0))}</span>
         </div>
       </div>`
     : `<div class="customer-cart-upload-preview-body">
@@ -7013,6 +7056,75 @@ function customerLocationCluster(location = state.locationPicked || state.select
   };
 }
 
+const unserviceableLocationSaveKeys = new Set();
+
+function normalizeServiceableText(value) {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function buildUnserviceableLocationSaveKey(location) {
+  const customerId = String(state.user?.id || state.user?.userId || "").trim();
+  const latitude = Number.isFinite(Number(location?.latitude)) ? Number(location.latitude).toFixed(6) : "";
+  const longitude = Number.isFinite(Number(location?.longitude)) ? Number(location.longitude).toFixed(6) : "";
+  if (!customerId || !latitude || !longitude) return "";
+  return `${customerId}:${latitude}:${longitude}`;
+}
+
+function saveUnserviceableLocationInBackground(location, serviceability = null) {
+  if (!location) return Promise.resolve();
+  const latitude = Number(location.latitude);
+  const longitude = Number(location.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return Promise.resolve();
+
+  const serviceabilityState = serviceability || state.locationServiceability || location.serviceability || {};
+  if (serviceabilityState?.isServiceable === true) return Promise.resolve();
+
+  const customerId = String(state.user?.id || state.user?.userId || "").trim();
+  if (!customerId) return Promise.resolve();
+
+  const key = buildUnserviceableLocationSaveKey(location);
+  if (!key || unserviceableLocationSaveKeys.has(key)) return Promise.resolve();
+  unserviceableLocationSaveKeys.add(key);
+
+  const title =
+    normalizeServiceableText(location.addressName) ||
+    normalizeServiceableText(customerDisplayLocationLabel(location)) ||
+    normalizeServiceableText(location.label) ||
+    normalizeServiceableText(location.address) ||
+    "Location not serviceable";
+
+  const address = normalizeServiceableText(location.addressText || location.address || location.label || "Location not serviceable");
+  const stateName = normalizeServiceableText(location.stateName || location.metadata?.stateName || serviceabilityState?.stateName || "");
+  const cityName = normalizeServiceableText(location.cityName || location.metadata?.cityName || serviceabilityState?.cityName || "");
+  const postalCode = normalizeServiceableText(location.postalCode || location.pincode || location.metadata?.postalCode || location.metadata?.pincode || serviceabilityState?.postalCode || "");
+
+  return api("/portal/customer/unserviceable-locations", {
+    method: "POST",
+    body: JSON.stringify({
+      title,
+      address,
+      latitude,
+      longitude,
+      stateName,
+      cityName,
+      postalCode,
+      source: location.source || "map",
+      metadata: {
+        ...(location.metadata || {}),
+        landmark: normalizeServiceableText(location.landmark || location.additionalDetail || ""),
+        personName: normalizeServiceableText(location.personName || location.metadata?.personName || ""),
+        contactNumber: customerDisplayMobile10(String(location.contactNumber || state.user?.phone || "")),
+        serviceability: serviceabilityState,
+        isAutoSaved: true
+      }
+    })
+  }).catch(() => {
+    unserviceableLocationSaveKeys.delete(key);
+    return null;
+  });
+}
+
 function customerLocationTitle(location = state.selectedLocation || {}) {
   return customerDisplayLocationLabel(location) || customerLocationCluster(location).name || "Home";
 }
@@ -7360,13 +7472,14 @@ function customerHomeOverview() {
 
 function customerHomeHeader() {
   const location = state.selectedLocation || {};
-  const title = customerLocationTitle(location);
+  const isNotServiceable = customerSelectedLocationIsNotServiceable(location);
+  const title = isNotServiceable ? "Location not serviceable" : customerLocationTitle(location);
   const address = locationShortAddress(location);
   return `<section class="zigo-commerce-hero zigo-native-hero">
     <div class="zigo-native-topbar">
       <button class="zigo-native-location" data-change-customer-location type="button">
         <span>${customerIcon("map")}</span>
-        <strong>${escapeHtml(title)}</strong>
+        <strong class="${isNotServiceable ? "not-serviceable" : ""}">${escapeHtml(title)}</strong>
         <small>${escapeHtml(address)}</small>
         <em>${customerIcon("chevronDown")}</em>
       </button>
@@ -9048,8 +9161,8 @@ function personalAssistantCategoryCard(category = {}, index = 0) {
   return `<article class="zigo-pa-time-card zigo-pa-time-card-${index % 4}">
     <button class="zigo-pa-time-main ${isInCart ? "remove-action-tile" : ""}" ${isInCart ? `data-remove-cart-category="${escapeHtml(category.id || "")}"` : `data-add-category="${escapeHtml(category.id || "")}"`} type="button">
       <strong>${escapeHtml(personalAssistantDurationLabel(category))}</strong>
-      <span><b>â‚¹${Number(price || 0).toFixed(0)}</b> <del>â‚¹${Number(displayOldPrice || 0).toFixed(0)}</del></span>
-      ${saving ? `<small>Save â‚¹${Number(saving).toFixed(0)}</small>` : ""}
+      <span><b>₹${Number(price || 0).toFixed(0)}</b> <del>₹${Number(displayOldPrice || 0).toFixed(0)}</del></span>
+      ${saving ? `<small>Save ₹${Number(saving).toFixed(0)}</small>` : ""}
       <em>${isInCart ? `${customerIcon("trash")} Remove` : "Schedule"}</em>
     </button>
   </article>`;
@@ -9509,7 +9622,25 @@ async function refreshCustomerLocationPickerDataInPlace() {
   updateCustomerLocationPickerPermissionUi();
 }
 
-function closeCustomerLocationPickerSheet() {
+function customerHasSelectedLocationForSheetClose() {
+  const location = state.selectedLocation || null;
+  if (!location) return false;
+  const latitude = Number(location.latitude ?? location.lat);
+  const longitude = Number(location.longitude ?? location.lng);
+  const hasCoordinates = Number.isFinite(latitude) && Number.isFinite(longitude);
+  const hasAddress = Boolean(String(location.address || location.addressText || location.label || location.title || "").trim());
+  return hasCoordinates || hasAddress || Boolean(location.addressId || location.savedAddressId);
+}
+
+function closeCustomerLocationPickerSheet({ force = false } = {}) {
+  if (!force && !customerHasSelectedLocationForSheetClose()) {
+    state.locationBusy = false;
+    state.locationMessage = "Please choose your location to continue.";
+    state.customerLocationPickerSheetOpen = true;
+    state.customerLocationPickerClosing = false;
+    syncCustomerHomeLocationPickerSheet();
+    return false;
+  }
   state.locationMessage = "";
   state.locationBusy = false;
   state.customerLocationPickerSheetOpen = false;
@@ -9517,6 +9648,7 @@ function closeCustomerLocationPickerSheet() {
   state.customerLocationPickerPurpose = "";
   state.customerCartRouteEditIndex = -1;
   syncCustomerHomeLocationPickerSheet();
+  return true;
 }
 
 function updateCustomerHomeLocationHeaderOnly() {
@@ -10096,6 +10228,9 @@ function refreshCustomerLocationConfirmDetails() {
   const cluster = picked ? customerLocationCluster(picked) : {};
   const serviceability = state.locationServiceability || picked?.serviceability || {};
   const canContinue = Boolean(picked && cluster.clusterId && serviceability.isServiceable !== false);
+  if (!canContinue) {
+  void saveUnserviceableLocationInBackground(picked, serviceability);
+}
   const title = customerDisplayLocationLabel(picked || {}) || "Picked location";
   const address = locationShortAddress(picked || {});
   const details = screen.querySelector(".location-confirm-details");
@@ -10771,7 +10906,11 @@ function renderLocationConfirm() {
   const picked = state.locationPicked || state.selectedLocation;
   const cluster = picked ? customerLocationCluster(picked) : {};
   const serviceability = state.locationServiceability || picked?.serviceability || {};
-  const canContinue = Boolean(picked && cluster.clusterId && serviceability.isServiceable !== false);
+ const isServiceable = Boolean(picked && cluster.clusterId && serviceability.isServiceable !== false);
+const canContinue = isServiceable;
+if (!isServiceable) {
+  void saveUnserviceableLocationInBackground(picked, serviceability);
+}
   const title = customerDisplayLocationLabel(picked || {}) || "Picked location";
   const address = locationShortAddress(picked || {});
   const storedName = String(picked?.metadata?.personName || picked?.personName || "").trim();
@@ -10794,10 +10933,10 @@ function renderLocationConfirm() {
       <button class="location-current-btn" data-use-current-location data-location-map-current type="button">${customerIcon("map")}<span>Use current location</span></button>
     </section>
     <section class="location-pick-card location-confirm-details">
-      ${state.locationMessage && !canContinue ? `<p class="location-message danger">${escapeHtml(state.locationMessage)}</p>` : ""}
+      ${picked && !isServiceable ? `<p class="location-message danger">${escapeHtml(state.locationMessage || "Location not serviceable yet.")}</p>` : ""}
       <form class="location-detail-form" data-location-continue-form>
         <div class="picked-location-title">
-          <span class="${canContinue ? "ok" : "bad"}">${customerIcon("map")}</span>
+          <span class="${isServiceable ? "ok" : "bad"}">${customerIcon("map")}</span>
           <div><b>${escapeHtml(title)}</b><small>${escapeHtml(address)}</small></div>
           <button data-location-step="manual" type="button">Change</button>
         </div>
@@ -11121,7 +11260,6 @@ function renderCustomerHome() {
   }
   root.innerHTML = `<section class="mobile-app home-screen customer-flow-screen zigo-commerce-home">
     ${customerHomeHeader()}
-    ${customerHomeSearch()}
     <section class="zigo-home-body">
       ${customerHomeSections()}
     </section>
@@ -11131,7 +11269,6 @@ function renderCustomerHome() {
     ${customerLocationPermissionPopupHtml()}
     ${customerSupplyUnavailablePopupHtml()}
   </section>`;
-  startCustomerSearchPlaceholderRotation();
   attachCustomerOngoingBookingDots();
   attachCustomerHomeDurationSlider();
   startCustomerHomeCategoryImageSequence();
@@ -11547,7 +11684,7 @@ function bookingRows(tab = "all", rows = state.bookings || []) {
         </div>
       </div>
       <div class="booking-list-footer">
-        <button class="booking-see-details" type="button" data-track-booking="${escapeHtml(booking.id)}">View Details <span>›</span></button>
+        <button class="booking-see-details" type="button" data-track-booking="${escapeHtml(booking.id)}">View Details <span>�</span></button>
         <button class="booking-reorder-btn" type="button" data-reorder-booking="${escapeHtml(booking.id)}">Re-Order</button>
       </div>
     </article>`;
@@ -13289,7 +13426,7 @@ function customerTrackLocationsUploadsHtml(booking = {}) {
       <div class="customer-track-media-head">
         <div>
           <h2>Locations &amp; Uploads</h2>
-          <small>${escapeHtml(`${locationCount} location${locationCount === 1 ? "" : "s"} · ${uploadCount} upload${uploadCount === 1 ? "" : "s"}`)}</small>
+          <small>${escapeHtml(`${locationCount} location${locationCount === 1 ? "" : "s"} � ${uploadCount} upload${uploadCount === 1 ? "" : "s"}`)}</small>
         </div>
         <button type="button" data-track-media-toggle aria-expanded="${expanded ? "true" : "false"}" aria-label="${expanded ? "Collapse" : "Expand"} locations and uploads">${customerTrackIcon(expanded ? "chevronUp" : "chevronDown")}</button>
       </div>
@@ -13615,9 +13752,9 @@ function customerTrackTipCardHtml(booking = {}) {
   const customValue = customerTrackCustomTipValue(customText);
   const customInvalid = Boolean(customText) && customValue == null;
   const tipOptions = [
-    { value: 20, icon: "🙂" },
-    { value: 30, icon: "😊" },
-    { value: 50, icon: "⭐" }
+    { value: 20, icon: "??" },
+    { value: 30, icon: "??" },
+    { value: 50, icon: "?" }
   ];
   return `<section class="customer-track-tip-card ${locked ? "is-disabled" : ""}" aria-label="Tip your ZIGO assistant" aria-disabled="${locked ? "true" : "false"}">
     <div class="customer-track-tip-copy">
@@ -13630,12 +13767,12 @@ function customerTrackTipCardHtml(booking = {}) {
       <span class="customer-track-tip-spark two"></span>
     </div>
     <div class="customer-track-tip-options ${customOpen ? "is-custom-open" : ""}">
-      ${tipOptions.map((option) => `<button class="${selected === option.value ? "active" : ""}" data-track-tip-amount="${option.value}" type="button"${locked ? " disabled" : ""}><span>${option.icon}</span>₹${option.value}</button>`).join("")}
-      ${customOpen ? `<label class="customer-track-tip-inline-custom"><span>₹</span>
+      ${tipOptions.map((option) => `<button class="${selected === option.value ? "active" : ""}" data-track-tip-amount="${option.value}" type="button"${locked ? " disabled" : ""}><span>${option.icon}</span>?${option.value}</button>`).join("")}
+      ${customOpen ? `<label class="customer-track-tip-inline-custom"><span>?</span>
         <input id="customer-track-tip-custom-${escapeHtml(bookingId)}" name="customerTrackTipCustom" data-track-tip-custom-input inputmode="numeric" type="text" pattern="[0-9]*" maxlength="4" value="${escapeHtml(customText)}" placeholder="Amount" autocomplete="off" aria-label="Custom tip amount" aria-describedby="customer-track-tip-error-${escapeHtml(bookingId)}"${customInvalid ? ` aria-invalid="true"` : ""}${locked ? " disabled" : ""}>
         <button ${customText ? "data-track-tip-custom-add" : "data-track-tip-custom-close"} type="button"${locked || customInvalid ? " disabled" : ""}>${customText ? "Add" : "Close"}</button>
-        <small id="customer-track-tip-error-${escapeHtml(bookingId)}" data-track-tip-custom-error class="${customInvalid ? "" : "hidden"}">Enter a whole amount from ₹51 to ₹1000.</small>
-      </label>` : `<button class="${customActive ? "active" : ""}" data-track-tip-custom type="button"${locked ? " disabled" : ""}>${customActive ? `₹${escapeHtml(String(selected))} ${customerIcon("edit")}` : "<span>💙</span>Custom"}</button>`}
+        <small id="customer-track-tip-error-${escapeHtml(bookingId)}" data-track-tip-custom-error class="${customInvalid ? "" : "hidden"}">Enter a whole amount from ?51 to ?1000.</small>
+      </label>` : `<button class="${customActive ? "active" : ""}" data-track-tip-custom type="button"${locked ? " disabled" : ""}>${customActive ? `?${escapeHtml(String(selected))} ${customerIcon("edit")}` : "<span>??</span>Custom"}</button>`}
     </div>
     <div class="customer-track-tip-footer">
       <button data-track-tip-clear type="button"${locked ? " disabled" : ""}>Clear Tip</button>
@@ -14672,7 +14809,7 @@ function renderAccount() {
       <button type="button">
         <span>${customerIcon("wallet")}</span>
         <b>My Wallet</b>
-        <small>₹0</small>
+        <small>?0</small>
         <i>${customerIcon("chevronRight")}</i>
       </button>
       <button type="button">
@@ -16023,7 +16160,7 @@ function taskTimelineSpecialHtml(update = {}, task = {}, options = {}, approvalR
     const finalStatus = assistantResponseStatus || status;
     const needsAssistantCashConfirm = options.allowPaymentConfirm && !assistantResponse && mode === "cash" && status === "pending" && String(metadata.confirmationTarget || "") === "assistant";
     return `<div class="timeline-special-card payment paid">
-      <span>${amount ? money(amount) : "Payment confirmation shared"}${mode ? ` · ${escapeHtml(mode.toUpperCase())}` : ""}</span>
+      <span>${amount ? money(amount) : "Payment confirmation shared"}${mode ? ` � ${escapeHtml(mode.toUpperCase())}` : ""}</span>
       <b>${escapeHtml(finalStatus === "paid" ? "Paid" : finalStatus === "due" ? "Not confirmed - payment due" : "Pending confirmation")}</b>
       ${metadata.referenceId ? `<small>Ref: ${escapeHtml(metadata.referenceId)}</small>` : ""}
       ${metadata.note ? `<small>${escapeHtml(metadata.note)}</small>` : ""}
@@ -16037,7 +16174,7 @@ function taskTimelineSpecialHtml(update = {}, task = {}, options = {}, approvalR
     const mode = String(metadata.mode || metadata.paymentMode || "cash").toUpperCase();
     const remarks = String(metadata.remarks || metadata.transactionId || "").trim();
     return `<div class="timeline-special-card payment paid">
-      <span>${metadata.amount ? money(Number(metadata.amount)) : "Payment received"}${mode ? ` · ${escapeHtml(mode)}` : ""}</span>
+      <span>${metadata.amount ? money(Number(metadata.amount)) : "Payment received"}${mode ? ` � ${escapeHtml(mode)}` : ""}</span>
       <b>Paid</b>
       ${remarks ? `<small>${escapeHtml(remarks)}</small>` : ""}
     </div>`;
@@ -16319,7 +16456,7 @@ function assistantTrackBookingDetailsHtml(task = {}) {
     <div class="assistant-track-service-row">
       <div class="assistant-track-service-copy">
         <b>${escapeHtml(taskCategoryMasterDisplayName(task, taskCartItems(task)[0] || {}))}</b>
-        <span>${escapeHtml(taskBookingTypeLabel(task))} · ${duration} mins</span>
+        <span>${escapeHtml(taskBookingTypeLabel(task))} � ${duration} mins</span>
         <small>Start ${escapeHtml(formatPortalDateOnly(startAt))} - ${escapeHtml(formatPortalTimeOnly(startAt))}</small>
       </div>
       <strong>${money(amount)}</strong>
@@ -17351,11 +17488,13 @@ function currentBrowserLocation() {
     state.customerLocationPermissionGranted = true;
     return coords;
   });
+
   const browserLocation = () => new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
       reject(new Error("Location permission is not available in this browser."));
       return;
     }
+
     navigator.geolocation.getCurrentPosition(
       (position) => {
         state.customerLocationPermissionGranted = true;
@@ -17378,33 +17517,28 @@ function currentBrowserLocation() {
         locationError.locationCode = error?.code || 0;
         reject(locationError);
       },
-      // A fast, fresh network/fused fix opens the permission prompt immediately.
-      // Confirm Location lets the customer refine the pin when greater precision is needed.
-      { enableHighAccuracy: false, timeout: 7000, maximumAge: 0 }
+      {
+        enableHighAccuracy: false,
+        timeout: 7000,
+        maximumAge: 0
+      }
     );
   });
-  // Keep getCurrentPosition directly inside the user-click chain. Querying the
-  // Permissions API or waiting for a generic WebView message first can delay
-  // the browser/native permission prompt.
-  const requestFromBrowser = () => browserLocation();
+
+  // IMPORTANT: first attempt must be browser geolocation on click.
+  // Native is fallback only when browser fails for non-denial reasons.
   if (hasDirectNativeLocationBridge()) {
-    return nativeLocation().catch((nativeError) => {
-      // A native response is authoritative. Fall back only when an older app
-      // exposes a bridge but does not implement the location request contract.
-      if (nativeError?.locationCode) throw nativeError;
-      return requestFromBrowser().catch(() => {
-        throw nativeError;
+    return browserLocation().catch((browserError) => {
+      if (browserError?.locationCode === 1) throw browserError; // permission denied
+      if (browserError?.locationCode === 2) throw browserError; // device off
+
+      return nativeLocation().catch(() => {
+        throw browserError;
       });
     });
   }
-  return requestFromBrowser().catch((browserError) => {
-    // Permission denial is authoritative. A generic React Native bridge is only
-    // a fallback for wrappers where WebView geolocation itself is unavailable.
-    if (browserError?.locationCode === 1 || !hasReactNativeWebViewBridge()) throw browserError;
-    return nativeLocation().catch(() => {
-      throw browserError;
-    });
-  });
+
+  return browserLocation();
 }
 
 async function refreshCustomerLocationPermissionState() {
@@ -17644,7 +17778,8 @@ async function validateAndPickCustomerLocation(candidate = {}, options = {}) {
   state.locationMessage = serviceabilityData?.isServiceable
     ? "Location verified."
     : (serviceabilityData?.message || "Service not available at this location.");
-  return state.locationPicked;
+ void saveUnserviceableLocationInBackground(state.locationPicked, serviceabilityData);
+    return state.locationPicked;
 }
 
 async function useCustomerCurrentLocation(options = {}) {
@@ -17785,6 +17920,109 @@ function customerStagePickedLocationForHome(picked = {}) {
   customerRememberLocation(selected, { setPreferred: true, rememberRecent: false });
   writePortalSessionCache();
   return selected;
+}
+
+function customerLocationIsServiceableForHome(location = {}) {
+  const cluster = customerLocationCluster(location || {});
+  const serviceability = location?.serviceability || state.locationServiceability || {};
+  return Boolean(cluster.clusterId && serviceability.isServiceable !== false);
+}
+
+function customerSelectedLocationIsNotServiceable(location = state.selectedLocation || {}) {
+  if (!location) return false;
+  if (location.isServiceable === false) return true;
+  if (String(location.metadata?.addressKind || "").toLowerCase() === "unserviceable") return true;
+  return Boolean(location.latitude || location.longitude || location.address || location.addressText) && !customerLocationCluster(location).clusterId;
+}
+
+async function customerSelectLocationForHomeDefault(picked = {}, { label = "", source = "" } = {}) {
+  if (!picked) throw new Error("Pick a location first.");
+  const cluster = customerLocationCluster(picked || {});
+  const isServiceable = customerLocationIsServiceableForHome(picked);
+  const addressText = picked.address || picked.addressText || locationShortAddress(picked) || customerDisplayLocationLabel(picked) || "Picked location";
+  const selectedLabel = isServiceable
+    ? (label || customerDisplayLocationLabel(picked) || picked.label || "Selected location")
+    : "Location not serviceable";
+  state.selectedLocation = {
+    ...picked,
+    label: selectedLabel,
+    title: selectedLabel,
+    address: addressText,
+    addressText,
+    landmark: picked.landmark || picked.metadata?.landmark || "",
+    personName: picked.personName || picked.metadata?.personName || state.user?.displayName || "",
+    contactNumber: customerDisplayMobile10(picked.contactNumber || picked.metadata?.contactNumber || state.user?.phone || ""),
+    savedAddressId: picked.savedAddressId || (picked.source === "saved" ? picked.addressId : null),
+    addressId: picked.addressId || picked.savedAddressId || null,
+    clusterId: isServiceable ? cluster.clusterId : null,
+    clusterName: isServiceable ? cluster.name : "",
+    cityName: picked.cityName || picked.metadata?.cityName || (isServiceable ? cluster.cityName : ""),
+    zoneName: isServiceable ? cluster.zoneName : "",
+    isDefault: true,
+    isServiceable,
+    source: source || picked.source || "map",
+    metadata: {
+      ...(picked.metadata || {}),
+      addressKind: isServiceable ? (picked.metadata?.addressKind || picked.source || "selected") : "unserviceable",
+      stateName: picked.stateName || picked.metadata?.stateName || "",
+      cityName: picked.cityName || picked.metadata?.cityName || (isServiceable ? cluster.cityName : ""),
+      postalCode: picked.postalCode || picked.pincode || picked.metadata?.postalCode || picked.metadata?.pincode || "",
+      serviceability: picked.serviceability || state.locationServiceability || null
+    }
+  };
+  state.locationPicked = state.selectedLocation;
+  state.locationServiceability = picked.serviceability || state.locationServiceability || null;
+  customerRememberLocation(state.selectedLocation, { setPreferred: true, rememberRecent: false });
+
+  const selectedAddressId = state.selectedLocation.savedAddressId || state.selectedLocation.addressId || "";
+  if (selectedAddressId) {
+    await customerSetDefaultLocationAddress(selectedAddressId);
+    state.customerAddresses = state.customerAddresses.map((item) => ({
+      ...item,
+      isDefault: String(item.addressId || "") === String(selectedAddressId)
+    }));
+    state.customerRecentLocations = state.customerRecentLocations.map((item) => ({
+      ...item,
+      isDefault: String(item.addressId || "") === String(selectedAddressId)
+    }));
+  } else {
+    const hiddenDefault = await customerSaveHiddenDefaultLocation(state.selectedLocation).catch(() => null);
+    if (hiddenDefault?.addressId) {
+      state.selectedLocation = {
+        ...state.selectedLocation,
+        ...customerNormalizePersistedLocation(hiddenDefault),
+        label: selectedLabel,
+        title: selectedLabel,
+        savedAddressId: null,
+        addressId: hiddenDefault.addressId,
+        isDefault: true,
+        isServiceable
+      };
+      state.locationPicked = state.selectedLocation;
+    }
+  }
+
+  state.customerRoutePrimaryStop = null;
+  state.customerRoutePrimaryCleared = false;
+  state.customerCartRouteEditIndex = -1;
+  state.customerCartRouteDeleteIndex = -1;
+  if (isServiceable && cluster.clusterId) {
+    state.catalog = { ...state.catalog, disableFallback: false };
+    await loadCustomerCatalog({ clusterId: cluster.clusterId }).catch(() => null);
+  } else {
+    state.catalog = {
+      ...state.catalog,
+      disableFallback: true,
+      services: [],
+      serviceMasters: [],
+      categories: [],
+      masterCategories: [],
+      priceRules: [],
+      categoryPriceRules: []
+    };
+  }
+  writePortalSessionCache();
+  return state.selectedLocation;
 }
 
 async function searchCustomerLocations(query) {
@@ -18107,13 +18345,16 @@ function locationFormLabel(data) {
 async function completeCustomerLocationSelection(form) {
   const picked = state.locationPicked || state.selectedLocation;
   const cluster = customerLocationCluster(picked || {});
-  if (!picked || !cluster.clusterId) throw new Error("Pick a serviceable location first.");
+  if (!picked) throw new Error("Pick a location first.");
+  const serviceability = state.locationServiceability || picked?.serviceability || {};
+  const isServiceable = Boolean(cluster.clusterId && serviceability.isServiceable !== false);
   const data = Object.fromEntries(new FormData(form));
   const stateName = String(data.stateName || picked.stateName || picked.metadata?.stateName || "").trim();
   const cityName = String(data.cityName || picked.cityName || picked.metadata?.cityName || "").trim();
   const postalCode = String(data.postalCode || picked.postalCode || picked.pincode || picked.metadata?.postalCode || picked.metadata?.pincode || "").trim();
   const submitButton = form.querySelector(".confirm-location-btn");
   if (state.locationConfirmReturnStep === "cart-stop" || state.customerLocationPickerPurpose === "cart-stop") {
+    if (!isServiceable) throw new Error("Pick a serviceable location first.");
     const contactNumber = data.useMyMobile ? customerDisplayMobile10(state.user?.phone || "") : customerDisplayMobile10(data.contactNumber || "");
     state.locationBusy = true;
     if (submitButton) {
@@ -18161,6 +18402,121 @@ async function completeCustomerLocationSelection(form) {
   if (saveAddress && !/^\d{10}$/.test(contactNumber)) throw new Error("Enter a valid 10 digit mobile number.");
   if (saveAddress && !cityName) throw new Error("Enter city.");
   if (saveAddress && !/^\d{6}$/.test(postalCode)) throw new Error("Enter a valid 6 digit pincode.");
+  if (!isServiceable) {
+    const addressText = picked.address || picked.addressText || locationShortAddress(picked) || customerDisplayLocationLabel(picked) || "Location not serviceable";
+    const locationTitle = customerDisplayLocationLabel(picked) || addressText.split(",")[0] || "Location not serviceable";
+    state.locationBusy = true;
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.innerHTML = `Please wait... ${customerIcon("chevron")}`;
+    }
+    const recorded = await api("/portal/customer/unserviceable-locations", {
+      method: "POST",
+      body: JSON.stringify({
+        title: locationTitle,
+        address: addressText,
+        latitude: picked.latitude,
+        longitude: picked.longitude,
+        stateName: stateName || null,
+        cityName: cityName || null,
+        postalCode: postalCode || null,
+        source: picked.source || "map",
+        metadata: {
+          landmark: data.landmark || picked.landmark || "",
+          personName: data.personName || picked.personName || "",
+          contactNumber: customerDisplayMobile10(data.contactNumber || picked.contactNumber || ""),
+          serviceability
+        }
+      })
+    }).catch(() => null);
+    state.selectedLocation = {
+      ...picked,
+      label: "Location not serviceable",
+      title: "Location not serviceable",
+      address: addressText,
+      addressText,
+      landmark: data.landmark || "",
+      personName: data.personName || "",
+      contactNumber: customerDisplayMobile10(data.contactNumber || ""),
+      stateName,
+      cityName,
+      postalCode,
+      metadata: {
+        ...(picked.metadata || {}),
+        addressKind: "unserviceable",
+        stateName,
+        cityName,
+        postalCode,
+        personName: data.personName || "",
+        contactNumber: customerDisplayMobile10(data.contactNumber || ""),
+        unserviceableLocationId: recorded?.data?.id || null,
+        serviceability
+      },
+      savedAddressId: null,
+      addressId: null,
+      isDefault: false,
+      clusterId: null,
+      clusterName: "",
+      clusterCityName: "",
+      zoneName: "",
+      isServiceable: false,
+      serviceability: { ...serviceability, isServiceable: false }
+    };
+    state.locationPicked = state.selectedLocation;
+    const hiddenDefault = await customerSaveHiddenDefaultLocation(state.selectedLocation).catch(() => null);
+    if (hiddenDefault?.addressId) {
+      state.selectedLocation = {
+        ...state.selectedLocation,
+        ...customerNormalizePersistedLocation(hiddenDefault),
+        label: "Location not serviceable",
+        title: "Location not serviceable",
+        savedAddressId: null,
+        addressId: hiddenDefault.addressId,
+        isDefault: true,
+        clusterId: null,
+        clusterName: "",
+        zoneName: "",
+        isServiceable: false
+      };
+      state.locationPicked = state.selectedLocation;
+    }
+    customerRememberLocation(state.selectedLocation, {
+      setPreferred: true,
+      rememberRecent: false
+    });
+    state.catalog = {
+      ...state.catalog,
+      disableFallback: true,
+      services: [],
+      serviceMasters: [],
+      categories: [],
+      masterCategories: [],
+      priceRules: [],
+      categoryPriceRules: []
+    };
+    state.customerRoutePrimaryStop = null;
+    state.customerRoutePrimaryCleared = false;
+    state.customerCartRouteEditIndex = -1;
+    state.customerCartRouteDeleteIndex = -1;
+    state.customerCategorySheetOpen = false;
+    state.customerHomeCategorySheetOpen = false;
+    state.customerHomeCategorySheetServiceId = "";
+    state.customerHomeCategorySheetExpanded = false;
+    state.customerHomeDurationSheetOpen = false;
+    state.customerHomeScheduleSheetOpen = false;
+    state.customerLocationPickerSheetOpen = false;
+    state.customerView = "home";
+    state.locationStep = "permission";
+    state.locationSaveAsLabel = "";
+    state.locationSaveAsOtherOpen = false;
+    state.locationSaveAsCustomLabel = "";
+    state.locationSaveAsDefault = false;
+    state.locationSaveAsMessage = "";
+    state.locationBusy = false;
+    writePortalSessionCache();
+    renderCustomerHome();
+    return;
+  }
   const addressId = String(picked.savedAddressId || picked.addressId || "");
   const labelOwner = saveAddress ? customerFindSavedLabelOwner(label, "") : null;
   const targetAddressId = String(labelOwner?.addressId || addressId || "");
@@ -18310,41 +18666,19 @@ async function completeCustomerLocationSelection(form) {
 
 async function completeCustomerPickedLocationDirect(options = {}) {
   const picked = state.locationPicked || state.selectedLocation;
-  const cluster = customerLocationCluster(picked || {});
-  if (!picked || !cluster.clusterId) throw new Error("Pick a serviceable location first.");
-  const label = options.label || customerDisplayLocationLabel(picked) || picked.label || "Selected location";
-  const saveAsRecent = false;
+  if (!picked) throw new Error("Pick a location first.");
   state.locationBusy = true;
   try {
-    state.selectedLocation = {
-      ...picked,
-      label,
-      landmark: "",
-      personName: state.user?.displayName || "",
-      contactNumber: state.user?.phone || "",
-      savedAddressId: options.savedAddressId || picked.savedAddressId || picked.addressId || null,
-      clusterId: cluster.clusterId,
-      clusterName: cluster.name,
-      cityName: cluster.cityName,
-      zoneName: cluster.zoneName
-    };
-    state.customerRoutePrimaryStop = null;
-    state.customerRoutePrimaryCleared = false;
-    state.customerCartRouteEditIndex = -1;
-    state.customerCartRouteDeleteIndex = -1;
-    customerRememberLocation(state.selectedLocation, {
-      setPreferred: true,
-      rememberRecent: false
+    await customerSelectLocationForHomeDefault(picked, {
+      label: options.label || "",
+      source: options.source || picked.source || ""
     });
-    if (state.selectedLocation.savedAddressId || state.selectedLocation.addressId) {
-      await customerSetDefaultLocationAddress(state.selectedLocation.savedAddressId || state.selectedLocation.addressId);
-    }
     state.customerLocationPickerSheetOpen = false;
     state.customerView = "home";
     state.locationStep = "permission";
     state.locationBusy = false;
-    await loadCustomerCatalog({ clusterId: cluster.clusterId });
     writePortalSessionCache();
+    renderCustomerHome();
   } catch (error) {
     state.locationBusy = false;
     throw error;
@@ -20641,8 +20975,12 @@ document.addEventListener("click", async (event) => {
       if (fromConfirmLocation) {
         await openCustomerCurrentLocationConfirm({ returnStep: state.locationConfirmReturnStep || "manual" });
       } else {
-        await useCustomerCurrentLocation({ rememberRecent: false, setPreferred: false, deferUiUntilPermission: true });
-        updateCustomerLocationPickerPermissionUi();
+        const picked = await useCustomerCurrentLocation({ rememberRecent: false, setPreferred: false, deferUiUntilPermission: true });
+        await customerSelectLocationForHomeDefault(picked, { source: "current" });
+        state.locationBusy = false;
+        state.locationMessage = "";
+        closeCustomerLocationPickerSheet();
+        renderCustomerHome();
       }
     } catch (error) {
       state.locationBusy = false;
@@ -20754,14 +21092,8 @@ document.addEventListener("click", async (event) => {
         longitude: Number(address.longitude),
         source: "saved"
       }, { rememberRecent: false, setPreferred: !isCartStopLocationPick });
-      const cluster = customerLocationCluster(picked);
-      if (!cluster.clusterId) {
-        state.customerView = isCartStopLocationPick ? "cart" : "home";
-        state.customerLocationPickerSheetOpen = true;
-        state.locationBusy = false;
-        syncCustomerHomeLocationPickerSheet();
-        return;
-      }
+
+
       if (isCartStopLocationPick) {
         await putCustomerCartLocationStop({
           ...address,
@@ -20782,39 +21114,19 @@ document.addEventListener("click", async (event) => {
         label: address.label || "Saved",
         savedAddressId: address.addressId || null,
         addressId: address.addressId || picked.addressId || null,
-        isDefault: Boolean(address.isDefault)
+        isDefault: Boolean(address.isDefault),
+        source: "saved"
       };
-      state.locationPicked = customerStagePickedLocationForHome(state.locationPicked) || state.locationPicked;
-      if (!isCartStopLocationPick) {
-        const selectedAddressId = state.locationPicked.savedAddressId || state.locationPicked.addressId || "";
-        if (selectedAddressId) {
-          state.selectedLocation.isDefault = true;
-          state.customerAddresses = state.customerAddresses.map((item) => ({
-            ...item,
-            isDefault: String(item.addressId || "") === String(selectedAddressId)
-          }));
-          state.customerRecentLocations = state.customerRecentLocations.map((item) => ({
-            ...item,
-            isDefault: String(item.addressId || "") === String(selectedAddressId)
-          }));
-        }
-        state.locationBusy = false;
-        state.locationMessage = "";
-        closeCustomerLocationPickerSheet();
-        updateCustomerHomeLocationHeaderOnly();
-        writePortalSessionCache();
-        if (isSavedLocationsPagePick) {
-          state.customerView = "home";
-          render();
-        }
-        void (async () => {
-          if (selectedAddressId) await customerSetDefaultLocationAddress(selectedAddressId);
-          const clusterId = customerLocationCluster(state.selectedLocation || {}).clusterId;
-          if (clusterId) await loadCustomerCatalog({ clusterId }).catch(() => null);
-          writePortalSessionCache();
-        })();
-        return;
-      }
+      await customerSelectLocationForHomeDefault(state.locationPicked, {
+        label: address.label || "Saved",
+        source: "saved"
+      });
+      state.locationBusy = false;
+      state.locationMessage = "";
+      closeCustomerLocationPickerSheet();
+      state.customerView = "home";
+      renderCustomerHome();
+      return;
     } catch (error) {
       state.locationBusy = false;
       notify(error.message || "Unable to select saved address.");

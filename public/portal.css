@@ -13589,6 +13589,17 @@ body.portal-customer .customer-review-notification-stack > .portal-toast.is-revi
   font-weight: 700;
 }
 
+.portal-customer .zigo-commerce-home .zigo-native-location strong.not-serviceable {
+  width: max-content;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #dc2626;
+  font-size: 12px;
+  line-height: 1.1;
+}
+
 .portal-customer .zigo-commerce-home .zigo-native-location small {
   grid-column: 2;
   grid-row: 2;
@@ -20870,7 +20881,7 @@ body.portal-customer .zigo-commerce-home .zigo-home-category-grid {
 
 /* Home top spacing: keep the first service title close to the search box. */
 body.portal-customer .zigo-commerce-home .zigo-home-body {
-  padding-top: 4px !important;
+  padding-top: 10px !important;
 }
 
 body.portal-customer .zigo-commerce-home .zigo-home-service-master-section:first-child {
@@ -20936,6 +20947,15 @@ body.portal-customer .location-confirm-screen {
 body.portal-customer .zigo-commerce-home .zigo-native-hero,
 body.portal-customer .zigo-commerce-home .zigo-commerce-hero {
   padding-top: 12px !important;
+}
+
+body.portal-customer .zigo-commerce-home .zigo-native-hero {
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 60 !important;
+  background: #fff !important;
+  transform: translateZ(0);
+  will-change: transform;
 }
 
 body.portal-customer .customer-bookings-page .booking-sticky-header {

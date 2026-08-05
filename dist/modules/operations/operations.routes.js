@@ -9,7 +9,7 @@ import { addBookingRealtimeClient, emitBookingRealtimeEvent, ensureBookingRealti
 import { pokeBookingOrchestrationWorker } from "./bookingOrchestrator.js";
 import { getRazorpayPaymentDetail, listRazorpayPayments, listRazorpayPaymentsForBooking, reconcileRazorpayPayment } from "../payments/payments.repository.js";
 import { assignAssistantWithCalendarBlock, checkDispatchAvailability, createTemporaryHold, getNextAvailableTime, recalculateAssistantAvailability, releaseTemporaryHold } from "./assistantDispatchEngine.js";
-import { assignBooking, addCustomerDisputeMessage, cancelBookingByAdmin, confirmBookingPaymentByAdmin, createBookingByAdmin, forceCloseBooking, getBookingAvailabilityDecision, getBookingReportActivity, getBookingPriceQuote, getLaunchReport, listBookingReviews, listCustomerDisputes, listCustomerAddressesForBooking, listAssignableAssistantsForBooking, listBookings, listLiveOperations, reassignBooking, resolveCustomerDispute, reverseBookingLocation, searchBookingLocations, searchCustomersForBooking, validateBookingLocation } from "./operations.repository.js";
+import { assignBooking, addCustomerDisputeMessage, cancelBookingByAdmin, confirmBookingPaymentByAdmin, createBookingByAdmin, forceCloseBooking, getBookingAvailabilityDecision, getBookingReportActivity, getBookingPriceQuote, getLaunchReport, listBookingReviews, listCustomerUnserviceableLocationsReport, listCustomerDisputes, listCustomerAddressesForBooking, listAssignableAssistantsForBooking, listBookings, listLiveOperations, reassignBooking, resolveCustomerDispute, reverseBookingLocation, searchBookingLocations, searchCustomersForBooking, validateBookingLocation } from "./operations.repository.js";
 export const operationsRouter = Router();
 export const reportsRouter = Router();
 const bookingParamsSchema = z.object({ id: z.string().uuid() });
@@ -730,6 +730,15 @@ operationsRouter.get("/reviews", requireBookingMasterAccess, async (req, res, ne
     try {
         const query = reviewsQuerySchema.parse(req.query);
         res.json({ data: await listBookingReviews(query) });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+operationsRouter.get("/unserviceable-locations", requireBookingMasterAccess, async (req, res, next) => {
+    try {
+        const query = reviewsQuerySchema.parse(req.query);
+        res.json({ data: await listCustomerUnserviceableLocationsReport(query) });
     }
     catch (error) {
         next(error);

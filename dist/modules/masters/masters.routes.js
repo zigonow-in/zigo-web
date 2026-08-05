@@ -329,6 +329,8 @@ const categoryPriceBodySchema = z.object({
     availableForDuration: z.coerce.boolean().default(true),
     availableForExtend: z.coerce.boolean().default(false),
     availableForExpand: z.coerce.boolean().default(false),
+    isDurationForOffers: z.coerce.boolean().default(false),
+    isOfferEligible: z.coerce.boolean().default(true),
     isEnabled: z.coerce.boolean().default(true),
     isActive: active
 });

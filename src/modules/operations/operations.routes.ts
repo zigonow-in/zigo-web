@@ -29,6 +29,7 @@ import {
   getBookingPriceQuote,
   getLaunchReport,
   listBookingReviews,
+  listCustomerUnserviceableLocationsReport,
   listCustomerDisputes,
   listCustomerAddressesForBooking,
   listAssignableAssistantsForBooking,
@@ -776,6 +777,15 @@ operationsRouter.get("/reviews", requireBookingMasterAccess, async (req, res, ne
   try {
     const query = reviewsQuerySchema.parse(req.query);
     res.json({ data: await listBookingReviews(query) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.get("/unserviceable-locations", requireBookingMasterAccess, async (req, res, next) => {
+  try {
+    const query = reviewsQuerySchema.parse(req.query);
+    res.json({ data: await listCustomerUnserviceableLocationsReport(query) });
   } catch (error) {
     next(error);
   }

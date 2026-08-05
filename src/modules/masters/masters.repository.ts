@@ -455,6 +455,8 @@ async function ensureCategoryPriceSchema() {
         available_for_duration boolean not null default true,
         available_for_extend boolean not null default false,
         available_for_expand boolean not null default false,
+        is_duration_for_offers boolean not null default false,
+        is_offer_eligible boolean not null default true,
         slab jsonb not null default '{}'::jsonb,
         metadata jsonb not null default '{}'::jsonb,
         is_active boolean not null default true,
@@ -483,6 +485,8 @@ async function ensureCategoryPriceSchema() {
         add column if not exists available_for_duration boolean not null default true,
         add column if not exists available_for_extend boolean not null default false,
         add column if not exists available_for_expand boolean not null default false,
+        add column if not exists is_duration_for_offers boolean not null default false,
+        add column if not exists is_offer_eligible boolean not null default true,
         add column if not exists slab jsonb not null default '{}'::jsonb,
         add column if not exists metadata jsonb not null default '{}'::jsonb,
         add column if not exists is_enabled boolean not null default true,
@@ -3372,6 +3376,8 @@ type CategoryPriceInput = {
   availableForDuration?: boolean;
   availableForExtend?: boolean;
   availableForExpand?: boolean;
+  isDurationForOffers?: boolean;
+  isOfferEligible?: boolean;
   isEnabled?: boolean;
   isActive?: boolean;
   userId: string;
@@ -3477,6 +3483,8 @@ export async function listCategoryPriceRules(filters: CategoryPriceFilters = {})
         cpr.available_for_duration as "availableForDuration",
         cpr.available_for_extend as "availableForExtend",
         cpr.available_for_expand as "availableForExpand",
+        cpr.is_duration_for_offers as "isDurationForOffers",
+        cpr.is_offer_eligible as "isOfferEligible",
         cpr.slab,
         cpr.metadata,
         cpr.is_enabled as "isEnabled",
@@ -3514,8 +3522,8 @@ export async function createCategoryPriceRule(input: CategoryPriceInput) {
       insert into zigo.category_price_rules
         (scope_type, state_id, city_id, zone_id, cluster_id, category_id, time_duration_minutes,
          base_price, discount_type, discount_value, selling_price, waiting_charge_amount,
-         waiting_charge_time_minutes, available_for_duration, available_for_extend, available_for_expand, slab, metadata, is_enabled, is_active, created_by, updated_by)
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb, $19, $20, $21, $21)
+         waiting_charge_time_minutes, available_for_duration, available_for_extend, available_for_expand, is_duration_for_offers, is_offer_eligible, slab, metadata, is_enabled, is_active, created_by, updated_by)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb, $21, $22, $23, $23)
       returning id
     `,
     [
@@ -3535,8 +3543,10 @@ export async function createCategoryPriceRule(input: CategoryPriceInput) {
       slab.availableForDuration,
       slab.availableForExtend,
       slab.availableForExpand,
+      slab.isDurationForOffers,
+      slab.isOfferEligible,
       JSON.stringify(slab),
-      JSON.stringify({ label: slab.label, availableFor: { duration: slab.availableForDuration, extend: slab.availableForExtend, expand: slab.availableForExpand }, waitingCharges: { amount: slab.waitingChargeAmount, timeMinutes: slab.waitingChargeTimeMinutes } }),
+      JSON.stringify({ label: slab.label, availableFor: { duration: slab.availableForDuration, extend: slab.availableForExtend, expand: slab.availableForExpand, offers: slab.isDurationForOffers }, isOfferEligible: slab.isOfferEligible, waitingCharges: { amount: slab.waitingChargeAmount, timeMinutes: slab.waitingChargeTimeMinutes } }),
       input.isEnabled ?? true,
       input.isActive ?? true,
       input.userId
@@ -3569,11 +3579,13 @@ export async function updateCategoryPriceRule(id: string, input: CategoryPriceIn
           available_for_duration = $15,
           available_for_extend = $16,
           available_for_expand = $17,
-          slab = $18::jsonb,
-          metadata = $19::jsonb,
-          is_enabled = $20,
-          is_active = $21,
-          updated_by = $22,
+          is_duration_for_offers = $18,
+          is_offer_eligible = $19,
+          slab = $20::jsonb,
+          metadata = $21::jsonb,
+          is_enabled = $22,
+          is_active = $23,
+          updated_by = $24,
           updated_at = now()
       where id = $1 and coalesce(is_deleted, false) = false
       returning id
@@ -3596,8 +3608,10 @@ export async function updateCategoryPriceRule(id: string, input: CategoryPriceIn
       slab.availableForDuration,
       slab.availableForExtend,
       slab.availableForExpand,
+      slab.isDurationForOffers,
+      slab.isOfferEligible,
       JSON.stringify(slab),
-      JSON.stringify({ label: slab.label, availableFor: { duration: slab.availableForDuration, extend: slab.availableForExtend, expand: slab.availableForExpand }, waitingCharges: { amount: slab.waitingChargeAmount, timeMinutes: slab.waitingChargeTimeMinutes } }),
+      JSON.stringify({ label: slab.label, availableFor: { duration: slab.availableForDuration, extend: slab.availableForExtend, expand: slab.availableForExpand, offers: slab.isDurationForOffers }, isOfferEligible: slab.isOfferEligible, waitingCharges: { amount: slab.waitingChargeAmount, timeMinutes: slab.waitingChargeTimeMinutes } }),
       input.isEnabled ?? true,
       input.isActive ?? true,
       input.userId
@@ -4555,7 +4569,9 @@ function buildCategoryPriceSlab(input: CategoryPriceInput) {
     waitingChargeTimeMinutes: Math.max(0, Math.round(Number(input.waitingChargeTimeMinutes ?? 0))),
     availableForDuration: input.availableForDuration !== false,
     availableForExtend: input.availableForExtend === true,
-    availableForExpand: input.availableForExpand === true
+    availableForExpand: input.availableForExpand === true,
+    isDurationForOffers: input.isDurationForOffers === true,
+    isOfferEligible: input.isOfferEligible !== false
   };
 }
 

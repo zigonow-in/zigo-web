@@ -36,6 +36,7 @@ import {
   listCustomerPortalPreviousUsedLocations,
   listCustomerPortalServiceBoundaries,
   recordAssistantPortalLocationPing,
+  recordCustomerPortalUnserviceableLocation,
   listAssistantPortalTasks,
   listCustomerPortalAssistants,
   listCustomerPortalBookings,
@@ -151,6 +152,14 @@ const customerPreviousUsedLocationBodySchema = customerLocationValidationBodySch
   address: z.string().trim().min(3).max(2000),
   stateName: z.string().trim().max(150).nullable().optional(),
   postalCode: z.string().trim().max(20).nullable().optional()
+});
+const customerUnserviceableLocationBodySchema = customerLocationValidationBodySchema.extend({
+  title: z.string().trim().max(200).nullable().optional(),
+  address: z.string().trim().min(3).max(2000),
+  stateName: z.string().trim().max(150).nullable().optional(),
+  cityName: z.string().trim().max(150).nullable().optional(),
+  postalCode: z.string().trim().max(20).nullable().optional(),
+  metadata: z.record(z.unknown()).optional().default({})
 });
 const customerAddressBodySchema = z.object({
   label: z.string().trim().min(2).max(80).default("Home"),
@@ -446,13 +455,30 @@ portalRouter.get("/customer/events", async (req, res, next) => {
     req.socket?.setKeepAlive(true);
     res.flushHeaders();
     res.write("retry: 1000\n\n");
+    const sendSessionRevoked = (error: unknown) => {
+      const status = error instanceof HttpError ? error.statusCode : 401;
+      res.write(`event: customer_session_revoked\ndata: ${JSON.stringify({
+        at: new Date().toISOString(),
+        status,
+        message: error instanceof Error ? error.message : "Customer session expired."
+      })}\n\n`);
+      (res as Response & { flush?: () => void }).flush?.();
+    };
+    try {
+      await getPortalMe({ userId: auth.userId, actor: "customer" });
+    } catch (error) {
+      sendSessionRevoked(error);
+      res.end();
+      return;
+    }
     res.write(`event: connected\ndata: ${JSON.stringify({ connectedAt: new Date().toISOString(), stats: getBookingRealtimeStats() })}\n\n`);
     addBookingRealtimeClient();
     let cleanedUp = false;
+    let keepAlive: ReturnType<typeof setInterval> | null = null;
     const cleanup = () => {
       if (cleanedUp) return;
       cleanedUp = true;
-      clearInterval(keepAlive);
+      if (keepAlive) clearInterval(keepAlive);
       unsubscribe();
       removeBookingRealtimeClient();
     };
@@ -479,10 +505,20 @@ portalRouter.get("/customer/events", async (req, res, next) => {
       })
       .catch(() => undefined);
 
-    const keepAlive = setInterval(() => {
+    keepAlive = setInterval(() => {
       if (res.writableEnded || res.destroyed) return;
-      res.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString(), stats: getBookingRealtimeStats() })}\n\n`);
-    }, 25000);
+      getPortalMe({ userId: auth.userId, actor: "customer" })
+        .then(() => {
+          if (res.writableEnded || res.destroyed) return;
+          res.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString(), stats: getBookingRealtimeStats() })}\n\n`);
+        })
+        .catch((error) => {
+          if (res.writableEnded || res.destroyed) return;
+          sendSessionRevoked(error);
+          cleanup();
+          res.end();
+        });
+    }, 10000);
 
     req.on("close", cleanup);
     res.on("close", cleanup);
@@ -742,6 +778,15 @@ portalRouter.post("/customer/locations/validate", requirePortalAuth("customer"),
   try {
     const body = customerLocationValidationBodySchema.parse(req.body);
     res.json({ data: await validateCustomerPortalLocation(req.portalAuth!.userId, body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+portalRouter.post("/customer/unserviceable-locations", requirePortalAuth("customer"), async (req, res, next) => {
+  try {
+    const body = customerUnserviceableLocationBodySchema.parse(req.body);
+    res.status(201).json({ data: await recordCustomerPortalUnserviceableLocation(req.portalAuth!.userId, body) });
   } catch (error) {
     next(error);
   }

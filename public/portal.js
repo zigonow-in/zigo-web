@@ -10235,11 +10235,11 @@ function refreshCustomerLocationConfirmDetails() {
   const address = locationShortAddress(picked || {});
   const details = screen.querySelector(".location-confirm-details");
   const form = details?.querySelector("[data-location-continue-form]");
-  let message = details?.querySelector(":scope > .location-message.danger");
+  let message = details?.querySelector(":scope > .location-message.danger.location-confirm-service-message");
   if (state.locationMessage && !canContinue) {
     if (!message && form) {
       message = document.createElement("p");
-      message.className = "location-message danger";
+      message.className = "location-message danger location-confirm-service-message";
       details.insertBefore(message, form);
     }
     if (message) message.textContent = state.locationMessage;
@@ -10933,7 +10933,7 @@ if (!isServiceable) {
       <button class="location-current-btn" data-use-current-location data-location-map-current type="button">${customerIcon("map")}<span>Use current location</span></button>
     </section>
     <section class="location-pick-card location-confirm-details">
-      ${picked && !isServiceable ? `<p class="location-message danger">${escapeHtml(state.locationMessage || "Location not serviceable yet.")}</p>` : ""}
+      ${picked && !isServiceable ? `<p class="location-message danger location-confirm-service-message">${escapeHtml(state.locationMessage || "Location not serviceable yet.")}</p>` : ""}
       <form class="location-detail-form" data-location-continue-form>
         <div class="picked-location-title">
           <span class="${isServiceable ? "ok" : "bad"}">${customerIcon("map")}</span>
@@ -11684,7 +11684,7 @@ function bookingRows(tab = "all", rows = state.bookings || []) {
         </div>
       </div>
       <div class="booking-list-footer">
-        <button class="booking-see-details" type="button" data-track-booking="${escapeHtml(booking.id)}">View Details <span>�</span></button>
+        <button class="booking-see-details" type="button" data-track-booking="${escapeHtml(booking.id)}">View Details</button>
         <button class="booking-reorder-btn" type="button" data-reorder-booking="${escapeHtml(booking.id)}">Re-Order</button>
       </div>
     </article>`;
@@ -12599,11 +12599,13 @@ function customerTrackIcon(name, className = "") {
     calendar: `<path d="M8 2v4"></path><path d="M16 2v4"></path><path d="M3.5 9h17"></path><rect x="3.5" y="4" width="17" height="17" rx="2.5"></rect>`,
     timer: `<path d="M10 2h4"></path><path d="M12 14v-4"></path><path d="M12 22a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z"></path><path d="m19 5-1.5 1.5"></path>`,
     watch: `<circle cx="12" cy="13" r="7"></circle><path d="M9 2h6"></path><path d="M9 22h6"></path><path d="M12 9v4l2.5 1.5"></path>`,
+    rupee: `<path d="M7 5h10"></path><path d="M7 9h10"></path><path d="M8 5c2.8 0 5 2.2 5 5s-2.2 5-5 5H6l8 7"></path>`,
     headset: `<path d="M4 13v-1a8 8 0 0 1 16 0v1"></path><path d="M5 13h3v6H6a2 2 0 0 1-2-2v-2a2 2 0 0 1 1-2Z"></path><path d="M19 13h-3v6h2a2 2 0 0 0 2-2v-2a2 2 0 0 0-1-2Z"></path><path d="M16 19c0 1.2-1.3 2-3 2h-1"></path>`,
     homeFill: `<path d="M3.5 11.3 12 4l8.5 7.3"></path><path d="M5.8 10.4V20h12.4v-9.6"></path><path d="M9.6 20v-5.8h4.8V20"></path>`,
     market: `<path d="M5 10h14l-1-5H6l-1 5Z"></path><path d="M6.5 10v10h11V10"></path><path d="M9 20v-5h6v5"></path><path d="M8 14h2"></path><path d="M14 14h2"></path>`,
     homeSolid: `<path fill="currentColor" stroke="none" d="M4.5 11.2 12 4.8l7.5 6.4v8a.8.8 0 0 1-.8.8h-4.3v-5.2H9.6V20H5.3a.8.8 0 0 1-.8-.8v-8Z"></path>`,
     marketSolid: `<path fill="currentColor" stroke="none" d="M5.8 4.8h12.4l1 4.6H4.8l1-4.6Zm.5 5.6h11.4v8.8a.8.8 0 0 1-.8.8h-2.5v-4.7H9.6V20H7.1a.8.8 0 0 1-.8-.8v-8.8Zm2.1 2.7v1.7h2.2v-1.7H8.4Zm5 0v1.7h2.2v-1.7h-2.2Z"></path>`,
+    pinSolid: `<path fill="currentColor" stroke="none" d="M12 2.8a6.8 6.8 0 0 0-6.8 6.8c0 4.8 6.8 11.6 6.8 11.6s6.8-6.8 6.8-11.6A6.8 6.8 0 0 0 12 2.8Zm0 9.2a2.4 2.4 0 1 1 0-4.8 2.4 2.4 0 0 1 0 4.8Z"></path>`,
     camera: `<path d="M8.5 7 10 5h4l1.5 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3.5Z"></path><circle cx="12" cy="13.5" r="3.2"></circle>`,
     chat: `<path d="M21 11.5a8.4 8.4 0 0 1-8.8 8.4 9 9 0 0 1-4.1-1L3 20l1.2-4.2A8.3 8.3 0 0 1 3 11.5 8.4 8.4 0 0 1 11.8 3 8.4 8.4 0 0 1 21 11.5Z"></path><path d="M8 11h8"></path><path d="M8 14h5"></path>`,
     call: `<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.4 19.4 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.9a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.5c.9.3 1.9.6 2.9.7a2 2 0 0 1 1.7 2Z"></path>`,
@@ -12615,6 +12617,9 @@ function customerTrackIcon(name, className = "") {
     more: `<circle cx="12" cy="5" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="12" cy="19" r="1.6"></circle>`,
     maximize: `<path d="M8 3H5a2 2 0 0 0-2 2v3"></path><path d="M16 3h3a2 2 0 0 1 2 2v3"></path><path d="M8 21H5a2 2 0 0 1-2-2v-3"></path><path d="M16 21h3a2 2 0 0 0 2-2v-3"></path>`,
     minimize: `<path d="M8 3v3a2 2 0 0 1-2 2H3"></path><path d="M16 3v3a2 2 0 0 0 2 2h3"></path><path d="M8 21v-3a2 2 0 0 0-2-2H3"></path><path d="M16 21v-3a2 2 0 0 1 2-2h3"></path>`,
+    smile: `<circle cx="12" cy="12" r="8"></circle><path d="M8.6 10.2a1.1 1.1 0 1 0 0 .1"></path><path d="M15.4 10.2a1.1 1.1 0 1 0 0 .1"></path><path d="M8.1 14.2c.9 1.3 2.2 2 3.9 2s3-.7 3.9-2"></path>`,
+    smileBig: `<circle cx="12" cy="12" r="8.5"></circle><path d="M8.1 9.8a1 1 0 1 0 0 .1"></path><path d="M15.9 9.8a1 1 0 1 0 0 .1"></path><path d="M7.7 14.4c1.1 1.9 2.6 2.8 4.3 2.8s3.2-.9 4.3-2.8"></path>`,
+    starSmile: `<path fill="currentColor" stroke="none" d="m12 3.3 2.3 4.7 5.2.7-3.8 3.7.9 5.1-4.6-2.4-4.6 2.4.9-5.1-3.8-3.7 5.2-.7L12 3.3Z"></path><path d="M8.3 10.1a1 1 0 1 0 0 .1"></path><path d="M15.7 10.1a1 1 0 1 0 0 .1"></path><path d="M8 14c1 1.4 2.4 2.1 4 2.1s3-.7 4-2.1"></path>`,
     star: `<path fill="currentColor" stroke="none" d="m12 3.3 2.5 5.1 5.6.8-4 3.9.9 5.5-5-2.6-5 2.6.9-5.5-4-3.9 5.6-.8L12 3.3Z"></path>`,
     checks: `<path d="m4 13 3 3 5-7"></path><path d="m11 15 2 2 6-8"></path>`
   };
@@ -13314,6 +13319,56 @@ function customerTrackLocationRows(booking = {}) {
   return selected?.address ? [selected] : [];
 }
 
+function customerTrackLocationSaveLabel(location = {}) {
+  const metadata = location.metadata || {};
+  return String(
+    location.saveAs
+    || location.saveAsLabel
+    || location.addressLabel
+    || location.labelType
+    || metadata.saveAs
+    || metadata.saveAsLabel
+    || metadata.addressLabel
+    || location.label
+    || location.title
+    || location.name
+    || ""
+  ).trim();
+}
+
+function customerTrackLocationIconName(location = {}) {
+  const label = customerTrackLocationSaveLabel(location).toLowerCase();
+  if (label === "home" || label.includes("home")) return "homeSolid";
+  if (label === "work" || label.includes("work") || label.includes("office") || label.includes("business")) return "marketSolid";
+  return "pinSolid";
+}
+
+function customerTrackLocationIdentity(location = {}) {
+  const metadata = location.metadata || {};
+  const name = String(location.personName || location.nameOnAddress || metadata.personName || metadata.nameOnAddress || "").trim();
+  const mobile = customerDisplayMobile10(String(location.contactNumber || location.mobile || location.phone || metadata.contactNumber || metadata.mobile || metadata.phone || ""));
+  return [name, mobile].filter(Boolean).join(name && mobile ? " | " : "");
+}
+
+function customerTrackLocationFullAddress(location = {}) {
+  return String(location.address || location.addressText || location.detailAddress || location.formattedAddress || location.label || "").trim() || "Pick your service location";
+}
+
+function customerTrackLocationRowHtml(location = {}, index = 0) {
+  const title = taskLocationTitle(location, index);
+  const identity = customerTrackLocationIdentity(location);
+  const address = customerTrackLocationFullAddress(location);
+  const iconName = customerTrackLocationIconName(location);
+  return `<div class="customer-track-location-row customer-track-location-row-static">
+    <span class="customer-track-location-pin ${escapeHtml(iconName === "homeSolid" ? "home" : iconName === "marketSolid" ? "work" : "other")}">${customerTrackIcon(iconName)}</span>
+    <span class="customer-track-location-copy">
+      <b>${escapeHtml(title)}</b>
+      ${identity ? `<small class="customer-track-location-person">${escapeHtml(identity)}</small>` : ""}
+      <small class="customer-track-location-address">${escapeHtml(address)}</small>
+    </span>
+  </div>`;
+}
+
 function customerTrackLocationQuery(location = {}) {
   const latitude = Number(location.latitude);
   const longitude = Number(location.longitude);
@@ -13391,23 +13446,7 @@ function customerTrackLocationsHtml(booking = {}) {
       <div class="customer-track-location-rows">
         ${locations.length
           ? locations.map((location, index) => {
-            const browserUrl = customerTrackLocationBrowserUrl(location);
-            const appUrl = customerTrackLocationAppUrl(location, index);
-            const appleUrl = customerTrackLocationAppleUrl(location);
-            const title = taskLocationTitle(location, index);
-            const address = locationShortAddress(location);
-            const iconName = index === 0 ? "homeSolid" : "marketSolid";
-            const attrs = browserUrl
-              ? `type="button" data-track-map-location data-track-map-title="${escapeHtml(title)}" data-track-map-address="${escapeHtml(address)}" data-track-map-browser-url="${escapeHtml(browserUrl)}" data-track-map-app-url="${escapeHtml(appUrl)}" data-track-map-apple-url="${escapeHtml(appleUrl)}"`
-              : "";
-            return `<${browserUrl ? "button" : "div"} class="customer-track-location-row" ${attrs}>
-              <span class="customer-track-location-pin ${index === 0 ? "home" : "market"}">${customerTrackIcon(iconName)}</span>
-              <span class="customer-track-location-copy">
-                <b>${escapeHtml(title)}</b>
-                <small>${escapeHtml(address)}</small>
-              </span>
-              <span class="customer-track-location-arrow">${customerIcon("chevron")}</span>
-            </${browserUrl ? "button" : "div"}>`;
+            return customerTrackLocationRowHtml(location, index);
           }).join("")
           : `<div class="customer-track-location-empty">No locations added</div>`}
       </div>
@@ -13437,23 +13476,7 @@ function customerTrackLocationsUploadsHtml(booking = {}) {
             <div class="customer-track-location-rows">
               ${locations.length
                 ? locations.map((location, index) => {
-                  const browserUrl = customerTrackLocationBrowserUrl(location);
-                  const appUrl = customerTrackLocationAppUrl(location, index);
-                  const appleUrl = customerTrackLocationAppleUrl(location);
-                  const title = taskLocationTitle(location, index);
-                  const address = locationShortAddress(location);
-                  const iconName = index === 0 ? "homeSolid" : "marketSolid";
-                  const attrs = browserUrl
-                    ? `type="button" data-track-map-location data-track-map-title="${escapeHtml(title)}" data-track-map-address="${escapeHtml(address)}" data-track-map-browser-url="${escapeHtml(browserUrl)}" data-track-map-app-url="${escapeHtml(appUrl)}" data-track-map-apple-url="${escapeHtml(appleUrl)}"`
-                    : "";
-                  return `<${browserUrl ? "button" : "div"} class="customer-track-location-row" ${attrs}>
-                    <span class="customer-track-location-pin ${index === 0 ? "home" : "market"}">${customerTrackIcon(iconName)}</span>
-                    <span class="customer-track-location-copy">
-                      <b>${escapeHtml(title)}</b>
-                      <small>${escapeHtml(address)}</small>
-                    </span>
-                    <span class="customer-track-location-arrow">${customerIcon("chevron")}</span>
-                  </${browserUrl ? "button" : "div"}>`;
+                  return customerTrackLocationRowHtml(location, index);
                 }).join("")
                 : `<div class="customer-track-location-empty">No locations added</div>`}
             </div>
@@ -13681,6 +13704,16 @@ function customerTrackCustomTipValue(value = "") {
   return Number.isInteger(amount) && amount > 50 && amount <= 1000 ? amount : null;
 }
 
+function customerTrackTipIconHtml(type = "") {
+  const icons = {
+    smile20: `<circle cx="12" cy="12" r="9" fill="#fff7cf" stroke="#ffd95a" stroke-width="1.4"></circle><circle cx="8.8" cy="10.3" r="1.1" fill="#614100" stroke="none"></circle><circle cx="15.2" cy="10.3" r="1.1" fill="#614100" stroke="none"></circle><path d="M8.5 14.2c.9 1.4 2.1 2.1 3.5 2.1s2.6-.7 3.5-2.1" stroke="#614100" stroke-width="1.7" fill="none" stroke-linecap="round"></path>`,
+    smile30: `<circle cx="12" cy="12" r="9" fill="#fff2b8" stroke="#ffc83d" stroke-width="1.4"></circle><path d="M8.5 9.9h.1" stroke="#513900" stroke-width="2.5" stroke-linecap="round"></path><path d="M15.4 9.9h.1" stroke="#513900" stroke-width="2.5" stroke-linecap="round"></path><path d="M7.7 14.1c1.1 1.8 2.5 2.7 4.3 2.7s3.2-.9 4.3-2.7" stroke="#513900" stroke-width="1.8" fill="none" stroke-linecap="round"></path>`,
+    star50: `<path d="m12 3.7 2.4 4.8 5.3.8-3.8 3.7.9 5.3-4.8-2.5-4.8 2.5.9-5.3-3.8-3.7 5.3-.8L12 3.7Z" fill="#ffd538" stroke="#f4b400" stroke-width="1.2" stroke-linejoin="round"></path>`,
+    heartCustom: `<path d="M20.4 5.2a5.2 5.2 0 0 0-7.4 0L12 6.2l-1-1a5.2 5.2 0 0 0-7.4 7.4l1 1L12 21l7.4-7.4 1-1a5.2 5.2 0 0 0 0-7.4Z" fill="#0b6fe8" stroke="#0b6fe8" stroke-width="1.2"></path>`
+  };
+  return `<svg class="customer-track-tip-icon" viewBox="0 0 24 24" aria-hidden="true">${icons[type] || icons.smile20}</svg>`;
+}
+
 function customerTrackTipBookingKey(booking = {}) {
   return String(
     booking.id
@@ -13752,9 +13785,9 @@ function customerTrackTipCardHtml(booking = {}) {
   const customValue = customerTrackCustomTipValue(customText);
   const customInvalid = Boolean(customText) && customValue == null;
   const tipOptions = [
-    { value: 20, icon: "??" },
-    { value: 30, icon: "??" },
-    { value: 50, icon: "?" }
+    { value: 20, icon: customerTrackTipIconHtml("smile20") },
+    { value: 30, icon: customerTrackTipIconHtml("smile30") },
+    { value: 50, icon: customerTrackTipIconHtml("star50") }
   ];
   return `<section class="customer-track-tip-card ${locked ? "is-disabled" : ""}" aria-label="Tip your ZIGO assistant" aria-disabled="${locked ? "true" : "false"}">
     <div class="customer-track-tip-copy">
@@ -13767,12 +13800,12 @@ function customerTrackTipCardHtml(booking = {}) {
       <span class="customer-track-tip-spark two"></span>
     </div>
     <div class="customer-track-tip-options ${customOpen ? "is-custom-open" : ""}">
-      ${tipOptions.map((option) => `<button class="${selected === option.value ? "active" : ""}" data-track-tip-amount="${option.value}" type="button"${locked ? " disabled" : ""}><span>${option.icon}</span>?${option.value}</button>`).join("")}
-      ${customOpen ? `<label class="customer-track-tip-inline-custom"><span>?</span>
+      ${tipOptions.map((option) => `<button class="${selected === option.value ? "active" : ""}" data-track-tip-amount="${option.value}" type="button"${locked ? " disabled" : ""}><span class="customer-track-tip-currency">${option.icon}</span><span>${escapeHtml(String(option.value))}</span></button>`).join("")}
+      ${customOpen ? `<div class="customer-track-tip-inline-custom"><span class="customer-track-tip-currency">${customerTrackTipIconHtml("heartCustom")}</span>
         <input id="customer-track-tip-custom-${escapeHtml(bookingId)}" name="customerTrackTipCustom" data-track-tip-custom-input inputmode="numeric" type="text" pattern="[0-9]*" maxlength="4" value="${escapeHtml(customText)}" placeholder="Amount" autocomplete="off" aria-label="Custom tip amount" aria-describedby="customer-track-tip-error-${escapeHtml(bookingId)}"${customInvalid ? ` aria-invalid="true"` : ""}${locked ? " disabled" : ""}>
         <button ${customText ? "data-track-tip-custom-add" : "data-track-tip-custom-close"} type="button"${locked || customInvalid ? " disabled" : ""}>${customText ? "Add" : "Close"}</button>
-        <small id="customer-track-tip-error-${escapeHtml(bookingId)}" data-track-tip-custom-error class="${customInvalid ? "" : "hidden"}">Enter a whole amount from ?51 to ?1000.</small>
-      </label>` : `<button class="${customActive ? "active" : ""}" data-track-tip-custom type="button"${locked ? " disabled" : ""}>${customActive ? `?${escapeHtml(String(selected))} ${customerIcon("edit")}` : "<span>??</span>Custom"}</button>`}
+        <small id="customer-track-tip-error-${escapeHtml(bookingId)}" data-track-tip-custom-error class="${customInvalid ? "" : "hidden"}">Enter a whole amount from 51 to 1000.</small>
+      </div>` : `<button class="${customActive ? "active" : ""}" data-track-tip-custom type="button"${locked ? " disabled" : ""}>${customActive ? `<span class="customer-track-tip-currency">${customerTrackTipIconHtml("heartCustom")}</span><span>${escapeHtml(String(selected))}</span> ${customerIcon("edit")}` : `<span class="customer-track-tip-currency">${customerTrackTipIconHtml("heartCustom")}</span><span>Custom</span>`}</button>`}
     </div>
     <div class="customer-track-tip-footer">
       <button data-track-tip-clear type="button"${locked ? " disabled" : ""}>Clear Tip</button>
@@ -19639,6 +19672,19 @@ document.addEventListener("pointercancel", (event) => {
   endCustomerMapDrag(event);
 });
 
+document.addEventListener("pointerdown", (event) => {
+  const tipInput = event.target instanceof Element ? event.target.closest("[data-track-tip-custom-input]") : null;
+  if (!tipInput) return;
+  event.stopPropagation();
+  tipInput.focus?.({ preventScroll: true });
+}, true);
+
+document.addEventListener("click", (event) => {
+  const tipInput = event.target instanceof Element ? event.target.closest("[data-track-tip-custom-input]") : null;
+  if (!tipInput) return;
+  event.stopPropagation();
+  tipInput.focus?.({ preventScroll: true });
+}, true);
 document.addEventListener("pointerdown", (event) => {
   const pinInput = event.target instanceof Element ? event.target.closest("[data-assistant-task-pin-input]") : null;
   if (!pinInput) return;

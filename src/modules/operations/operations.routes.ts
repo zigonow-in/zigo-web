@@ -28,6 +28,7 @@ import {
   getBookingReportActivity,
   getBookingPriceQuote,
   getLaunchReport,
+  listAssistantAvailabilityBoard,
   listBookingReviews,
   listCustomerUnserviceableLocationsReport,
   listCustomerDisputes,
@@ -74,6 +75,12 @@ const paymentsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(5).max(100).default(20),
   search: z.string().trim().max(120).optional().default("")
+});
+const assistantAvailabilityBoardQuerySchema = z.object({
+  tab: z.enum(["blocked", "available"]).default("blocked"),
+  stateId: z.string().uuid().optional(), cityId: z.string().uuid().optional(),
+  zoneId: z.string().uuid().optional(), clusterId: z.string().uuid().optional(),
+  search: z.string().trim().max(160).optional().default("")
 });
 const reviewsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -250,10 +257,12 @@ async function bookingRealtimeAudience(bookingId: string) {
       from zigo.service_requests sr
       left join zigo.customers cu on cu.id = sr.customer_id
       left join lateral (
-        select assistant_id
-        from zigo.task_assignments
-        where service_request_id = sr.id or request_id = sr.id
-        order by assigned_at desc nulls last, offered_at desc nulls last, created_at desc
+        select assignment_candidate.assistant_id
+        from zigo.task_assignments assignment_candidate
+        where assignment_candidate.service_request_id = sr.id or assignment_candidate.request_id = sr.id
+        order by assignment_candidate.assigned_at desc nulls last,
+          assignment_candidate.offered_at desc nulls last,
+          assignment_candidate.id desc
         limit 1
       ) ta on true
       left join zigo.assistants a on a.id = ta.assistant_id
@@ -279,6 +288,15 @@ async function bookingRealtimeAudience(bookingId: string) {
 operationsRouter.get("/live", requirePermission("tasks.view"), async (_req, res, next) => {
   try {
     res.json({ data: await listLiveOperations() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.get("/assistants/availability", requirePermission("tasks.view"), async (req, res, next) => {
+  try {
+    const query = assistantAvailabilityBoardQuerySchema.parse(req.query);
+    res.json({ data: await listAssistantAvailabilityBoard(query) });
   } catch (error) {
     next(error);
   }

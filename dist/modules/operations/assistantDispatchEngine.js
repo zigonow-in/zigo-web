@@ -2,6 +2,7 @@ import { env } from "../../config/env.js";
 import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
 import { redisCommand } from "../../infra/redis.js";
+import { requestOlaJson } from "../maps/olaMaps.service.js";
 let dispatchSchemaReady = null;
 export function normalizePresenceStatus(value) {
     const normalized = String(value || "").trim().toUpperCase();
@@ -546,19 +547,11 @@ async function estimateRoadEtaMinutes(origin, destination, config) {
         return fallback;
     // Keep the adapter best-effort: dispatch must not fail merely because maps is slow or rate-limited.
     try {
-        const url = new URL("https://api.olamaps.io/routing/v1/directions");
+        const url = new URL("https://api.olamaps.io/routing/v1/directions/basic");
         url.searchParams.set("origin", `${origin.latitude},${origin.longitude}`);
         url.searchParams.set("destination", `${destination.latitude},${destination.longitude}`);
         url.searchParams.set("mode", "two_wheeler");
-        if (env.OLA_MAPS_API_KEY)
-            url.searchParams.set("api_key", env.OLA_MAPS_API_KEY);
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 1200);
-        const response = await fetch(url, { signal: controller.signal });
-        clearTimeout(timer);
-        if (!response.ok)
-            return fallback;
-        const payload = await response.json();
+        const payload = await requestOlaJson(url.pathname, Object.fromEntries(url.searchParams), { method: "POST", timeoutMs: 1200 });
         const route = payload.routes?.[0] || payload.data?.routes?.[0] || payload.route || payload.data?.route;
         const seconds = Number(route?.duration ?? route?.duration_seconds ?? route?.summary?.duration ?? route?.summary?.durationSeconds);
         return Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.ceil(seconds / 60)) : fallback;

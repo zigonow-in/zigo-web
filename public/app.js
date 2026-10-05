@@ -5,6 +5,7 @@ const state = {
   roles: JSON.parse(localStorage.getItem("zigoAdminRoles") || "[]"),
   section: "dashboard"
 };
+let adminSessionGeneration = 0;
 
 const zigoBasePath = (() => {
   const fromMeta = document.querySelector('meta[name="zigo-base-path"]')?.content || "";
@@ -101,6 +102,13 @@ let bookingEngineQuickReplyFilters = { search: "", actor: "", bookingStage: "", 
 let customerDisputeFilters = { status: "open", search: "", page: 1, pageSize: 20 };
 let supportTicketFilters = { status: "all", search: "", page: 1, pageSize: 20 };
 let paymentFilters = { status: "all", search: "", page: 1, pageSize: 20 };
+let assistantReportFilters = { search: "", stateId: "", cityId: "", zoneId: "", clusterId: "" };
+let assistantReportSearchTimer = null;
+let assistantAvailabilityBoardFilters = { tab: "blocked", stateId: "", cityId: "", zoneId: "", clusterId: "", search: "" };
+let assistantAvailabilityBoardSearchTimer = null;
+let assistantAvailabilityBoardDeadlineTimer = null;
+let assistantAvailabilityBoardRealtimeTimer = null;
+let assistantAvailabilityBoardRefreshing = false;
 const adminReportFilters = {};
 const adminReportSearchTimers = {};
 let paymentSearchTimer = null;
@@ -121,8 +129,10 @@ let assistantPage = 1;
 let assistantPageSize = 10;
 let assistantOnlineTimer = null;
 let assistantDocPreviewState = { assistantId: "", documentId: "", replacementFile: null };
-let olaMapsSdkPromise = null;
 let polygonMapInstance = null;
+let polygonMapCleanup = null;
+let polygonMapLoading = null;
+let locationMapEditor = null;
 let appAlertTimer = null;
 let bookingMasterSelectedCustomer = null;
 let bookingMasterSearchTimer = null;
@@ -261,6 +271,11 @@ function adminAuthError(message = "Session expired. Please login again.") {
 }
 
 function clearAdminSession(message = "") {
+  adminSessionGeneration++;
+  Object.keys(cache).forEach(key => { cache[key] = Array.isArray(cache[key]) ? [] : null; });
+  if (assistantOnlineTimer) clearInterval(assistantOnlineTimer);
+  localStorage.removeItem('zigoBookingRealtimeLastEventId');
+  bookingRealtimeLastEventId = '';
   stopBookingRealtime();
   stopNewBookingRingtone();
   if (bookingPendingAssignmentRefreshTimer) clearTimeout(bookingPendingAssignmentRefreshTimer);
@@ -353,6 +368,7 @@ function money(value) {
 async function refreshAdminSession() {
   if (!state.refreshToken) throw adminAuthError();
   if (!adminRefreshPromise) {
+    const generation = adminSessionGeneration;
     adminRefreshPromise = fetch(withBasePath("/auth/refresh"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -360,7 +376,12 @@ async function refreshAdminSession() {
     })
       .then(async (response) => {
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw adminAuthError(payload.error?.message || "Session expired. Please login again.");
+        if (!response.ok) {
+          const error = new Error(payload.error?.message || 'Unable to refresh session.');
+          error.status = response.status;
+          throw error;
+        }
+        if (generation !== adminSessionGeneration) throw adminAuthError();
         saveSession(payload.data);
         return payload.data;
       })
@@ -372,11 +393,13 @@ async function refreshAdminSession() {
 }
 
 async function api(path, options = {}) {
+  const generation = adminSessionGeneration;
   const headers = new Headers(options.headers || {});
   if (options.body) headers.set("Content-Type", "application/json");
   if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
   const response = await fetch(withBasePath(path), { ...options, headers });
   const payload = await response.json().catch(() => ({}));
+  if (generation !== adminSessionGeneration) throw adminAuthError();
   const shouldRefresh =
     response.status === 401 &&
     options.skipAuthRefresh !== true &&
@@ -388,13 +411,15 @@ async function api(path, options = {}) {
       return await api(path, { ...options, skipAuthRefresh: true });
     } catch (refreshError) {
       const message = refreshError.message || "Session expired. Please login again.";
-      clearAdminSession(message);
-      throw adminAuthError(message);
+      if ([400,401,403].includes(Number(refreshError.status))) clearAdminSession(message);
+      throw refreshError;
     }
   }
   if (!response.ok) {
     const error = new Error(payload.error?.message || "Request failed");
     error.status = response.status;
+    if (response.status === 401 && path !== '/auth/login') clearAdminSession(error.message);
+    if (response.status === 403 && /account.*not active|account access ended|admin role required/i.test(error.message)) clearAdminSession('Unable to sign in. Please contact support.');
     throw error;
   }
   return payload;
@@ -1523,48 +1548,22 @@ function drawPolygonOverlay(coordinates, bounds) {
     .join(" ");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = `
-    <polygon points="${points}" fill="rgba(255, 45, 85, 0.36)" stroke="#ff0033" stroke-width="5" stroke-linejoin="round"></polygon>
-    <polyline points="${points}" fill="none" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"></polyline>
+    <polygon points="${points}" fill="rgba(0, 93, 242, 0.20)" stroke="#005df2" stroke-width="3" stroke-linejoin="round"></polygon>
   `;
 }
 
 function loadOlaMapsSdk() {
-  if (window.OlaMaps) return Promise.resolve();
-  if (olaMapsSdkPromise) return olaMapsSdkPromise;
-  olaMapsSdkPromise = new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "https://www.unpkg.com/olamaps-web-sdk@latest/dist/olamaps-web-sdk.umd.js";
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Unable to load Ola Maps Web SDK. Check internet access and CSP settings."));
-    document.head.appendChild(script);
-  });
-  return olaMapsSdkPromise;
+  return window.ZigoMaps.loadSdk();
 }
 
 function cleanOlaStyleUrl(styleUrl) {
-  const url = new URL(styleUrl);
+  const url = new URL(styleUrl, window.location.href);
   url.searchParams.delete("api_key");
   return url.toString();
 }
 
 function fallbackRasterStyle() {
-  return {
-    version: 8,
-    sources: {
-      osm: {
-        type: "raster",
-        tiles: [
-          "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
-          "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
-          "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        ],
-        tileSize: 256,
-        attribution: "OpenStreetMap contributors"
-      }
-    },
-    layers: [{ id: "osm", type: "raster", source: "osm" }]
-  };
+  return window.ZigoMaps.rasterStyle();
 }
 
 function isOlaMapAuthOrDomainError(error) {
@@ -1573,21 +1572,123 @@ function isOlaMapAuthOrDomainError(error) {
   return status === "401" || status === "403" || /401|403|unauthori[sz]ed|forbidden|domain is not allowed|domain.*not allowed|api key/i.test(message);
 }
 
-async function renderPolygonMap(cluster) {
+const locationPolygonStyles = {
+  zones: { name: "Zone", color: "#005df2", width: 3, order: 0 },
+  clusters: { name: "Cluster", color: "#16a34a", width: 2.5, order: 1 },
+  "micro-markets": { name: "Micro Market", color: "#f97316", width: 2, order: 2 },
+  "nano-markets": { name: "Nano Market", color: "#dc2626", width: 2, order: 3 }
+};
+
+document.addEventListener("pointerdown", event => {
+  document.querySelectorAll(".polygon-filter-dropdown[open]").forEach(dropdown => {
+    if (!dropdown.contains(event.target)) dropdown.open = false;
+  });
+}, true);
+
+async function renderPolygonMap(cluster, level = "clusters") {
+  polygonMapLoading?.destroy();
+  polygonMapLoading = window.ZigoPolygonEditor.createMapLoading($("#polygonMapWrap"), $("#polygonMap"), () => { $("#polygonMapAlert").textContent = "Map loading timed out. Reopen the map to retry."; $("#polygonMapAlert").classList.remove("d-none"); });
+  polygonMapCleanup?.(); polygonMapCleanup = null;
+  polygonMapInstance?.remove?.();
+  polygonMapInstance = null;
+  const modal = $("#polygonModal");
+  modal.classList.remove("polygon-map-fullwidth");
+  const viewControls = $("#polygonMapControls");
+  viewControls.querySelectorAll("button").forEach(button => { button.disabled = true; });
+  const fullWidthButton = $("#polygonMapFullWidthButton");
+  fullWidthButton.setAttribute("aria-pressed", "false"); fullWidthButton.title = "Full-width map"; fullWidthButton.setAttribute("aria-label", "Full-width map"); fullWidthButton.innerHTML = '<i data-lucide="Maximize2"></i>';
+  window.ZigoPolygonEditor.renderMapControlIcons();
   const alertEl = $("#polygonMapAlert");
   alertEl.classList.add("d-none");
   alertEl.textContent = "";
   $("#polygonModalTitle").textContent = `${cluster.name || "Cluster"} Polygon`;
+  $("#polygonModalLevel").textContent = `${locationPolygonStyles[level].name} Boundary`;
   $("#polygonWktPreview").textContent = cluster.polygonDescription || "";
   $("#polygonModal").classList.remove("d-none");
   $("#polygonMap").innerHTML = "";
   $("#polygonOverlay").innerHTML = "";
+  const filterRoot = $("#polygonMapFilters");
+  filterRoot.classList.toggle("d-none", level !== "zones");
+  filterRoot.innerHTML = ""; filterRoot.onchange = null;
+  const legendLevels = level === "zones" ? Object.keys(locationPolygonStyles) : [level];
+  $("#polygonMapLegend").innerHTML = legendLevels.map((key) => `<span><i style="--boundary-color:${locationPolygonStyles[key].color}" aria-hidden="true"></i>${locationPolygonStyles[key].name}</span>`).join("");
 
   try {
     const coordinates = parseWktPolygon(cluster.polygonDescription);
+    const records = level === "zones" ? (await api(`/masters/location-hierarchy/zones/${cluster.id}/polygons`)).data : [{ ...cluster, level }];
+    const features = (records || []).map((record) => {
+      if (!record.polygonDescription?.trim()) return null;
+      let boundary;
+      try { boundary = parseWktPolygon(record.polygonDescription); }
+      catch { return null; }
+      if (boundary.length < 4) return null;
+      const style = locationPolygonStyles[record.level];
+      return { type: "Feature", geometry: { type: "Polygon", coordinates: [boundary] }, properties: { id: record.id, name: record.name, level: record.level, color: record.level === "nano-markets" && /^#[0-9a-f]{6}$/i.test(record.polygonColor) ? record.polygonColor : style.color, width: style.width, order: style.order, marketTypes: record.level === "nano-markets" ? record.marketTypes || [] : [] } };
+    }).filter(Boolean).sort((a, b) => a.properties.order - b.properties.order);
+    let visibleFeatures = features;
+    const selectedLevels = new Set(Object.keys(locationPolygonStyles));
+    const selectedTypes = new Set();
+    let allTypes = true;
+    const nanoFeatures = features.filter(feature => feature.properties.level === "nano-markets");
+    let typeOptions = [];
+    if (level === "zones") {
+      const masterTypes = (await api("/masters/market-types")).data || [];
+      const typeMap = new Map(masterTypes.filter(type => type.isActive).map(type => [type.id, type]));
+      nanoFeatures.forEach(feature => feature.properties.marketTypes.forEach(type => typeMap.set(type.id, type)));
+      typeOptions = [...typeMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+      typeOptions.forEach(type => selectedTypes.add(type.id));
+      const marketAssignmentCount = nanoFeatures.reduce((sum, feature) => sum + new Set(feature.properties.marketTypes.map(type => type.id)).size, 0);
+      const checkbox = (group, value, name, color, count) => `<label class="polygon-filter-option"><input type="checkbox" data-polygon-filter="${group}" value="${value}" checked><i style="--boundary-color:${color}" aria-hidden="true"></i><span>${escapeHtml(name)}</span><span class="polygon-count-circle" data-filter-count="${group}:${value}">${count}</span></label>`;
+      const levelNames = { zones: "Zone", clusters: "Cluster", "micro-markets": "Micro Market", "nano-markets": "Nano Market" };
+      const shortNames = { zones: "Z", clusters: "C", "micro-markets": "MM", "nano-markets": "NM" };
+      filterRoot.innerHTML = `<div><span class="polygon-filter-label">Boundary</span><details class="polygon-filter-dropdown"><summary class="form-select" data-level-filter-summary>All</summary><div class="polygon-filter-options">
+        ${checkbox("level", "all", "All", "#000000", features.length)}
+        ${Object.entries(locationPolygonStyles).map(([key, style]) => checkbox("level", key, levelNames[key], style.color, features.filter(feature => feature.properties.level === key).length)).join("")}
+      </div></details></div><fieldset class="polygon-market-type-group"><legend>Market Type <span data-market-match-count></span></legend><div class="polygon-market-type-row">
+        ${checkbox("type", "all", "All", "#000000", marketAssignmentCount)}
+        ${typeOptions.map(type => checkbox("type", type.id, type.name, /^#[0-9a-f]{6}$/i.test(type.color) ? type.color : "#dc2626", nanoFeatures.filter(feature => feature.properties.marketTypes.some(item => item.id === type.id)).length)).join("")}
+      </div></fieldset>`;
+      function updateFilters() {
+        const matchingMarkets = new Set(nanoFeatures.filter(feature => allTypes || feature.properties.marketTypes.some(type => selectedTypes.has(type.id))).map(feature => feature.properties.id));
+        visibleFeatures = features.filter(feature => selectedLevels.has(feature.properties.level) || (feature.properties.level === "nano-markets" && matchingMarkets.has(feature.properties.id))).map(feature => ({ ...feature, properties: { ...feature.properties, marketTypeMatches: feature.properties.level !== "nano-markets" || matchingMarkets.has(feature.properties.id) } }));
+        const counts = Object.fromEntries(Object.keys(levelNames).map(key => [key, features.filter(feature => feature.properties.level === key).length]));
+        filterRoot.querySelector("[data-level-filter-summary]").innerHTML = Object.keys(levelNames).filter(key => selectedLevels.has(key) || (key === "nano-markets" && matchingMarkets.size)).map(key => `<span class="polygon-level-count" title="${levelNames[key]}"><i style="--boundary-color:${locationPolygonStyles[key].color}" aria-hidden="true"></i><span class="polygon-count-circle">${key === "nano-markets" && !selectedLevels.has(key) ? matchingMarkets.size : counts[key]}</span><span>${shortNames[key]}</span></span>`).join("") || "Select boundary";
+        for (const [key, count] of Object.entries(counts)) filterRoot.querySelector(`[data-filter-count="level:${key}"]`).textContent = count;
+        filterRoot.querySelector('[data-filter-count="level:all"]').textContent = features.length;
+        const levelAll = filterRoot.querySelector('[data-polygon-filter="level"][value="all"]');
+        levelAll.checked = selectedLevels.size === Object.keys(levelNames).length;
+        levelAll.indeterminate = selectedLevels.size > 0 && !levelAll.checked;
+        const typeAll = filterRoot.querySelector('[data-polygon-filter="type"][value="all"]');
+        typeAll.checked = allTypes; typeAll.indeterminate = !allTypes && selectedTypes.size > 0;
+        filterRoot.querySelector("[data-market-match-count]").textContent = `${matchingMarkets.size} / ${nanoFeatures.length} Nano Market`;
+        if (polygonMapInstance?.getSource?.("cluster-polygon-source")) { drawPolygon(); fitVisiblePolygons(); }
+      }
+      filterRoot.onchange = event => {
+        const input = event.target;
+        const group = input.dataset.polygonFilter;
+        if (!group) return;
+        const selection = group === "level" ? selectedLevels : selectedTypes;
+        if (input.value === "all") {
+          selection.clear();
+          if (input.checked) (group === "level" ? Object.keys(levelNames) : typeOptions.map(type => type.id)).forEach(value => selection.add(value));
+          filterRoot.querySelectorAll(`[data-polygon-filter="${group}"]`).forEach(option => { option.checked = input.checked; });
+          if (group === "type") allTypes = input.checked;
+          if (group === "level" && !input.checked) {
+            selectedTypes.clear(); allTypes = false;
+            filterRoot.querySelectorAll('[data-polygon-filter="type"]').forEach(option => { option.checked = false; });
+          }
+        } else {
+          if (input.checked) selection.add(input.value); else selection.delete(input.value);
+          if (group === "type") allTypes = selectedTypes.size === typeOptions.length;
+        }
+        updateFilters();
+      };
+      filterRoot.onkeydown = event => { if (event.key === "Escape") { const details = event.target.closest("details"); if (details) { details.open = false; details.querySelector("summary").focus(); event.stopPropagation(); } } };
+      updateFilters();
+    }
     const config = await api("/config/maps");
     const { olaMapsApiKey, olaMapsStyleUrl } = config.data || {};
-    if (!olaMapsApiKey) throw new Error("Ola Maps API key is not configured. Add OLA_MAPS_API_KEY in zigo-admin .env and restart the admin server.");
+    if (!olaMapsApiKey) throw new Error("Ola Maps is not configured. Add server OAuth credentials or an API key in .env and restart the server.");
     await loadOlaMapsSdk();
     const bounds = boundsFromCoordinates(coordinates);
     const center = [(bounds.minLng + bounds.maxLng) / 2, (bounds.minLat + bounds.maxLat) / 2];
@@ -1597,22 +1698,66 @@ async function renderPolygonMap(cluster) {
       olaMaps.init({
         style,
         container: "polygonMap",
+        transformRequest: window.ZigoMaps.transformRequest,
         center,
         zoom: 12
       });
-    polygonMapInstance = initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
+    polygonMapInstance = await initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
+    polygonMapLoading.connect(polygonMapInstance, ["cluster-polygon-source", "cluster-polygon-point-source", "nano-market-color-sections"]);
     let usedFallback = false;
-    polygonMapInstance.on("error", (event) => {
+    let fittedMap = null;
+    let resizeFrame;
+    function fitVisiblePolygons(duration = 450) {
+      if (!visibleFeatures.length || !polygonMapInstance?.fitBounds) return;
+      const boundary = boundsFromCoordinates(visibleFeatures.flatMap(feature => feature.geometry.coordinates[0]));
+      polygonMapInstance.stop?.();
+      polygonMapInstance.fitBounds([[boundary.minLng, boundary.minLat], [boundary.maxLng, boundary.maxLat]], {
+        padding: { top: 28, bottom: 32, left: 28, right: 64 }, duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration,
+        bearing: 0, pitch: 0, maxZoom: polygonMapInstance.getMaxZoom?.() || 22
+      });
+    }
+    const scheduleResize = () => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => {
+        if (!polygonMapInstance || modal.classList.contains("d-none")) return;
+        polygonMapInstance.resize();
+        if (polygonMapInstance.getSource("cluster-polygon-source")) fitVisiblePolygons();
+      });
+    };
+    const setFullWidth = enabled => {
+      modal.classList.toggle("polygon-map-fullwidth", enabled);
+      const label = enabled ? "Exit full-width map" : "Full-width map";
+      fullWidthButton.title = label; fullWidthButton.setAttribute("aria-label", label); fullWidthButton.setAttribute("aria-pressed", String(enabled));
+      fullWidthButton.innerHTML = `<i data-lucide="${enabled ? "Minimize2" : "Maximize2"}"></i>`;
+      window.ZigoPolygonEditor.renderMapControlIcons(); scheduleResize();
+    };
+    fullWidthButton.onclick = () => setFullWidth(!modal.classList.contains("polygon-map-fullwidth"));
+    modal.onkeydown = event => { if (event.key === "Escape" && modal.classList.contains("polygon-map-fullwidth")) { setFullWidth(false); event.preventDefault(); fullWidthButton.focus(); } };
+    viewControls.onclick = event => {
+      const button = event.target.closest("[data-map-view-command]");
+      if (!button || button.disabled || !polygonMapInstance) return;
+      const command = button.dataset.mapViewCommand;
+      if (command === "fit") fitVisiblePolygons();
+      else if (command === "zoom-in") polygonMapInstance.zoomIn({ duration: 250 });
+      else polygonMapInstance.zoomOut({ duration: 250 });
+    };
+    const resizeObserver = new ResizeObserver(scheduleResize);
+    resizeObserver.observe($("#polygonMapWrap"));
+    polygonMapCleanup = () => { resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); fullWidthButton.onclick = null; modal.onkeydown = null; viewControls.onclick = null; modal.classList.remove("polygon-map-fullwidth"); };
+    const sectionFeatures = features.flatMap(feature => window.ZigoPolygonEditor.splitMarketSections(feature.geometry.coordinates, feature.properties.marketTypes).map(section => ({ ...section, properties: { ...section.properties, polygonId: feature.properties.id } })));
+    polygonMapInstance.on("error", async (event) => {
       const message = event?.error?.message || "Ola Maps failed to load one or more map resources. Check API key, domain restrictions, and network access.";
       if (!usedFallback && isOlaMapAuthOrDomainError(event?.error || message)) {
+        polygonMapLoading.begin();
         usedFallback = true;
         polygonMapInstance?.remove?.();
         $("#polygonMap").innerHTML = "";
         $("#polygonOverlay").innerHTML = "";
-        polygonMapInstance = initMap(fallbackRasterStyle());
-        polygonMapInstance.on("load", drawWhenReady);
-        polygonMapInstance.on("idle", drawPolygon);
-        alertEl.textContent = `${message}. Showing fallback map tiles. Add this admin domain to the Ola Maps credentials whitelist to use Ola vector tiles.`;
+        try { polygonMapInstance = await initMap(fallbackRasterStyle()); polygonMapLoading.connect(polygonMapInstance, ["cluster-polygon-source", "cluster-polygon-point-source", "nano-market-color-sections"]); }
+        catch { polygonMapLoading.fail(); alertEl.textContent = "Map unavailable. Reopen the preview to retry."; alertEl.classList.remove("d-none"); return; }
+        if (polygonMapInstance.loaded?.()) drawWhenReady();
+        else polygonMapInstance.once("load", drawWhenReady);
+        alertEl.textContent = `${message}. Showing Ola map images. Check server credentials and provider permissions if the problem persists.`;
       } else {
         alertEl.textContent = message;
       }
@@ -1624,18 +1769,16 @@ async function renderPolygonMap(cluster) {
       const lineLayerId = "cluster-polygon-line";
       const pointSourceId = "cluster-polygon-point-source";
       const pointLayerId = "cluster-polygon-points";
-      const geojson = {
-        type: "Feature",
-        geometry: { type: "Polygon", coordinates: [coordinates] },
-        properties: { name: cluster.name || "Cluster" }
-      };
+      const geojson = { type: "FeatureCollection", features: visibleFeatures };
+      const visibleIds = new Set(visibleFeatures.filter(feature => feature.properties.marketTypeMatches !== false).map(feature => feature.properties.id));
+      const sectionsGeojson = { type: "FeatureCollection", features: sectionFeatures.filter(section => visibleIds.has(section.properties.polygonId)) };
       const pointsGeojson = {
         type: "FeatureCollection",
-        features: coordinates.slice(0, -1).map((coordinate, index) => ({
+        features: visibleFeatures.flatMap((feature) => feature.geometry.coordinates[0].slice(0, -1).map((coordinate, index) => ({
           type: "Feature",
           geometry: { type: "Point", coordinates: coordinate },
-          properties: { index }
-        }))
+          properties: { index, color: feature.properties.color }
+        })))
       };
       if (!polygonMapInstance.getSource || !polygonMapInstance.addSource) return;
       if (!polygonMapInstance.getSource(sourceId)) {
@@ -1644,51 +1787,45 @@ async function renderPolygonMap(cluster) {
           id: fillLayerId,
           type: "fill",
           source: sourceId,
-          paint: { "fill-color": "#ff2d55", "fill-opacity": 0.28 }
+          paint: { "fill-color": ["get", "color"], "fill-opacity": ["case", ["==", ["get", "marketTypeMatches"], false], 0, [">", ["length", ["get", "marketTypes"]], 0], 0, 0.12] },
+          layout: { "fill-sort-key": ["get", "order"] }
         });
+        polygonMapInstance.addSource("nano-market-color-sections", { type: "geojson", data: sectionsGeojson });
+        polygonMapInstance.addLayer({ id: "nano-market-color-sections-fill", type: "fill", source: "nano-market-color-sections", paint: { "fill-color": ["get", "color"], "fill-opacity": 0.28 } });
         polygonMapInstance.addLayer({
           id: lineLayerId,
           type: "line",
           source: sourceId,
-          paint: { "line-color": "#ff0033", "line-width": 5, "line-opacity": 0.98 }
+          paint: { "line-color": ["get", "color"], "line-width": ["get", "width"], "line-opacity": ["case", ["==", ["get", "marketTypeMatches"], false], 0.45, 1] },
+          layout: { "line-sort-key": ["get", "order"] }
         });
         polygonMapInstance.addSource(pointSourceId, { type: "geojson", data: pointsGeojson });
         polygonMapInstance.addLayer({
           id: pointLayerId,
           type: "circle",
           source: pointSourceId,
-          paint: { "circle-color": "#003880", "circle-radius": 4, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 }
+          paint: { "circle-color": ["get", "color"], "circle-radius": 3, "circle-stroke-color": "#ffffff", "circle-stroke-width": 1 }
         });
+      } else {
+        polygonMapInstance.getSource(sourceId).setData(geojson);
+        polygonMapInstance.getSource(pointSourceId).setData(pointsGeojson);
+        polygonMapInstance.getSource("nano-market-color-sections").setData(sectionsGeojson);
       }
-      if (polygonMapInstance.resize) polygonMapInstance.resize();
-      if (polygonMapInstance.fitBounds) {
-        polygonMapInstance.fitBounds(
-          [
-            [bounds.minLng, bounds.minLat],
-            [bounds.maxLng, bounds.maxLat]
-          ],
-          { padding: 48, duration: 500 }
-        );
+      $("#polygonOverlay").innerHTML = "";
+      viewControls.querySelectorAll("button").forEach(button => { button.disabled = button.dataset.mapViewCommand === "fit" && !visibleFeatures.length; });
+      if (polygonMapInstance.fitBounds && fittedMap !== polygonMapInstance) {
+        fittedMap = polygonMapInstance;
+        fitVisiblePolygons(0);
       }
     }
-    setTimeout(() => polygonMapInstance?.resize?.(), 150);
     function drawWhenReady() {
       polygonMapInstance?.resize?.();
-      drawPolygonOverlay(coordinates, bounds);
       drawPolygon();
-      setTimeout(() => {
-        drawPolygonOverlay(coordinates, bounds);
-        drawPolygon();
-      }, 250);
-      setTimeout(() => {
-        drawPolygonOverlay(coordinates, bounds);
-        drawPolygon();
-      }, 750);
     }
     if (polygonMapInstance.loaded && polygonMapInstance.loaded()) drawWhenReady();
-    else polygonMapInstance.on("load", drawWhenReady);
-    polygonMapInstance.on("idle", drawPolygon);
+    else polygonMapInstance.once("load", drawWhenReady);
   } catch (error) {
+    polygonMapLoading?.fail();
     alertEl.textContent = error.message;
     alertEl.classList.remove("d-none");
   }
@@ -5559,6 +5696,8 @@ function assistantBaseMatchesFilters(assistant = {}) {
   const cityId = $("#assistantCityFilter")?.value || "";
   const zoneId = $("#assistantZoneFilter")?.value || "";
   const clusterId = $("#assistantClusterFilter")?.value || "";
+  const microMarketId = $("#assistantMicroMarketFilter")?.value || "";
+  const nanoMarketId = $("#assistantNanoMarketFilter")?.value || "";
   const text = [
     assistant.displayName,
     assistant.phone,
@@ -5573,7 +5712,9 @@ function assistantBaseMatchesFilters(assistant = {}) {
     (!query || text.includes(query)) &&
     (!cityId || assistant.cityId === cityId) &&
     (!zoneId || assistant.zoneId === zoneId) &&
-    (!clusterId || assistant.currentClusterId === clusterId || assistant.clusters?.some((cluster) => cluster.clusterId === clusterId))
+    (!clusterId || assistant.currentClusterId === clusterId || assistant.areaAssignments?.working?.clusters?.includes(clusterId) || assistant.clusters?.some((cluster) => cluster.isActive !== false && cluster.clusterId === clusterId)) &&
+    (!microMarketId || assistant.areaAssignments?.working?.microMarkets?.includes(microMarketId)) &&
+    (!nanoMarketId || assistant.areaAssignments?.working?.nanoMarkets?.includes(nanoMarketId))
   );
 }
 
@@ -5653,9 +5794,10 @@ function assistantDocumentPreview(documents = [], assistantId = "") {
     const label = document.documentTypeName || document.documentTypeCode || document.originalName || "Document";
     const dot = `<span class="assistant-doc-status-dot ${assistantStatusDotClass(document.verificationStatus || "verifying")}"></span>`;
     if (document.previewUrl) {
+      const previewUrl = assetUrl(document.previewUrl);
       const previewAttrs = `data-action="preview-assistant-doc" data-doc-id="${escapeHtml(document.id || "")}" data-doc-index="${index}" title="${escapeHtml(label)}"`;
       if (String(document.mimeType || "").startsWith("image/")) {
-        return `<button class="assistant-doc-preview image-thumb-button" ${previewAttrs} type="button"><img src="${escapeHtml(document.previewUrl)}" alt="${escapeHtml(label)}">${dot}</button>`;
+        return `<button class="assistant-doc-preview image-thumb-button" ${previewAttrs} type="button"><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(label)}">${dot}</button>`;
       }
       return `<button class="assistant-doc-preview assistant-doc-file" ${previewAttrs} type="button">DOC${dot}</button>`;
     }
@@ -5677,6 +5819,7 @@ function openAssistantDocPreview(assistantId, documentIdOrIndex = 0) {
     : Number(documentIdOrIndex);
   const boundedIndex = Math.max(0, Math.min(requestedIndex >= 0 ? requestedIndex : 0, docs.length - 1));
   const document = docs[boundedIndex];
+  const previewUrl = assetUrl(document.previewUrl);
   const title = document.documentTypeName || document.documentTypeCode || document.originalName || `Document ${boundedIndex + 1}`;
   const statusValue = ["verified", "verifying", "rejected"].includes(document.verificationStatus) ? document.verificationStatus : "verifying";
   assistantDocPreviewState = { assistantId, documentId: document.id || "", replacementFile: null };
@@ -5692,13 +5835,13 @@ function openAssistantDocPreview(assistantId, documentIdOrIndex = 0) {
   $("#imagePreviewLarge").classList.toggle("d-none", !isImage);
   $("#documentPreviewFrame").classList.toggle("d-none", isImage);
   $("#documentPreviewLink").classList.toggle("d-none", false);
-  $("#documentPreviewLink").href = document.previewUrl;
+  $("#documentPreviewLink").href = previewUrl;
   if (isImage) {
-    $("#imagePreviewLarge").src = document.previewUrl;
+    $("#imagePreviewLarge").src = previewUrl;
     $("#documentPreviewFrame").src = "";
   } else {
     $("#imagePreviewLarge").src = "";
-    $("#documentPreviewFrame").src = document.previewUrl;
+    $("#documentPreviewFrame").src = previewUrl;
   }
   $("#previewPrevButton").classList.toggle("d-none", docs.length <= 1);
   $("#previewNextButton").classList.toggle("d-none", docs.length <= 1);
@@ -5758,6 +5901,10 @@ async function saveAssistantDocPreviewStatus() {
     });
     document.verificationStatus = statusValue;
     const assistant = cache.assistantMasters.find((item) => item.id === assistantDocPreviewState.assistantId);
+    if (hadReplacement && assistant) {
+      const refreshed = await api(`/verification/assistants/${assistantDocPreviewState.assistantId}/documents`);
+      assistant.documents = refreshed.data || [];
+    }
     if (assistant) {
       const lifecycle = assistantProfileLifecycle(assistant);
       assistant.status = lifecycle.verificationStatus;
@@ -5976,6 +6123,24 @@ function assistantStatusCards(items) {
   </div>`;
 }
 
+function assistantListingArea(assistant, scope) {
+  const title = scope === 'working' ? 'Working Area' : 'Assign Area';
+  const area = assistant.areaAssignments?.[scope];
+  const legacy = (assistant.clusters || []).filter(item => item.isActive !== false);
+  const levels = [
+    ['clusters', 'Cluster', 'allClusters', cache.clusters || []],
+    ['microMarkets', 'Micro Market', 'allMicroMarkets', cache.assistantAreaMicroMarkets || []],
+    ['nanoMarkets', 'Nano Market', 'allNanoMarkets', cache.assistantAreaNanoMarkets || []]
+  ];
+  const rows = levels.map(([key, label, flag, records]) => {
+    const ids = area?.[key] || (key === 'clusters' ? [...new Set(scope === 'working' ? [...legacy.map(item => item.clusterId), assistant.currentClusterId].filter(Boolean) : [assistant.currentClusterId].filter(Boolean))] : []);
+    const names = ids.map(id => records.find(item => item.id === id)?.name || legacy.find(item => item.clusterId === id)?.clusterName || (id === assistant.currentClusterId ? assistant.currentClusterName : '') || id);
+    const display = names.length ? `${area?.[flag] ? `All (${names.length}): ` : ''}${names.slice(0,2).join(', ')}${names.length > 2 ? ` +${names.length-2} more` : ''}` : 'Not assigned';
+    return `<span class="assistant-listing-area-line" title="${escapeHtml(names.join(', ') || display)}"><small>${label}</small><span>${escapeHtml(display)}</span></span>`;
+  }).join('');
+  return `<button class="assistant-listing-area" data-action="open-assistant-master-cell" data-field="cluster" data-area-listing-tab="${scope}" data-id="${escapeHtml(assistant.id)}" type="button" aria-label="Edit ${title}"><strong>${title}</strong>${rows}</button>`;
+}
+
 function assistantCards(items) {
   if (!items.length) return `<div class="empty-state">No assistants found.</div>`;
   const rows = items.map((assistant) => {
@@ -5999,7 +6164,8 @@ function assistantCards(items) {
           ${assistantLoginCapsule(assistant)}
         </div>
       </div>
-      <div class="assistant-record-location">${assistantClusterPreview(assistant)}</div>
+      <div class="assistant-record-location">${assistantListingArea(assistant, 'working')}</div>
+      <div class="assistant-record-location">${assistantListingArea(assistant, 'assign')}</div>
       <div class="assistant-record-docs" data-assistant-docs="${escapeHtml(assistant.id)}">${assistantDocumentPreview(assistant.documents || [], assistant.id)}</div>
       <div class="assistant-record-vehicle">${assistantVehiclePreview(assistant)}</div>
       <div class="assistant-record-status">${status(lifecycle.isActive ? "active" : "deactive")}<small>${escapeHtml(createdOn)}</small></div>
@@ -6010,7 +6176,7 @@ function assistantCards(items) {
     </article>`;
   }).join("");
   return `<div class="assistant-report">
-    <div class="assistant-report-head"><span>Assistant</span><span>Cluster</span><span>Documents</span><span>Vehicle</span><span>Status</span><span>Action</span></div>
+    <div class="assistant-report-head"><span>Assistant</span><span>Working Area</span><span>Assign Area</span><span>Documents</span><span>Vehicle</span><span>Status</span><span>Action</span></div>
     ${rows}
   </div>`;
 }
@@ -6032,6 +6198,27 @@ function assistantPaginationControls(totalRecords, totalPages) {
   </div>`;
 }
 
+function refreshAssistantListingLocationFilters() {
+  const cityId = $("#assistantCityFilter")?.value || "";
+  const zoneSelect = $("#assistantZoneFilter");
+  const clusterSelect = $("#assistantClusterFilter");
+  const microSelect = $("#assistantMicroMarketFilter");
+  const nanoSelect = $("#assistantNanoMarketFilter");
+  if (!zoneSelect || !clusterSelect || !microSelect || !nanoSelect) return;
+  const setOptions = (select, label, items) => {
+    const value = items.some(item => item.id === select.value) ? select.value : '';
+    setSelectOptions(select, label, items, value);
+  };
+  setOptions(zoneSelect, 'All Zones', activeItems(cache.zones).filter(item => !cityId || item.cityId === cityId));
+  const clusters = activeItems(cache.clusters).filter(item => (!cityId || item.cityId === cityId) && (!zoneSelect.value || item.zoneId === zoneSelect.value));
+  setOptions(clusterSelect, 'All Clusters', clusters);
+  const clusterIds = new Set(clusterSelect.value ? [clusterSelect.value] : clusters.map(item => item.id));
+  const micros = (cache.assistantAreaMicroMarkets || []).filter(item => clusterIds.has(item.parentId));
+  setOptions(microSelect, 'All Micro Markets', micros);
+  const microIds = new Set(microSelect.value ? [microSelect.value] : micros.map(item => item.id));
+  setOptions(nanoSelect, 'All Nano Markets', (cache.assistantAreaNanoMarkets || []).filter(item => microIds.has(item.parentId)));
+}
+
 function renderAssistantRecords() {
   const target = $("#assistantRecords");
   if (!target) return;
@@ -6048,14 +6235,16 @@ function renderAssistantRecords() {
 }
 
 async function loadAssistant() {
-  const [assistants, cities, zones, clusters, states, documentTypes, vehicles] = await Promise.all([
+  const [assistants, cities, zones, clusters, states, documentTypes, vehicles, microMarkets, nanoMarkets] = await Promise.all([
     api("/assistant-master"),
     safeApi("/masters/cities"),
     safeApi("/masters/zones"),
     safeApi("/masters/clusters"),
     safeApi("/masters/states"),
     safeApi("/verification/document-types"),
-    safeApi("/vehicle-master")
+    safeApi("/vehicle-master"),
+    safeApi("/masters/location-hierarchy/micro-markets"),
+    safeApi("/masters/location-hierarchy/nano-markets")
   ]);
   cache.assistantMasters = (assistants.data || []).map((assistant) => ({
     ...assistant,
@@ -6068,6 +6257,8 @@ async function loadAssistant() {
   cache.states = states.data || [];
   cache.documentTypes = documentTypes.data || [];
   cache.vehicleMasters = vehicles.data || [];
+  cache.assistantAreaMicroMarkets = microMarkets.data || [];
+  cache.assistantAreaNanoMarkets = nanoMarkets.data || [];
   $("#assistantSection").innerHTML =
     pageTitleBlock("Assistant", "Search, verify, edit, and manage assistant records") +
     `<div class="assistant-page">
@@ -6077,6 +6268,8 @@ async function loadAssistant() {
           <select id="assistantCityFilter" class="form-select"><option value="">All Cities</option>${optionRows(activeItems(cache.cities))}</select>
           <select id="assistantZoneFilter" class="form-select"><option value="">All Zones</option>${optionRows(activeItems(cache.zones))}</select>
           <select id="assistantClusterFilter" class="form-select"><option value="">All Clusters</option>${optionRows(activeItems(cache.clusters))}</select>
+          <select id="assistantMicroMarketFilter" class="form-select" aria-label="Micro Market filter"><option value="">All Micro Markets</option>${optionRows(cache.assistantAreaMicroMarkets)}</select>
+          <select id="assistantNanoMarketFilter" class="form-select" aria-label="Nano Market filter"><option value="">All Nano Markets</option>${optionRows(cache.assistantAreaNanoMarkets)}</select>
           <button class="btn btn-primary" data-action="assistant-search" type="button">Search</button>
         </div>
         <div class="assistant-tabs-row">
@@ -6094,6 +6287,7 @@ async function loadAssistant() {
       <div id="assistantRecords" class="assistant-record-list"></div>
     </div>`;
   if (assistantOnlineTimer) clearInterval(assistantOnlineTimer);
+  refreshAssistantListingLocationFilters();
   assistantOnlineTimer = setInterval(() => {
     if (state.section === "assistant" && cache.assistantMasters.some(assistantIsOnline)) refreshAssistantOnlineTimers();
   }, 60000);
@@ -6309,6 +6503,193 @@ function refreshSurgeRuleTargetCascade(level = "service", selected = {}) {
     if (form.elements.serviceId) form.elements.serviceId.value = serviceId;
     setSelectOptions(form.elements.categoryId, "All", serviceId ? filterCategoriesByService(serviceId) : activeItems(cache.categories || []), categoryId);
   }
+}
+
+let assistantAreaEditor = null;
+let assistantAreaPopoverTimer;
+
+function assistantAreaAssignmentIndex() {
+  const index = {working: {}, assign: {}};
+  for (const scope of ['working', 'assign']) {
+    for (const level of ['clusters', 'microMarkets', 'nanoMarkets']) index[scope][level] = new Map();
+    for (const assistant of cache.assistantMasters || []) {
+      const saved = assistant.areaAssignments?.[scope];
+      const legacyClusters = scope === 'working'
+        ? [...(assistant.clusters || []).filter(item => item.isActive !== false).map(item => item.clusterId || item.id), assistant.currentClusterId].filter(Boolean)
+        : [assistant.currentClusterId].filter(Boolean);
+      for (const level of ['clusters', 'microMarkets', 'nanoMarkets']) {
+        const ids = saved?.[level] || (level === 'clusters' ? legacyClusters : []);
+        for (const id of new Set(ids)) {
+          if (!index[scope][level].has(id)) index[scope][level].set(id, []);
+          index[scope][level].get(id).push(assistant);
+        }
+      }
+    }
+  }
+  return index;
+}
+
+function hideAssistantAreaPopover() {
+  clearTimeout(assistantAreaPopoverTimer);
+  const popup = document.getElementById('assistantAreaAssignedPopover');
+  if (popup) popup.hidden = true;
+  document.querySelectorAll('[data-area-assigned][aria-expanded="true"]').forEach(button => button.setAttribute('aria-expanded', 'false'));
+}
+
+function showAssistantAreaPopover(button) {
+  clearTimeout(assistantAreaPopoverTimer);
+  const {areaAssigned: scope, areaLevel: level, areaId: id} = button.dataset;
+  const assignments = assistantAreaEditor?.assignments?.[scope]?.[level];
+  if (!assignments) return;
+  const assistants = id === 'all'
+    ? [...new Map(assistantAreaCandidates(scope, level).flatMap(item => assignments.get(item.id) || []).map(assistant => [assistant.id, assistant])).values()]
+    : assignments.get(id) || [];
+  let popup = document.getElementById('assistantAreaAssignedPopover');
+  if (!popup) {
+    popup = document.createElement('div'); popup.id = 'assistantAreaAssignedPopover';
+    popup.className = 'assistant-area-assigned-popover'; popup.setAttribute('role', 'region');
+    popup.setAttribute('aria-label', 'Assigned assistants'); document.body.append(popup);
+    popup.addEventListener('pointerenter', () => clearTimeout(assistantAreaPopoverTimer));
+    popup.addEventListener('pointerleave', () => { assistantAreaPopoverTimer = setTimeout(hideAssistantAreaPopover, 180); });
+  }
+  hideAssistantAreaPopover();
+  popup.innerHTML = `<strong>${assistants.length} Assigned</strong>${assistants.length ? assistants.map(assistant => `<div class="assistant-area-assigned-person"><span class="assistant-area-assigned-avatar">${assistant.profilePictureUrl ? `<img src="${escapeHtml(assetUrl(assistant.profilePictureUrl))}" alt="" onerror="this.hidden=true">` : escapeHtml((assistant.displayName || 'A').charAt(0))}</span><div><span>${escapeHtml(assistant.displayName || assistant.assistantCode || 'Assistant')}</span><small>${escapeHtml(assistant.phone || '-')}</small></div></div>`).join('') : '<p class="helper-text">No assistants assigned</p>'}`;
+  popup.hidden = false; button.setAttribute('aria-expanded', 'true');
+  const bounds = button.getBoundingClientRect();
+  popup.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - popup.offsetWidth - 8))}px`;
+  const below = bounds.bottom + 6;
+  popup.style.top = `${Math.max(8, below + popup.offsetHeight <= window.innerHeight - 8 ? below : bounds.top - popup.offsetHeight - 6)}px`;
+}
+
+document.addEventListener('pointerover', event => {
+  const button = event.target.closest('[data-area-assigned]');
+  if (button && !button.contains(event.relatedTarget)) showAssistantAreaPopover(button);
+});
+document.addEventListener('pointerout', event => {
+  const button = event.target.closest('[data-area-assigned]');
+  if (button && !button.contains(event.relatedTarget)) assistantAreaPopoverTimer = setTimeout(hideAssistantAreaPopover, 180);
+});
+document.addEventListener('focusin', event => { if (event.target.matches('[data-area-assigned]')) showAssistantAreaPopover(event.target); });
+document.addEventListener('keydown', event => { if (event.key === 'Escape') hideAssistantAreaPopover(); });
+document.addEventListener('focusout', event => {
+  if (event.target.matches('[data-area-assigned]')) assistantAreaPopoverTimer = setTimeout(hideAssistantAreaPopover, 180);
+});
+document.addEventListener('scroll', event => {
+  if (!(event.target instanceof Element) || !event.target.closest('#assistantAreaAssignedPopover')) hideAssistantAreaPopover();
+}, true);
+window.addEventListener('resize', hideAssistantAreaPopover);
+
+function assistantAreaCandidates(scope, level) {
+  const editor = assistantAreaEditor;
+  const area = editor[scope];
+  const working = editor.working;
+  if (level === "clusters") return activeItems(cache.clusters).filter(item => item.cityId === area.cityId && (!area.zoneId || item.zoneId === area.zoneId) && (scope === "working" || working.clusters.includes(item.id)));
+  const items = level === "microMarkets" ? editor.micros : editor.nanos;
+  const parents = level === "microMarkets" ? area.clusters : area.microMarkets;
+  return items.filter(item => parents.includes(item.parentId) && (scope === "working" || working[level].includes(item.id)));
+}
+
+function renderAssistantAreas() {
+  if (!assistantAreaEditor) return;
+  hideAssistantAreaPopover();
+  for (const scope of ["working", "assign"]) {
+    const area = assistantAreaEditor[scope];
+    for (const [level, label, flag] of [["clusters", "Cluster", "allClusters"], ["microMarkets", "Micro Market", "allMicroMarkets"], ["nanoMarkets", "Nano Market", "allNanoMarkets"]]) {
+      const items = assistantAreaCandidates(scope, level);
+      area[level] = area[flag] ? items.map(item => item.id) : area[level].filter(id => items.some(item => item.id === id));
+      const host = document.querySelector(`[data-area-list="${scope}-${level}"]`);
+      const assigned = assistantAreaEditor.assignments[scope][level];
+      const total = new Set(items.flatMap(item => (assigned.get(item.id) || []).map(assistant => assistant.id))).size;
+      const row = (id, name, checked, count) => `<div class="assistant-area-option-row"><label><input type="checkbox" data-area-scope="${scope}" data-area-level="${level}" value="${escapeHtml(id)}" ${checked ? 'checked' : ''}> <span>${escapeHtml(name)}</span></label><button type="button" class="assistant-area-assigned-count" data-area-assigned="${scope}" data-area-level="${level}" data-area-id="${escapeHtml(id)}" aria-expanded="false" aria-controls="assistantAreaAssignedPopover" aria-label="${escapeHtml(name)}: ${count} assigned assistants">[${count}] Assigned</button></div>`;
+      host.innerHTML = `<details class="assistant-area-dropdown"><summary>${label}: ${area[flag] ? "All" : `${area[level].length} selected`}</summary><div class="assistant-area-options">${row('all','All',area[flag],total)}${items.map(item => row(item.id,item.name,area[level].includes(item.id),(assigned.get(item.id)||[]).length)).join('')}${items.length ? "" : '<span class="helper-text">No locations available</span>'}</div></details>`;
+    }
+  }
+}
+
+function refreshAssistantAreaScope(scope, level) {
+  const area = assistantAreaEditor[scope];
+  const panel = document.querySelector(`[data-area-panel="${scope}"]`);
+  const working = assistantAreaEditor.working;
+  if (level !== "refresh") area.stateId = panel.querySelector('[data-area-parent="stateId"]').value;
+  if (level === "stateId") { area.cityId = ""; area.zoneId = ""; }
+  else if (level !== "refresh") area.cityId = panel.querySelector('[data-area-parent="cityId"]').value;
+  if (level === "cityId") area.zoneId = "";
+  else if (level === "zoneId") area.zoneId = panel.querySelector('[data-area-parent="zoneId"]').value;
+  const cities = activeItems(cache.cities).filter(item => item.stateId === area.stateId && (scope === "working" || item.id === working.cityId));
+  const zones = activeItems(cache.zones).filter(item => item.cityId === area.cityId && (scope === "working" || working.clusters.some(id => cache.clusters.find(cluster => cluster.id === id)?.zoneId === item.id)));
+  if (area.zoneId && !zones.some(item => item.id === area.zoneId)) area.zoneId = "";
+  setSelectOptions(panel.querySelector('[data-area-parent="stateId"]'), "Select State", activeItems(cache.states).filter(item => scope === "working" || item.id === working.stateId), area.stateId);
+  setSelectOptions(panel.querySelector('[data-area-parent="cityId"]'), "Select City", cities, area.cityId);
+  setSelectOptions(panel.querySelector('[data-area-parent="zoneId"]'), "All Zones", zones, area.zoneId);
+  if (scope === "working") {
+    assistantAreaEditor.assign.stateId = area.stateId;
+    assistantAreaEditor.assign.cityId = area.cityId;
+    if (area.zoneId) assistantAreaEditor.assign.zoneId = area.zoneId;
+  }
+  renderAssistantAreas();
+  if (scope === "working") refreshAssistantAreaScope("assign", "refresh");
+}
+
+document.addEventListener("click", event => {
+  const assignedButton = event.target.closest('[data-area-assigned]');
+  if (assignedButton) showAssistantAreaPopover(assignedButton);
+  else if (!event.target.closest('#assistantAreaAssignedPopover')) hideAssistantAreaPopover();
+  const tab = event.target.closest('[data-area-tab]');
+  if (tab) {
+    const form = tab.closest('form');
+    form.querySelectorAll('[data-area-tab]').forEach(item => item.setAttribute('aria-selected', String(item === tab)));
+    form.querySelectorAll('[data-area-panel]').forEach(panel => { panel.hidden = panel.dataset.areaPanel !== tab.dataset.areaTab; });
+  }
+  document.querySelectorAll('.assistant-area-dropdown[open]').forEach(item => { if (!item.contains(event.target)) item.open = false; });
+});
+
+document.addEventListener("change", event => {
+  const input = event.target;
+  if (!assistantAreaEditor) return;
+  if (input.matches('[data-area-parent]')) {
+    refreshAssistantAreaScope(input.closest('[data-area-panel]').dataset.areaPanel, input.dataset.areaParent);
+  } else if (input.matches('[data-area-scope]')) {
+    const scope = input.dataset.areaScope;
+    const level = input.dataset.areaLevel;
+    const area = assistantAreaEditor[scope];
+    const flag = {clusters: 'allClusters', microMarkets: 'allMicroMarkets', nanoMarkets: 'allNanoMarkets'}[level];
+    if (input.value === 'all') { area[flag] = input.checked; if (!input.checked) area[level] = []; }
+    else {
+      area[flag] = false;
+      area[level] = input.checked ? [...new Set([...area[level], input.value])] : area[level].filter(id => id !== input.value);
+    }
+    renderAssistantAreas();
+    if (scope === 'working') refreshAssistantAreaScope('assign', 'refresh');
+    const dropdown = document.querySelector(`[data-area-list="${scope}-${level}"] details`);
+    if (dropdown) dropdown.open = true;
+  }
+});
+
+async function initializeAssistantAreas(assistant) {
+  const form = document.querySelector('[data-form="assistant-master-cluster"]');
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const [micros, nanos] = await Promise.all([api('/masters/location-hierarchy/micro-markets'), api('/masters/location-hierarchy/nano-markets')]);
+    if (!form.isConnected) return;
+    const cluster = cache.clusters.find(item => item.id === assistant.currentClusterId);
+    const cityId = assistant.areaAssignments?.working?.cityId || cluster?.cityId || assistant.cityId || "";
+    const stateId = cache.cities.find(item => item.id === cityId)?.stateId || "";
+    const defaults = {stateId, cityId, zoneId: cluster?.zoneId || "", clusters: [], microMarkets: [], nanoMarkets: [], allClusters: true, allMicroMarkets: true, allNanoMarkets: true};
+    const legacyIds = (assistant.clusters || []).filter(item => item.isActive !== false).map(item => item.clusterId || item.id);
+    if (assistant.currentClusterId && !legacyIds.includes(assistant.currentClusterId)) legacyIds.push(assistant.currentClusterId);
+    assistantAreaEditor = { assignments: assistantAreaAssignmentIndex(), micros: micros.data, nanos: nanos.data, working: {...defaults, ...(legacyIds.length ? {clusters: legacyIds, allClusters: false} : {}), ...assistant.areaAssignments?.working}, assign: {...defaults, ...assistant.areaAssignments?.assign} };
+    for (const scope of ["working", "assign"]) {
+      const area = assistantAreaEditor[scope];
+      const panel = form.querySelector(`[data-area-panel="${scope}"]`);
+      setSelectOptions(panel.querySelector('[data-area-parent="stateId"]'), "Select State", activeItems(cache.states).filter(item => scope === "working" || item.id === stateId), area.stateId);
+      setSelectOptions(panel.querySelector('[data-area-parent="cityId"]'), "Select City", activeItems(cache.cities).filter(item => item.stateId === area.stateId && (scope === "working" || item.id === cityId)), area.cityId);
+      setSelectOptions(panel.querySelector('[data-area-parent="zoneId"]'), "All Zones", activeItems(cache.zones).filter(item => item.cityId === area.cityId), area.zoneId || "");
+    }
+    renderAssistantAreas();
+    refreshAssistantAreaScope("assign", "refresh");
+    button.disabled = false;
+  } catch (error) { setAssistantMasterEditModalAlert(error.message); }
 }
 
 function refreshAssistantClusterCascade(level = "state") {
@@ -6558,13 +6939,11 @@ function assistantMasterModalForm(assistant, field) {
   if (field === "cluster") {
     return `<form class="master-form stack" data-form="assistant-master-cluster">
       <input type="hidden" name="assistantId" value="${escapeHtml(assistant.id)}">
-      <select class="form-select" id="assistantClusterStateSelect" name="stateId" required><option value="">Select State</option>${optionRows(activeItems(cache.states))}</select>
-      <select class="form-select" id="assistantClusterCitySelect" name="cityId" required><option value="">Select City</option></select>
-      <select class="form-select" id="assistantClusterZoneSelect" name="zoneId"><option value="">Select Zone</option></select>
-      <select class="form-select" id="assistantClusterSelect" name="clusterId" required><option value="">Select Cluster</option></select>
+      <div class="assistant-area-tabs" role="tablist">${["working", "assign"].map(scope => `<button type="button" role="tab" aria-selected="${scope === "working"}" data-area-tab="${scope}">${scope === "working" ? "Working Area" : "Assign Area"}</button>`).join("")}</div>
+      ${["working", "assign"].map(scope => `<section class="stack" data-area-panel="${scope}" role="tabpanel" ${scope === "assign" ? "hidden" : ""}><h3>${scope === "working" ? "Working Area" : "Assign Area"}</h3>${scope === "assign" ? '<p class="helper-text">The designated area where the assistant waits when no task is assigned.</p>' : ""}<label>State<select class="form-select" data-area-parent="stateId"><option value="">Select State</option></select></label><label>City<select class="form-select" data-area-parent="cityId"><option value="">Select City</option></select></label><label>Zone<select class="form-select" data-area-parent="zoneId"><option value="">All Zones</option></select></label>${["clusters", "microMarkets", "nanoMarkets"].map(level => `<div data-area-list="${scope}-${level}"></div>`).join("")}</section>`).join("")}
       <div class="form-actions">
-        <button class="btn btn-primary">Assign / Switch Cluster</button>
-        <button class="btn btn-light" data-action="remove-assistant-cluster-master" data-id="${assistant.id}" type="button">Remove Current Cluster</button>
+        <button class="btn btn-primary" type="submit" disabled>Save Areas</button>
+        <button class="btn btn-light" data-action="remove-assistant-cluster-master" data-id="${assistant.id}" type="button">Remove Areas</button>
       </div>
     </form>`;
   }
@@ -6645,7 +7024,7 @@ function openAssistantMasterEditModal(assistantId, field) {
   const titleMap = {
     basic: "Edit Assistant Detail",
     status: "Edit Assistant Detail",
-    cluster: "Assign / Switch Cluster",
+    cluster: "Cluster Assign",
     vehicle: "Assign / Switch Vehicle",
     work: "Working Time / Pay Base",
     documents: "Assistant Documents",
@@ -6656,7 +7035,7 @@ function openAssistantMasterEditModal(assistantId, field) {
   setAssistantMasterEditModalAlert();
   $("#assistantMasterEditModalBody").innerHTML = assistantMasterModalForm(assistant, field);
   const body = $("#assistantMasterEditModalBody");
-  if (field === "cluster") initializeAssistantClusterCascade(assistant);
+  if (field === "cluster") { assistantAreaEditor = null; initializeAssistantAreas(assistant); }
   if (field === "vehicle") {
     initializeAssistantVehiclePickerFilters(assistant);
     renderAssistantVehiclePicker(assistant.id);
@@ -6739,44 +7118,128 @@ function clusterRows(items) {
     .join("");
 }
 
+function dashboardNumber(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function dashboardHours(minutes) {
+  const total = Math.max(0, Math.round(dashboardNumber(minutes)));
+  const hours = Math.floor(total / 60);
+  return hours ? `${hours}h ${total % 60}m` : `${total % 60}m`;
+}
+
+function dashboardPercent(part, total) {
+  const denominator = dashboardNumber(total);
+  return denominator > 0 ? Math.round((dashboardNumber(part) / denominator) * 100) : 0;
+}
+
+function dashboardBars(items, valueKey, display) {
+  const maximum = Math.max(1, ...items.map((item) => dashboardNumber(item[valueKey])));
+  return `<div class="dashboard-bar-chart">${items.map((item) => {
+    const value = dashboardNumber(item[valueKey]);
+    const height = Math.max(value > 0 ? 8 : 0, Math.round((value / maximum) * 100));
+    return `<div class="dashboard-bar-item"><div class="dashboard-bar-track"><div class="dashboard-bar-fill" style="height:${height}%"></div></div><b>${escapeHtml(display(value))}</b><span>${escapeHtml(item.label)}</span></div>`;
+  }).join("")}</div>`;
+}
+
+let dashboardDateFrom = "";
+let dashboardDateTo = "";
+
+function dashboardTodayDate() {
+  const date = new Date();
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+  return date.toISOString().slice(0, 10);
+}
+
+function dashboardEnsureDateRange() {
+  const today = dashboardTodayDate();
+  if (!dashboardDateTo) dashboardDateTo = today;
+  if (!dashboardDateFrom) dashboardDateFrom = `${today.slice(0, 8)}01`;
+}
+
 async function loadDashboard() {
+  dashboardEnsureDateRange();
+  const query = new URLSearchParams({ startDate: dashboardDateFrom, endDate: dashboardDateTo });
   const [dashboard, report, operations] = await Promise.all([
-    safeApi("/admin/dashboard"),
+    safeApi(`/admin/dashboard?${query.toString()}`),
     safeApi("/reports/launch"),
     safeApi("/operations/live")
   ]);
   const counts = dashboard.data || {};
   const reportData = report.data || {};
   const live = operations.data || [];
-  const paymentRows = (reportData.paymentTotals || [])
-    .map((row) => `<tr><td>${status(row.statusCode)}</td><td>${row.count}</td><td>${money(row.amountPaise)}</td></tr>`)
-    .join("");
-  const liveRows = live
-    .slice(0, 8)
-    .map(
-      (row) => `<tr>
-        <td><b>${escapeHtml(row.customerCode || row.id)}</b><div class="row-note">${escapeHtml(row.id)}</div></td>
-        <td>${status(row.statusCode)}</td>
-        <td>${escapeHtml(row.assistantCode || "-")}</td>
-        <td>${money(row.estimatedAmountPaise)}</td>
-        <td>${formatDate(row.createdAt)}</td>
-      </tr>`
-    )
-    .join("");
+  const trend = Array.isArray(counts.dailyTrend) ? counts.dailyTrend : [];
+  const monthlyTrend = Array.isArray(counts.monthlyTrend) ? counts.monthlyTrend : [];
+  const topCustomers = Array.isArray(counts.topCustomers) ? counts.topCustomers : [];
+  const topWorkingCustomers = Array.isArray(counts.topWorkingCustomers) ? counts.topWorkingCustomers : [];
+  const growthControl = counts.growthControl || {};
+  const statuses = Array.isArray(counts.statusBreakdown) ? counts.statusBreakdown : [];
+  const profiles = counts.profileCompletion || {};
+  const total = dashboardNumber(counts.serviceRequests);
+  const completed = dashboardNumber(counts.completedBookings);
+  const cancelled = dashboardNumber(counts.cancelledBookings);
+  const paymentRows = (reportData.paymentTotals || []).map((row) => `<tr><td>${status(row.statusCode)}</td><td>${row.count}</td><td>${money(row.amountPaise)}</td></tr>`).join("");
+  const liveRows = live.slice(0, 8).map((row) => `<tr><td><b>${escapeHtml(row.customerCode || row.id)}</b><div class="row-note">${escapeHtml(row.id)}</div></td><td>${status(row.statusCode)}</td><td>${escapeHtml(row.assistantCode || "-")}</td><td>${money(row.estimatedAmountPaise)}</td><td>${formatDate(row.createdAt)}</td></tr>`).join("");
+  const healthRows = [
+    ["Completed", completed, dashboardPercent(completed, total), "good"],
+    ["Working", dashboardNumber(counts.workingBookings), dashboardPercent(counts.workingBookings, total), "info"],
+    ["Cancelled / rejected", cancelled, dashboardPercent(cancelled, total), "risk"]
+  ].map(([label, value, percent, tone]) => `<div class="dashboard-health-row"><div><b>${escapeHtml(label)}</b><span>${value} bookings</span></div><div class="dashboard-health-meter"><i class="${tone}" style="width:${percent}%"></i></div><strong>${percent}%</strong></div>`).join("");
+  const profilePercent = dashboardPercent(profiles.completeProfiles, profiles.totalProfiles);
+  const dailyBookings = trend.length ? trend.reduce((sum, item) => sum + dashboardNumber(item.bookings), 0) / trend.length : 0;
+  const dailySelling = trend.length ? trend.reduce((sum, item) => sum + dashboardNumber(item.sellingAmountPaise), 0) / trend.length : 0;
+  const statusRows = statuses.map((row) => `<div class="dashboard-status-row">${status(row.statusCode)}<b>${dashboardNumber(row.count)}</b></div>`).join("") || '<span class="row-note">No booking status data yet.</span>';
+  const currentSelling = dashboardNumber(growthControl.currentMonthSellingPaise);
+  const previousSelling = dashboardNumber(growthControl.previousMonthSellingPaise);
+  const currentBookings = dashboardNumber(growthControl.currentMonthBookings);
+  const previousBookings = dashboardNumber(growthControl.previousMonthBookings);
+  const sellingChange = previousSelling ? Math.round(((currentSelling - previousSelling) / previousSelling) * 100) : 0;
+  const bookingChange = previousBookings ? Math.round(((currentBookings - previousBookings) / previousBookings) * 100) : 0;
+  const growthControlHtml = '<div class="dashboard-growth-control"><div><span>This month selling</span><b>' + money(currentSelling) + '</b><small>' + (sellingChange >= 0 ? '+' : '') + sellingChange + '% vs previous month</small></div><div><span>This month bookings</span><b>' + currentBookings + '</b><small>' + (bookingChange >= 0 ? '+' : '') + bookingChange + '% vs previous month</small></div></div>';
+  const customerRows = (rows) => rows.map((row) => '<tr><td><b>' + escapeHtml(row.customerName || "Customer") + '</b><div class="row-note">' + escapeHtml(row.phone || row.customerId || "") + '</div></td><td>' + dashboardHours(row.workedMinutes) + '</td><td>' + money(row.paidAmountPaise) + '</td><td>' + dashboardNumber(row.bookingCount) + '</td></tr>').join("") || '<tr><td colspan="4" class="empty-cell">No customer activity yet.</td></tr>';
 
   $("#dashboardSection").innerHTML =
-    pageTitleBlock("Dashboard", "Live health, booking status, payments, and launch summary") +
-    `<div class="metric-grid">
-      ${metric("Users", counts.users ?? "-")}
-      ${metric("Customers", counts.customers ?? "-")}
-      ${metric("Assistants", counts.assistants ?? "-")}
-      ${metric("Requests", counts.serviceRequests ?? "-")}
-      ${metric("Payments", counts.payments ?? "-")}
-      ${metric("Live Rows", live.length)}
+    pageTitleBlock("Dashboard", "Bookings, operations, customer growth, and financial health") +
+    `<div class="dashboard-filter-bar"><label>From<input id="dashboardFromDate" class="form-control form-control-sm" type="date" value="${escapeHtml(dashboardDateFrom)}"></label><label>To<input id="dashboardToDate" class="form-control form-control-sm" type="date" value="${escapeHtml(dashboardDateTo)}"></label><button class="btn btn-soft btn-sm" data-action="dashboard-today" type="button">Today</button><button class="btn btn-primary btn-sm" data-action="dashboard-apply-filter" type="button">Apply filter</button><span class="row-note">Selected period: ${escapeHtml(dashboardDateFrom)} to ${escapeHtml(dashboardDateTo)}</span></div>
+    <div class="metric-grid dashboard-metric-grid">
+      ${metric("Customers", counts.customers ?? 0)}
+      ${metric("Bookings", counts.serviceRequests ?? 0)}
+      ${metric("Assistants", counts.assistants ?? 0)}
+      ${metric("Selling amount", money(counts.sellingAmountPaise))}
+      ${metric("Discount amount", money(counts.discountAmountPaise))}
+      ${metric("Worked hours", dashboardHours(counts.workedMinutes))}
+      ${metric("Tasks booked hours", dashboardHours(counts.bookedMinutes))}
+      ${metric("Profile completion", `${profilePercent}%`)}
+      ${metric("Potential cancelled value", money(counts.potentialLossPaise))}
+    </div>
+    <div class="master-grid two dashboard-primary-grid">
+      ${panel("7-Day Selling Trend", "Booking-level selling amount", dashboardBars(trend, "sellingAmountPaise", (value) => money(value)))}
+      ${panel("7-Day Booking Trend", "Daily booking volume", dashboardBars(trend, "bookings", (value) => String(value)))}
+    </div>
+    <div class="master-grid two dashboard-primary-grid">
+      ${panel("Customer Growth", "Unique customers booking in the selected period", dashboardBars(monthlyTrend, "customers", (value) => String(value)))}
+      ${panel("Growth Control", "Selected period compared with the immediately previous period", growthControlHtml)}
+    </div>
+    <div class="master-grid two dashboard-primary-grid">
+      ${panel("Assistant Growth", "Unique assistants assigned in the selected period", dashboardBars(monthlyTrend, "assistants", (value) => String(value)))}
+      ${panel("Business Progress", "Selling amount across the selected period", dashboardBars(monthlyTrend, "sellingAmountPaise", (value) => money(value)))}
+    </div>
+    <div class="master-grid two">
+      ${panel("Booking Health", "Current lifecycle mix across all bookings", `<div class="dashboard-health-list">${healthRows}</div>`)}
+      ${panel("Growth Projection", "30-day run rate based on the last seven days", `<div class="dashboard-projection"><div><span>Projected bookings</span><b>${Math.round(dailyBookings * 30)}</b></div><div><span>Projected selling</span><b>${money(Math.round(dailySelling * 30))}</b></div><div><span>Profile coverage</span><b>${profilePercent}%</b><small>${dashboardNumber(profiles.completeProfiles)} of ${dashboardNumber(profiles.totalProfiles)} complete</small></div></div>`)}
+    </div>
+    <div class="master-grid two">
+      ${panel("Last 30 Days Status", "Booking status distribution", `<div class="dashboard-status-list">${statusRows}</div>`)}
+      ${panel("Loss Analytics", "Potential value on cancelled, rejected, or failed bookings", `<div class="dashboard-loss"><b>${money(counts.potentialLossPaise)}</b><span>${cancelled} booking(s) need cancellation and fulfilment review.</span><small>Operational indicator, not an accounting loss statement.</small></div>`)}
+    </div>
+    <div class="master-grid two">
+      ${panel("Highest Paid Customers", "Top paid booking value in the last 12 months", table(["Customer", "Working hours", "Paid amount", "Bookings"], customerRows(topCustomers)))}
+      ${panel("Highest Service Hours", "Customers with the most completed working time and their total paid amount", table(["Customer", "Working hours", "Paid amount", "Bookings"], customerRows(topWorkingCustomers)))}
     </div>
     <div class="master-grid">
-      ${panel("Live Operations", "Latest active booking/task rows", table(["Customer", "Status", "Assistant", "Amount", "Created"], liveRows))}
-      ${panel("Payment Totals", "Zaakpay transaction summary", table(["Status", "Count", "Amount"], paymentRows))}
+      ${panel("Live Operations", "Latest active booking/task rows", table(["Customer", "Status", "Assistant", "Amount", "Created"], liveRows || '<tr><td colspan="5" class="empty-cell">No active operations.</td></tr>'))}
+      ${panel("Payment Totals", "Payment transaction summary", table(["Status", "Count", "Amount"], paymentRows || '<tr><td colspan="3" class="empty-cell">No payment records.</td></tr>'))}
     </div>`;
 }
 
@@ -7225,10 +7688,32 @@ function downloadAdminReportCsv(reportKey, headers, rows) {
 function renderAdminReportPanel({ reportKey, sectionId, title, subtitle, panelSubtitle, headers, rows, rowRenderer, dateAccessor, searchPlaceholder }) {
   const filtered = adminReportFilteredRows(reportKey, rows, dateAccessor);
   const pagination = adminReportPage(reportKey, filtered);
-  $(`#${sectionId}`).innerHTML =
+  const resultsHtml = table(headers, rowRenderer(pagination.rows)) + adminReportPagination(reportKey, pagination);
+  const section = $(`#${sectionId}`);
+  const existingResults = section.querySelector(`[data-admin-report-results="${reportKey}"]`);
+  if (existingResults) {
+    existingResults.innerHTML = resultsHtml;
+    return;
+  }
+  section.innerHTML =
     pageTitleBlock(title, subtitle) +
     `<div class="master-grid single-column">
-      ${panel(title, panelSubtitle, adminReportToolbar(reportKey, searchPlaceholder) + table(headers, rowRenderer(pagination.rows)) + adminReportPagination(reportKey, pagination))}
+      ${panel(title, panelSubtitle, adminReportToolbar(reportKey, searchPlaceholder) + `<div data-admin-report-results="${escapeHtml(reportKey)}">${resultsHtml}</div>`)}
+    </div>`;
+}
+
+function renderRemoteAdminReportPanel({ reportKey, sectionId, title, subtitle, panelSubtitle, headers, rows, pagination, rowRenderer, searchPlaceholder }) {
+  const resultsHtml = table(headers, rowRenderer(rows)) + adminReportPagination(reportKey, pagination);
+  const section = $(`#${sectionId}`);
+  const existingResults = section.querySelector(`[data-admin-report-results="${reportKey}"]`);
+  if (existingResults) {
+    existingResults.innerHTML = resultsHtml;
+    return;
+  }
+  section.innerHTML =
+    pageTitleBlock(title, subtitle) +
+    `<div class="master-grid single-column">
+      ${panel(title, panelSubtitle, adminReportToolbar(reportKey, searchPlaceholder) + `<div data-admin-report-results="${escapeHtml(reportKey)}">${resultsHtml}</div>`)}
     </div>`;
 }
 
@@ -7320,7 +7805,15 @@ function bookingReportWorkedWindow(booking = {}) {
   const actualStartValue = booking.actualTaskStartedAt || booking.assignmentActualStartedAt || booking.metadata?.actualTaskStartedAt || booking.metadata?.actualStartedAt || booking.metadata?.taskTimer?.actualStartedAt || booking.metadata?.taskTimer?.startedAt;
   const actualStart = actualStartValue ? new Date(actualStartValue) : null;
   if (!actualStart || Number.isNaN(actualStart.getTime())) return null;
-  const actualEndValue = booking.completedAt || booking.metadata?.actualTaskEndAt || booking.metadata?.completedAt || booking.metadata?.taskTimer?.completedAt || booking.metadata?.taskTimer?.taskEndAt;
+  const actualEndValue = booking.completedAt
+    || booking.actualTaskEndAt
+    || booking.bookingEndAt
+    || booking.metadata?.actualTaskEndAt
+    || booking.metadata?.bookingEndAt
+    || booking.metadata?.completedAt
+    || booking.metadata?.taskTimer?.actualTaskEndAt
+    || booking.metadata?.taskTimer?.completedAt
+    || booking.metadata?.taskTimer?.taskEndAt;
   const actualEnd = actualEndValue ? new Date(actualEndValue) : new Date(actualStart.getTime() + bookingTotalCompletionMinutes(booking) * 60_000);
   return `${bookingReportTime(actualStart)} - ${bookingReportTime(actualEnd)}`;
 }
@@ -7429,43 +7922,177 @@ function renderCustomerReport() {
   });
 }
 
-function assistantReportRows(items = []) {
-  return items
-    .map((assistant) => {
-      const stats = assistant.taskStats || {};
-      const vehicle = assistant.vehicleName ? `${assistant.vehicleName}${assistant.vehicleNumber ? ` (${assistant.vehicleNumber})` : ""}` : "-";
-      return `<tr>
-        <td><b>${escapeHtml(assistant.displayName || "-")}</b>${reportCellNote(assistant.assistantCode || assistant.id || "")}</td>
-        <td>${escapeHtml(assistant.phone || assistant.email || "-")}</td>
-        <td><b>${escapeHtml(assistant.currentClusterName || assistant.clusters?.[0]?.clusterName || "-")}</b>${reportCellNote([assistant.zoneName, assistant.cityName].filter(Boolean).join(" / "))}</td>
-        <td>${assistantStatusLabel(assistant)}${reportCellNote(assistantIsLoggedIn(assistant) ? "Logged-In" : "Logged-Out")}</td>
-        <td><b>${escapeHtml(Number(stats.total || stats.assigned || 0))}</b>${reportCellNote(`Pending ${Number(stats.pending || 0)} | Working ${Number(stats.working || 0)} | Completed ${Number(stats.completed || 0)} | Cancelled ${Number(stats.cancelled || 0)}`)}</td>
-        <td>${escapeHtml(vehicle)}</td>
-        <td>${status(assistant.status || "verifying")}</td>
-      </tr>`;
-    })
-    .join("");
+function assistantReportStateId(assistant = {}) { const city = (cache.cities || []).find((item) => item.id === assistant.cityId); return assistant.stateId || city?.stateId || city?.state_id || ""; }
+function assistantReportScopeOptions() { const f = assistantReportFilters; return { states: optionRowsSelected(activeItems(cache.states || []), f.stateId), cities: optionRowsSelected(filterCitiesByState(f.stateId), f.cityId), zones: optionRowsSelected(filterZonesByCity(f.cityId), f.zoneId), clusters: optionRowsSelected(filterClustersByLocation(f), f.clusterId) }; }
+function assistantReportMatchesFilters(assistant = {}) { const f = assistantReportFilters; if (f.stateId && assistantReportStateId(assistant) !== f.stateId) return false; if (f.cityId && assistant.cityId !== f.cityId) return false; if (f.zoneId && assistant.zoneId !== f.zoneId) return false; if (f.clusterId && assistant.currentClusterId !== f.clusterId && !(assistant.clusters || []).some((item) => item.clusterId === f.clusterId)) return false; const q = String(f.search || "").trim().toLowerCase(); const stateName = (cache.states || []).find((item) => item.id === assistantReportStateId(assistant))?.name || ""; return !q || [assistant.id, assistant.assistantCode, assistant.displayName, assistant.email, assistant.phone, assistant.currentClusterName, stateName, assistant.cityName, assistant.zoneName, assistant.vehicleName, assistant.vehicleNumber].filter(Boolean).join(" ").toLowerCase().includes(q); }
+function assistantReportTiming(booking = {}) { return { plannedStart: booking.metadata?.plannedTaskStartAt || booking.bookingStartAt || booking.promisedStartAt || booking.scheduledAt || booking.metadata?.bookingStartAt, plannedEnd: booking.metadata?.plannedTaskEndAt || booking.metadata?.taskTimer?.plannedTaskEndAt || booking.metadata?.originalBookingEndAt || booking.bookingEndAt || booking.metadata?.bookingEndAt || booking.metadata?.taskTimer?.taskEndAt, actualStart: booking.actualTaskStartedAt || booking.assignmentActualStartedAt || booking.metadata?.actualTaskStartedAt || booking.metadata?.taskTimer?.actualStartedAt, actualEnd: booking.completedAt || booking.actualTaskEndAt || booking.metadata?.actualTaskEndAt || booking.metadata?.completedAt || booking.metadata?.taskTimer?.actualTaskEndAt || booking.metadata?.taskTimer?.completedAt }; }
+function assistantReportDeltaMinutes(leftValue, rightValue) { const left = leftValue ? new Date(leftValue).getTime() : Number.NaN; const right = rightValue ? new Date(rightValue).getTime() : Number.NaN; return Number.isFinite(left) && Number.isFinite(right) ? Math.max(0, Math.round((left - right) / 60_000)) : 0; }
+function assistantReportTaskDeltas(booking = {}) {
+  const timing = assistantReportTiming(booking);
+  const earlyStart = assistantReportDeltaMinutes(timing.plannedStart, timing.actualStart);
+  const lateStart = assistantReportDeltaMinutes(timing.actualStart, timing.plannedStart);
+  const durationMinutes = Math.max(0, Number(bookingTotalCompletionMinutes(booking) || booking.durationMinutes || 0));
+  const actualStartAt = timing.actualStart ? new Date(timing.actualStart) : null;
+  const actualEndAt = timing.actualEnd ? new Date(timing.actualEnd) : null;
+  const expectedEndAt = actualStartAt && Number.isFinite(actualStartAt.getTime()) && durationMinutes > 0
+    ? new Date(actualStartAt.getTime() + durationMinutes * 60_000)
+    : timing.plannedEnd;
+  return {
+    timing,
+    earlyStart,
+    lateStart,
+    earlyFinish: assistantReportDeltaMinutes(expectedEndAt, actualEndAt),
+    lateFinish: assistantReportDeltaMinutes(actualEndAt, expectedEndAt)
+  };
+}
+function assistantReportRows(items = []) { return items.map((assistant) => { const stats = assistant.taskStats || {}; const vehicle = [assistant.vehicleName, assistant.vehicleNumber].filter(Boolean).join(" / ") || "-"; return `<tr class="booking-report-clickable-row" data-action="open-assistant-report-detail" data-id="${escapeHtml(assistant.id)}" tabindex="0" role="button"><td><b>${escapeHtml(assistant.displayName || "-")}</b>${reportCellNote(assistant.assistantCode || assistant.id || "")}</td><td>${escapeHtml(assistant.phone || "-")}${reportCellNote(assistant.email || "")}</td><td><b>${escapeHtml(assistant.currentClusterName || assistant.clusters?.[0]?.clusterName || "-")}</b>${reportCellNote([assistant.zoneName, assistant.cityName].filter(Boolean).join(" / "))}</td><td>${assistantStatusLabel(assistant)}${reportCellNote(assistantIsLoggedIn(assistant) ? "Logged-In" : "Logged-Out")}</td><td><b>${escapeHtml(Number(stats.total || stats.totalTask || stats.assigned || 0))}</b>${reportCellNote(`Working ${Number(stats.working || 0)} | Completed ${Number(stats.completed || stats.success || 0)} | Cancelled ${Number(stats.cancelled || 0)}`)}</td><td>${escapeHtml(vehicle)}</td><td>${status(assistant.status || "verifying")}</td></tr>`; }).join(""); }
+async function loadAssistantReport() { const [states, cities, zones, clusters] = await Promise.all([cache.states?.length ? Promise.resolve({ data: cache.states }) : safeApi("/masters/states"), cache.cities?.length ? Promise.resolve({ data: cache.cities }) : safeApi("/masters/cities"), cache.zones?.length ? Promise.resolve({ data: cache.zones }) : safeApi("/masters/zones"), cache.clusters?.length ? Promise.resolve({ data: cache.clusters }) : safeApi("/masters/clusters"), ensureAssistantMasterCache({ forceRefresh: true })]); cache.states = states.data || cache.states || []; cache.cities = cities.data || cache.cities || []; cache.zones = zones.data || cache.zones || []; cache.clusters = clusters.data || cache.clusters || []; cache.assistantReport = cache.assistantMasters || []; renderAssistantReport(); }
+function renderAssistantReport() { const options = assistantReportScopeOptions(); const rows = (cache.assistantReport || []).filter(assistantReportMatchesFilters).sort((a, b) => String(a.displayName || "").localeCompare(String(b.displayName || ""))); $("#assistantReportSection").innerHTML = pageTitleBlock("Assistant Report", "Assistant profiles, scope, availability, vehicles, and task summaries") + `<div class="master-grid single-column">${panel("Assistant Report", "Click an assistant to view analytics and all tasks.", `<div class="admin-report-toolbar assistant-report-toolbar"><input id="assistantReportSearchInput" class="form-control form-control-sm" type="search" autocomplete="off" value="${escapeHtml(assistantReportFilters.search)}" placeholder="Search ID, name, email, phone, cluster, vehicle"><select class="form-select form-select-sm" data-assistant-report-filter="stateId"><option value="">All States</option>${options.states}</select><select class="form-select form-select-sm" data-assistant-report-filter="cityId"><option value="">All Cities</option>${options.cities}</select><select class="form-select form-select-sm" data-assistant-report-filter="zoneId"><option value="">All Zones</option>${options.zones}</select><select class="form-select form-select-sm" data-assistant-report-filter="clusterId"><option value="">All Clusters</option>${options.clusters}</select><span class="helper-text">${escapeHtml(rows.length)} assistants</span></div>` + table(["Assistant", "Contact", "Cluster / Zone / City", "Availability", "Task Summary", "Vehicle", "Profile Status"], assistantReportRows(rows)))}</div>`; }
+function assistantReportDetailHtml(assistant = {}, bookings = [], filters = {}) { const tasks = bookings.filter((booking) => booking.assistantId === assistant.id); const totals = tasks.reduce((result, booking) => { const statusCode = String(booking.statusCode || booking.status || booking.reportTab || "").toLowerCase(); const timing = assistantReportTiming(booking); const deltas = assistantReportTaskDeltas(booking); result.total += 1; result.savedMinutes += deltas.earlyStart + deltas.earlyFinish; result.wastedMinutes += deltas.lateStart + deltas.lateFinish; if (["success", "completed", "complete"].includes(statusCode)) result.completed += 1; else if (statusCode === "rejected" || (!timing.actualStart && ["cancelled", "canceled"].includes(statusCode) && String(booking.metadata?.cancellationReasonCode || "").includes("slot_expired"))) result.rejected += 1; else if (["cancelled", "canceled"].includes(statusCode)) result.cancelled += 1; return result; }, { total: 0, completed: 0, rejected: 0, cancelled: 0, savedMinutes: 0, wastedMinutes: 0 }); const rows = tasks.map((booking) => { const { timing: t, earlyStart, lateStart, earlyFinish, lateFinish } = assistantReportTaskDeltas(booking); return `<tr><td><b>${escapeHtml(bookingReference(booking))}</b>${reportCellNote(booking.categoryName || booking.serviceMasterName || "-")}</td><td>${escapeHtml(reportDateTimeRange(t.plannedStart, t.plannedEnd))}</td><td>${t.actualStart ? reportCellNote(`Start: ${formatDate(t.actualStart)}`) : reportCellNote("Not started")}${t.actualEnd ? reportCellNote(`End: ${formatDate(t.actualEnd)}`) : ""}</td><td>${earlyStart ? `<b class="text-success">${earlyStart} mins</b>` : "-"}</td><td>${lateStart ? `<b class="text-danger">${lateStart} mins</b>` : "-"}</td><td>${earlyFinish ? `<b class="text-success">${earlyFinish} mins</b>` : "-"}</td><td>${lateFinish ? `<b class="text-danger">${lateFinish} mins</b>` : "-"}</td><td>${status(booking.statusCode || booking.status || booking.reportTab || "-")}</td></tr>`; }).join(""); return `<div class="booking-report-detail-sections"><section class="booking-report-detail-section"><div class="admin-report-toolbar"><label>From <input id="assistantReportDetailStartDate" class="form-control form-control-sm" type="date" value="${escapeHtml(filters.startDate)}"></label><label>To <input id="assistantReportDetailEndDate" class="form-control form-control-sm" type="date" value="${escapeHtml(filters.endDate)}"></label><button class="btn btn-primary btn-sm" data-action="refresh-assistant-report-detail" data-id="${escapeHtml(assistant.id)}" type="button">Apply</button></div><div class="booking-info-grid">${bookingInfoItem("Total Bookings", `<b>${totals.total}</b>`)}${bookingInfoItem("Completed", `<b class="text-success">${totals.completed}</b>`)}${bookingInfoItem("Rejected", `<b class="text-danger">${totals.rejected}</b><br><small>Not started and auto-cancelled</small>`)}${bookingInfoItem("Cancelled", `<b class="text-danger">${totals.cancelled}</b><br><small>Customer, assistant, or not-started</small>`)}${bookingInfoItem("Total Time Saved", `<b class="text-success">${totals.savedMinutes} mins</b><br><small>Early start + early finish</small>`)}${bookingInfoItem("Total Time Wasted", `<b class="text-danger">${totals.wastedMinutes} mins</b><br><small>Late start + after task end</small>`)}</div></section><section class="booking-report-detail-section"><h3>All Tasks</h3>${table(["Booking", "Planned", "Actual", "Early Start", "Late Start", "Early Finish", "Late Finish", "Status"], rows || `<tr><td colspan="8" class="text-secondary">No tasks found for the selected dates.</td></tr>`)}</section></div>`; }
+async function openAssistantReportDetail(assistantId, filters = {}) { const assistant = (cache.assistantReport || cache.assistantMasters || []).find((item) => item.id === assistantId); if (!assistant) return; const range = { startDate: filters.startDate || todayInputDate(), endDate: filters.endDate || todayInputDate() }; const key = `assistantReportDetail:${assistantId}`; const reportFilters = getAdminReportFilter(key); reportFilters.startDate = range.startDate; reportFilters.endDate = range.endDate; bookingInfoModal("Assistant Summary", assistant.displayName || assistant.assistantCode || "Assistant", `<div class="booking-report-detail-loading">Loading assistant analytics...</div>`); try { const tasks = await fetchAdminReportBookings(key); bookingInfoModal("Assistant Summary", assistant.displayName || assistant.assistantCode || "Assistant", assistantReportDetailHtml(assistant, tasks, range)); } catch (error) { bookingInfoModal("Assistant Summary", assistant.displayName || assistant.assistantCode || "Assistant", `<div class="empty-state text-danger">${escapeHtml(error.message || "Unable to load assistant analytics.")}</div>`); } }
+
+function assistantAvailabilityAssignmentCell(assistant = {}) {
+  const assignmentStatus = String(assistant.assignmentStatus || "").trim().toLowerCase();
+  const isAssigned = ["assigned", "accepted", "confirmed", "processing", "in_progress", "working"].includes(assignmentStatus);
+  if (isAssigned) return status("assigned");
+  if (!assistant.bookingId) return "-";
+  return `<button class="btn btn-primary btn-xs" data-action="open-assign-booking" data-id="${escapeHtml(assistant.bookingId)}" data-label="${escapeHtml(assistant.bookingReference || assistant.bookingId)}" type="button">Assign</button>`;
 }
 
-async function loadAssistantReport() {
-  await ensureAssistantMasterCache({ forceRefresh: true });
-  cache.assistantReport = cache.assistantMasters || [];
-  renderAssistantReport();
+function assistantAvailabilityBoardRows(items = [], tab = "blocked") {
+  return items.map((assistant) => {
+    const vehicleImage = Array.isArray(assistant.vehiclePictureUrls) ? assistant.vehiclePictureUrls.find(Boolean) : "";
+    const assistantName = assistant.assistantName || assistant.assistantCode || "Assistant";
+    const bookingName = [assistant.serviceMasterName, assistant.categoryName].filter(Boolean).join(" . ") || "-";
+    const bookingSlot = assistant.bookingStartAt || assistant.bookingEndAt
+      ? `${formatDate(assistant.bookingStartAt)} - ${formatDate(assistant.bookingEndAt)}`
+      : "-";
+    const extension = Number(assistant.extendMinutes || 0);
+    return `<tr>
+      <td><div class="d-flex align-items-center gap-2">${profileAvatar(assistant.assistantProfilePictureUrl, assistantName)}<div><b>${escapeHtml(assistantName)}</b>${reportCellNote(assistant.assistantCode || assistant.assistantId || "-")}</div></div></td>
+      <td>${escapeHtml(assistant.assistantPhone || "-")}${reportCellNote(assistant.assistantEmail || "-")}</td>
+      <td>${vehicleImage ? imageCell(vehicleImage) : `<span class="text-secondary">No image</span>`}${reportCellNote(assistant.vehicleNumber || assistant.vehicleName || "-")}</td>
+      <td><b>${escapeHtml(assistant.clusterName || "-")}</b>${reportCellNote([assistant.zoneName, assistant.cityName, assistant.stateName].filter(Boolean).join(" / "))}</td>
+      <td>${assistant.bookingReference ? `<b>${escapeHtml(assistant.bookingReference)}</b>${reportCellNote(bookingName)}` : `<span class="text-secondary">No active block</span>`}</td>
+      <td>${assistant.bookingReference ? `<b>${escapeHtml(String(assistant.bookingType || "instant").replace(/^./, (value) => value.toUpperCase()))}</b>${reportCellNote(bookingSlot)}` : status(assistant.availabilityStatus || "available")}</td>
+      <td>${assistant.bookingReference ? `${extension > 0 ? `<b>${escapeHtml(`${extension} mins`)}</b>` : "-"}${reportCellNote(`Started: ${assistant.actualStartedAt ? formatDate(assistant.actualStartedAt) : "Not started"}`)}` : "-"}</td>
+      <td>${assistant.bookingReference ? `<b>${escapeHtml(formatDate(assistant.freeAt))}</b>${reportCellNote(assistant.paymentMode || "-")}` : `<b>Available now</b>${assistant.nextAvailableAt ? reportCellNote(`Free: ${formatDate(assistant.nextAvailableAt)}`) : ""}`}</td>
+      ${tab === "blocked" ? `<td>${assistantAvailabilityAssignmentCell(assistant)}</td>` : ""}
+    </tr>`;
+  }).join("");
 }
 
-function renderAssistantReport() {
-  renderAdminReportPanel({
-    reportKey: "assistantReport",
-    sectionId: "assistantReportSection",
-    title: "Assistant Report",
-    subtitle: "Assistant profile, live status, cluster, vehicle, and task summary",
-    panelSubtitle: "Online, working, profile, cluster, and task status overview",
-    headers: ["Assistant", "Contact", "Cluster", "Availability", "Task Summary", "Vehicle", "Profile Status"],
-    rows: cache.assistantReport || [],
-    rowRenderer: assistantReportRows,
-    dateAccessor: (assistant) => assistant.createdAt || assistant.updatedAt || assistant.lastLoginAt,
-    searchPlaceholder: "Search assistant, phone, cluster, vehicle, availability"
+function assistantAvailabilityBoardLocationOptions() {
+  const selected = assistantAvailabilityBoardFilters;
+  const cities = filterCitiesByState(selected.stateId);
+  const zones = filterZonesByCity(selected.cityId);
+  const clusters = filterClustersByLocation(selected);
+  return {
+    states: optionRowsSelected(activeItems(cache.states || []), selected.stateId),
+    cities: optionRowsSelected(cities, selected.cityId),
+    zones: optionRowsSelected(zones, selected.zoneId),
+    clusters: optionRowsSelected(clusters, selected.clusterId)
+  };
+}
+
+function renderAssistantAvailabilityBoard() {
+  const target = $("#assistantAvailableSection");
+  if (!target) return;
+  const filters = assistantAvailabilityBoardFilters;
+  const options = assistantAvailabilityBoardLocationOptions();
+  const rows = cache.assistantAvailabilityBoard || [];
+  target.innerHTML = pageTitleBlock("Assistant Available", "Live blocked and currently available assistant capacity") + panel(
+    "Assistant Available",
+    "Availability is calculated from actual task completion plus wrap-up and travel buffers.",
+    `<div class="assistant-page">
+      <div class="assistant-sticky-controls">
+        <div class="assistant-filter-row">
+          <input id="assistantAvailabilitySearchInput" class="form-control" value="${escapeHtml(filters.search)}" placeholder="Search ID, name, email, vehicle, mobile">
+          <select class="form-select" data-assistant-availability-filter="stateId"><option value="">All States</option>${options.states}</select>
+          <select class="form-select" data-assistant-availability-filter="cityId"><option value="">All Cities</option>${options.cities}</select>
+          <select class="form-select" data-assistant-availability-filter="zoneId"><option value="">All Zones</option>${options.zones}</select>
+          <select class="form-select" data-assistant-availability-filter="clusterId"><option value="">All Clusters</option>${options.clusters}</select>
+          <button class="btn btn-primary" data-action="refresh-assistant-availability" type="button">Refresh</button>
+        </div>
+        <div class="assistant-tabs-row"><div class="assistant-tabs">
+          <button class="assistant-tab ${filters.tab === "blocked" ? "active" : ""}" data-action="assistant-availability-tab" data-tab="blocked" type="button">Block</button>
+          <button class="assistant-tab ${filters.tab === "available" ? "active" : ""}" data-action="assistant-availability-tab" data-tab="available" type="button">Available</button>
+        </div></div>
+      </div>
+      ${table([
+        "Assistant", "Mobile / Email", "Vehicle", "Cluster / Zone / City", "Booking / Service", "Type / Booking Slot", "Extension / Start", "Free At / Payment",
+        ...(filters.tab === "blocked" ? ["Assign Status"] : [])
+      ], assistantAvailabilityBoardRows(rows, filters.tab))}
+    </div>`
+  );
+}
+
+function stopAssistantAvailabilityBoardAutoRefresh() {
+  if (assistantAvailabilityBoardDeadlineTimer) clearTimeout(assistantAvailabilityBoardDeadlineTimer);
+  if (assistantAvailabilityBoardRealtimeTimer) clearTimeout(assistantAvailabilityBoardRealtimeTimer);
+  assistantAvailabilityBoardDeadlineTimer = null;
+  assistantAvailabilityBoardRealtimeTimer = null;
+}
+
+function scheduleAssistantAvailabilityBoardDeadline() {
+  if (assistantAvailabilityBoardDeadlineTimer) clearTimeout(assistantAvailabilityBoardDeadlineTimer);
+  assistantAvailabilityBoardDeadlineTimer = null;
+  if (state.section !== "assistantAvailable") return;
+  const now = Date.now();
+  const nextFreeAt = (cache.assistantAvailabilityBoard || [])
+    .map((assistant) => new Date(assistant.freeAt || 0).getTime())
+    .filter((time) => Number.isFinite(time) && time > now)
+    .sort((left, right) => left - right)[0];
+  if (!nextFreeAt) return;
+  const delay = Math.max(250, Math.min(nextFreeAt - now + 250, 2_147_000_000));
+  assistantAvailabilityBoardDeadlineTimer = setTimeout(() => {
+    assistantAvailabilityBoardDeadlineTimer = null;
+    if (state.section !== "assistantAvailable" || document.visibilityState !== "visible") return;
+    refreshAssistantAvailabilityBoardFromRealtime();
+  }, delay);
+}
+
+function refreshAssistantAvailabilityBoardFromRealtime() {
+  if (state.section !== "assistantAvailable" || assistantAvailabilityBoardRefreshing) return;
+  assistantAvailabilityBoardRefreshing = true;
+  loadAssistantAvailabilityBoard({ realtime: true })
+    .catch(() => {})
+    .finally(() => {
+      assistantAvailabilityBoardRefreshing = false;
+    });
+}
+
+function scheduleAssistantAvailabilityBoardRealtimeRefresh() {
+  if (state.section !== "assistantAvailable") return;
+  if (assistantAvailabilityBoardRealtimeTimer) clearTimeout(assistantAvailabilityBoardRealtimeTimer);
+  assistantAvailabilityBoardRealtimeTimer = setTimeout(() => {
+    assistantAvailabilityBoardRealtimeTimer = null;
+    refreshAssistantAvailabilityBoardFromRealtime();
+  }, 120);
+}
+
+function startAssistantAvailabilityBoardAutoRefresh() {
+  scheduleAssistantAvailabilityBoardDeadline();
+}
+async function loadAssistantAvailabilityBoard(_options = {}) {
+  const [states, cities, zones, clusters] = await Promise.all([
+    cache.states?.length ? Promise.resolve({ data: cache.states }) : safeApi("/masters/states"),
+    cache.cities?.length ? Promise.resolve({ data: cache.cities }) : safeApi("/masters/cities"),
+    cache.zones?.length ? Promise.resolve({ data: cache.zones }) : safeApi("/masters/zones"),
+    cache.clusters?.length ? Promise.resolve({ data: cache.clusters }) : safeApi("/masters/clusters")
+  ]);
+  cache.states = states.data || cache.states || [];
+  cache.cities = cities.data || cache.cities || [];
+  cache.zones = zones.data || cache.zones || [];
+  cache.clusters = clusters.data || cache.clusters || [];
+  const query = new URLSearchParams({ tab: assistantAvailabilityBoardFilters.tab });
+  ["stateId", "cityId", "zoneId", "clusterId", "search"].forEach((key) => {
+    const value = String(assistantAvailabilityBoardFilters[key] || "").trim();
+    if (value) query.set(key, value);
   });
+  const payload = await api(`/operations/assistants/availability?${query.toString()}`);
+  cache.assistantAvailabilityBoard = payload.data || [];
+  renderAssistantAvailabilityBoard();
 }
 
 function assistantTaskReportRows(items = []) {
@@ -7577,11 +8204,18 @@ function renderReviewsReport() {
     start: pagination.totalRecords ? (pagination.page - 1) * pagination.pageSize + 1 : 0,
     end: Math.min(pagination.totalRecords, pagination.page * pagination.pageSize)
   };
-  $("#reviewsReportSection").innerHTML =
-    pageTitleBlock("Reviews Report", "Customer reviews and ZIGO, service, and assistant ratings") +
-    `<div class="master-grid single-column">
-      ${panel("Reviews Report", "Search and filter submitted booking reviews", adminReportToolbar("reviewsReport", "Search booking, customer, assistant, service, review, rating") + table(["Booking", "Customer", "Assistant", "Category / Service", "Ratings", "Review", "Reviewed At"], reviewsReportRows(cache.reviewsReport)) + adminReportPagination("reviewsReport", normalized))}
-    </div>`;
+  renderRemoteAdminReportPanel({
+    reportKey: "reviewsReport",
+    sectionId: "reviewsReportSection",
+    title: "Reviews Report",
+    subtitle: "Customer reviews and ZIGO, service, and assistant ratings",
+    panelSubtitle: "Search and filter submitted booking reviews",
+    headers: ["Booking", "Customer", "Assistant", "Category / Service", "Ratings", "Review", "Reviewed At"],
+    rows: cache.reviewsReport,
+    pagination: normalized,
+    rowRenderer: reviewsReportRows,
+    searchPlaceholder: "Search booking, customer, assistant, service, review, rating"
+  });
 }
 
 function unserviceableLocationsReportRows(items = []) {
@@ -7644,11 +8278,18 @@ function renderUnserviceableLocationsReport() {
     start: pagination.totalRecords ? (pagination.page - 1) * pagination.pageSize + 1 : 0,
     end: Math.min(pagination.totalRecords, pagination.page * pagination.pageSize)
   };
-  $("#unserviceableLocationsReportSection").innerHTML =
-    pageTitleBlock("Not Serviceable Locations", "Customer demand captured outside active service clusters") +
-    `<div class="master-grid single-column">
-      ${panel("Not Serviceable Locations", "Search and filter locations customers tried to confirm outside active clusters", adminReportToolbar("unserviceableLocationsReport", "Search customer, phone, address, city, state, pincode") + table(["Customer", "Location", "Area", "Coordinates", "Hits", "Last Seen"], unserviceableLocationsReportRows(cache.unserviceableLocationsReport)) + adminReportPagination("unserviceableLocationsReport", normalized))}
-    </div>`;
+  renderRemoteAdminReportPanel({
+    reportKey: "unserviceableLocationsReport",
+    sectionId: "unserviceableLocationsReportSection",
+    title: "Not Serviceable Locations",
+    subtitle: "Customer demand captured outside active service clusters",
+    panelSubtitle: "Search and filter locations customers tried to confirm outside active clusters",
+    headers: ["Customer", "Location", "Area", "Coordinates", "Hits", "Last Seen"],
+    rows: cache.unserviceableLocationsReport,
+    pagination: normalized,
+    rowRenderer: unserviceableLocationsReportRows,
+    searchPlaceholder: "Search customer, phone, address, city, state, pincode"
+  });
 }
 
 function adminReportDefinition(reportKey) {
@@ -8065,6 +8706,7 @@ function mergeAssistantRealtimePayload(event = {}) {
 
 function handleBookingRealtimeEvent(event = {}) {
   const eventType = String(event.type || "");
+  if (eventType === 'user.session.revoked' && event.payload?.userId === state.user?.id) { clearAdminSession('Unable to sign in. Please contact support.'); return; }
   if (eventType.startsWith("support.")) {
     if (state.section === "supportTickets") void loadSupportTickets();
     const openTicketId = cache.supportTicketDetail?.ticket?.id;
@@ -8097,7 +8739,9 @@ function handleBookingRealtimeEvent(event = {}) {
     ringBookingBell(1);
     if (bookingRealtimeSettings?.showToast !== false) showAlert(event.message || "New booking received.", "warning");
   }
-  if (affectsAssignmentCount) schedulePendingAssignmentCountRefresh();
+  if (state.section === "assistantAvailable" && (isAssistantEvent || isBookingEvent)) {
+    scheduleAssistantAvailabilityBoardRealtimeRefresh();
+  }  if (affectsAssignmentCount) schedulePendingAssignmentCountRefresh();
   if (affectsAssignmentCount && bookingRealtimeSettings?.refreshOnEvent !== false) {
     if (state.section === "bookings") loadBookings(bookingActiveTab, { realtime: true }).catch(() => {});
   }
@@ -10495,7 +11139,7 @@ function renderCustomerAddressSimpleMap() {
       const left = Math.round(x * 256 - topLeft.x);
       const top = Math.round(y * 256 - topLeft.y);
       const subdomain = ["a", "b", "c"][Math.abs(wrappedX + y) % 3];
-      tiles.push(`<img class="customer-simple-map-tile" src="https://${subdomain}.tile.openstreetmap.org/${zoom}/${wrappedX}/${y}.png" referrerpolicy="no-referrer" style="left:${left}px;top:${top}px" alt="">`);
+      tiles.push(`<img class="customer-simple-map-tile" src="${window.ZigoMaps.rasterTileUrl(zoom, wrappedX, y)}" style="left:${left}px;top:${top}px" alt="">`);
     }
   }
   mapEl.innerHTML = `<div class="customer-simple-map-canvas">${tiles.join("")}${customerAddressClusterOverlaySvg(topLeft, zoom)}</div>`;
@@ -10691,14 +11335,14 @@ async function initializeCustomerAddressMap() {
   const center = [Number(centerLocation.longitude), Number(centerLocation.latitude)];
   mapEl.innerHTML = "";
   const olaMaps = new window.OlaMaps({ apiKey: olaMapsApiKey });
-  const initMap = (style) => olaMaps.init({ style, container: "customerAddressMap", center, zoom: 15 });
+  const initMap = (style) => olaMaps.init({ style, container: "customerAddressMap", center, zoom: 15, transformRequest: window.ZigoMaps.transformRequest });
   const attachMapClick = () => customerAddressMapInstance?.on?.("click", async (event) => {
     const { latitude, longitude } = readMapLngLat(event?.lngLat);
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
     customerAddressLivePinLocation = { latitude, longitude };
     await applyCustomerAddressPinLocation(latitude, longitude);
   });
-  customerAddressMapInstance = initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
+  customerAddressMapInstance = await initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
   attachMapClick();
   customerAddressMapInstance.on?.("load", () => {
     customerAddressMapInstance?.resize?.();
@@ -10719,13 +11363,14 @@ async function initializeCustomerAddressMap() {
     startCustomerAddressMapAutoSync();
   }, 300);
   let usedFallback = false;
-  customerAddressMapInstance.on?.("error", (event) => {
+  customerAddressMapInstance.on?.("error", async (event) => {
     const message = event?.error?.message || "Ola Maps could not load for this domain.";
     if (usedFallback || !isOlaMapAuthOrDomainError(event?.error || message)) return;
     usedFallback = true;
     cleanupCustomerAddressMap();
     mapEl.innerHTML = "";
-    customerAddressMapInstance = initMap(fallbackRasterStyle());
+    try { customerAddressMapInstance = await initMap(fallbackRasterStyle()); }
+    catch { showAlert("Map unavailable. Reopen the location picker to retry."); return; }
     attachMapClick();
     customerAddressMapInstance.on?.("load", () => {
       const map = resolveCustomerAddressMapObject();
@@ -10739,7 +11384,7 @@ async function initializeCustomerAddressMap() {
       }
       startCustomerAddressMapAutoSync();
     });
-    showAlert(`${message}. Showing fallback map tiles. Add this admin domain to the Ola Maps credentials whitelist to use Ola vector tiles.`);
+    showAlert(`${message}. Showing Ola map images. Check server credentials and provider permissions if the problem persists.`);
   });
 }
 
@@ -12347,6 +12992,7 @@ async function renderBookingMasterStoreMap(store) {
       olaMaps.init({
         style,
         container: "bookingMasterStoreMap",
+        transformRequest: window.ZigoMaps.transformRequest,
         center: [longitude, latitude],
         zoom: 15
       });
@@ -12377,15 +13023,16 @@ async function renderBookingMasterStoreMap(store) {
       bookingMasterStoreMapInstance.resize?.();
     };
     mapEl.innerHTML = "";
-    bookingMasterStoreMapInstance = initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
+    bookingMasterStoreMapInstance = await initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
     bookingMasterStoreMapInstance.on?.("load", drawPin);
     bookingMasterStoreMapInstance.on?.("idle", drawPin);
-    bookingMasterStoreMapInstance.on?.("error", (event) => {
+    bookingMasterStoreMapInstance.on?.("error", async (event) => {
       if (!usedFallback && isOlaMapAuthOrDomainError(event?.error || event)) {
         usedFallback = true;
         cleanupBookingMasterStoreMap();
         mapEl.innerHTML = "";
-        bookingMasterStoreMapInstance = initMap(fallbackRasterStyle());
+        try { bookingMasterStoreMapInstance = await initMap(fallbackRasterStyle()); }
+        catch { showAlert("Map unavailable. Reopen the preview to retry."); return; }
         bookingMasterStoreMapInstance.on?.("load", drawPin);
         bookingMasterStoreMapInstance.on?.("idle", drawPin);
       }
@@ -13480,6 +14127,7 @@ async function initializeBookingMasterLocationMap() {
     olaMaps.init({
       style,
       container: "bookingMasterMap",
+      transformRequest: window.ZigoMaps.transformRequest,
       center,
       zoom: 13
     });
@@ -13500,7 +14148,7 @@ async function initializeBookingMasterLocationMap() {
     syncBookingMasterLatLngFromPinDrop();
     drawBookingMasterMapSelection();
   };
-  bookingMasterMapInstance = initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
+  bookingMasterMapInstance = await initMap(cleanOlaStyleUrl(olaMapsStyleUrl));
   attachMapClick();
   startBookingMasterPinDropSync();
   if (bookingMasterMapInstance.loaded?.()) drawWhenReady();
@@ -13524,14 +14172,15 @@ async function initializeBookingMasterLocationMap() {
   bookingMasterMapInstance.on?.("pitchend", stopBookingMasterPinDropFrameSync);
   bookingMasterMapInstance.on?.("idle", drawBookingMasterMapSelection);
   let usedFallback = false;
-  bookingMasterMapInstance.on?.("error", (event) => {
+  bookingMasterMapInstance.on?.("error", async (event) => {
     const message = event?.error?.message || "Ola Maps could not load for this domain.";
     if (usedFallback || !isOlaMapAuthOrDomainError(event?.error || message)) return;
     usedFallback = true;
     cleanupBookingMasterMap();
     mapEl.innerHTML = "";
-    bookingMasterMapInstance = initMap(fallbackRasterStyle());
-    showAlert(`${message}. Showing fallback map tiles. Add this admin domain to the Ola Maps credentials whitelist to use Ola vector tiles.`);
+    try { bookingMasterMapInstance = await initMap(fallbackRasterStyle()); }
+    catch { showAlert("Map unavailable. Reopen the location picker to retry."); return; }
+    showAlert(`${message}. Showing Ola map images. Check server credentials and provider permissions if the problem persists.`);
     attachMapClick();
     startBookingMasterPinDropSync();
     if (bookingMasterMapInstance.loaded?.()) drawWhenReady();
@@ -14218,6 +14867,211 @@ async function confirmCustomerAddressMapPin() {
   const longitude = Number.isFinite(pin.longitude) ? pin.longitude : Number(fallback.longitude);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) throw new Error("Map pin location is not ready.");
   await applyCustomerAddressPinLocation(latitude, longitude);
+}
+
+async function loadMarketTypes() {
+  const endpoint = "/masters/market-types";
+  const result = await api(endpoint);
+  const records = (result.data || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  const root = $("#marketTypesSection");
+  root.innerHTML = pageTitleBlock("Market Type", "") + `<div class="master-grid location-hierarchy-grid">
+    ${panel("Market Type", "", `<form class="master-form stack" id="marketTypeForm">
+      <input type="hidden" name="id">
+      <label>Name<input class="form-control" name="name" minlength="2" maxlength="160" required></label>
+      <label>Code<input class="form-control" name="code" minlength="2" maxlength="100" required></label>
+      <label>Description<textarea class="form-control" name="description" maxlength="5000" rows="3"></textarea></label>
+      <label>Color<input class="form-control form-control-color" type="color" name="color" value="#005df2" title="Market Type color" required></label>
+      <label class="form-check"><input class="form-check-input" name="isActive" type="checkbox" checked> Active</label>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">Create Market Type</button><button class="btn btn-outline-secondary" type="reset">Cancel</button></div>
+    </form>`)}
+    ${panel("Market Type Records", "", table(["Name", "Code", "Description", "Color", "Status", ""], records.map(item => `<tr>
+      <td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.code)}</td><td>${escapeHtml(item.description || "")}</td>
+      <td><input type="color" value="${/^#[0-9a-f]{6}$/i.test(item.color) ? item.color : "#005df2"}" disabled aria-label="${escapeHtml(item.name)} color" title="${escapeHtml(item.color)}"></td>
+      <td>${status(item.isActive ? "active" : "inactive")}</td><td class="text-end">
+        <button type="button" class="btn btn-soft btn-xs" data-market-type-command="edit" data-id="${item.id}">Edit</button>
+        <button type="button" class="btn btn-soft btn-xs" data-market-type-command="delete" data-id="${item.id}">Delete</button>
+      </td></tr>`).join("")))}
+  </div>`;
+  const form = root.querySelector("form");
+  const submit = form.querySelector('[type="submit"]');
+  form.addEventListener("reset", () => { form.elements.id.value = ""; submit.textContent = "Create Market Type"; });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    submit.disabled = true;
+    const id = form.elements.id.value;
+    try {
+      await api(id ? `${endpoint}/${id}` : endpoint, { method: id ? "PUT" : "POST", body: JSON.stringify({
+        name: form.elements.name.value.trim(), code: form.elements.code.value.trim(),
+        description: form.elements.description.value.trim(), color: form.elements.color.value, isActive: form.elements.isActive.checked
+      }) });
+      await loadMarketTypes(); showAlert("Market Type saved.", "success");
+    } catch (error) { showAlert(error.message); }
+    finally { submit.disabled = false; }
+  });
+  root.onclick = async event => {
+    const button = event.target.closest("[data-market-type-command]");
+    if (!button || button.disabled) return;
+    const item = records.find(record => record.id === button.dataset.id);
+    if (!item) return;
+    if (button.dataset.marketTypeCommand === "edit") {
+      for (const name of ["id", "name", "code", "description", "color"]) form.elements[name].value = item[name] || "";
+      form.elements.isActive.checked = Boolean(item.isActive); submit.textContent = "Update Market Type";
+      form.elements.name.focus();
+    } else if (confirm(`Delete ${item.name}?`)) {
+      button.disabled = true;
+      try { await api(`${endpoint}/${item.id}`, { method: "DELETE" }); await loadMarketTypes(); showAlert("Market Type deleted.", "success"); }
+      catch (error) { showAlert(error.message); button.disabled = false; }
+    }
+  };
+}
+
+const locationHierarchyPages = {
+  zones: { title: "Zone", endpoint: "zones", parent: "City", parentEndpoint: "/masters/cities" },
+  clusters: { title: "Cluster", endpoint: "clusters", parent: "Zone", parentEndpoint: "/masters/location-hierarchy/zones" },
+  microMarkets: { title: "Micro Market", endpoint: "micro-markets", parent: "Cluster", parentEndpoint: "/masters/location-hierarchy/clusters" },
+  nanoMarkets: { title: "Nano Market", endpoint: "nano-markets", parent: "Micro Market", parentEndpoint: "/masters/location-hierarchy/micro-markets" }
+};
+
+async function loadLocationHierarchyPage(section) {
+  locationMapEditor?.destroy();
+  locationMapEditor = null;
+  const config = locationHierarchyPages[section];
+  const endpoint = `/masters/location-hierarchy/${config.endpoint}`;
+  const [records, parents, marketTypes] = await Promise.all([api(endpoint), api(config.parentEndpoint), section === "nanoMarkets" ? api("/masters/market-types") : Promise.resolve({ data: [] })]);
+  const root = $(`#${section}Section`);
+  root.innerHTML = pageTitleBlock(config.title, "") + `<div class="master-grid location-hierarchy-grid">
+    ${panel(config.title, "", `<form class="master-form stack" data-location-hierarchy-form>
+      <input type="hidden" name="id">
+      <label>${config.parent}<select class="form-select" name="parentId" required><option value="">Select ${config.parent}</option>${optionRows((parents.data || []).map((item) => ({ ...item, name: item.parentName ? `${item.name} / ${item.parentName}` : item.name })))}</select></label>
+      ${section === "nanoMarkets" ? `<div class="nano-market-type-field"><span>Market Type</span><details class="nano-market-types" data-market-types><summary class="form-select"><span data-market-type-summary>Select Market Types</span></summary><div class="nano-market-type-options" data-market-type-options></div></details></div>` : ""}
+      <label>Name<input class="form-control" name="name" minlength="2" maxlength="160" required></label>
+      <label>Code<input class="form-control" name="code" minlength="2" maxlength="100" required></label>
+      <div class="location-map-editor" data-location-map-editor>
+        <div class="location-map-tools" data-map-tools></div>
+        <div class="location-map-surface"><div class="location-map-canvas" data-map-canvas></div><div class="map-loading" data-map-loading role="status" aria-label="Loading map"><span class="map-loading-spinner" aria-hidden="true"></span></div></div>
+        <div class="location-map-message" data-map-message role="status"></div>
+      </div>
+      <label>Polygon<textarea class="form-control" name="polygonDescription" rows="5" required placeholder="POLYGON((longitude latitude, longitude latitude, longitude latitude, longitude latitude))"></textarea></label>
+      <label class="form-check"><input class="form-check-input" type="checkbox" name="isOpen"> Open</label>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">Save ${config.title}</button><button class="btn btn-outline-secondary" type="reset">Cancel</button></div>
+    </form>`)}
+    ${panel(`${config.title} Records`, "", `<input class="form-control mb-3" data-location-search type="search" placeholder="Search name, code or parent"><div data-location-results></div>`)}
+  </div>`;
+  const form = root.querySelector("[data-location-hierarchy-form]");
+  const typeRecords = [...(marketTypes.data || [])];
+  for (const record of records.data || []) for (const type of record.marketTypes || []) if (!typeRecords.some(item => item.id === type.id)) typeRecords.push(type);
+  let marketTypeSelection = [];
+  const selectedMarketTypeIds = () => [...marketTypeSelection];
+  const updateMarketTypeSwatch = () => {
+    const ids = selectedMarketTypeIds();
+    const selected = ids.map(id => typeRecords.find(type => type.id === id)).filter(Boolean);
+    form.querySelector("[data-market-type-summary]").innerHTML = selected.length ? selected.map(type => `<span class="market-type-selected"><span class="market-type-color" style="background-color:${/^#[0-9a-f]{6}$/i.test(type.color) ? type.color : "#dc2626"}" aria-hidden="true"></span><span>${escapeHtml(type.name)}</span></span>`).join("") : "Select Market Types";
+    locationMapEditor?.setMarketTypes(selected);
+  };
+  const renderMarketTypes = (selectedIds = []) => {
+    if (section !== "nanoMarkets") return;
+    marketTypeSelection = [...selectedIds];
+    const items = typeRecords.filter(item => item.isActive || selectedIds.includes(item.id)).sort((a, b) => a.name.localeCompare(b.name));
+    form.querySelector("[data-market-type-options]").innerHTML = items.length ? items.map(item => `<label class="nano-market-type-option"><input type="checkbox" name="marketTypeIds" value="${item.id}" ${selectedIds.includes(item.id) ? "checked" : ""} data-active="${Boolean(item.isActive)}"><span class="market-type-color" style="background-color:${/^#[0-9a-f]{6}$/i.test(item.color) ? item.color : "#dc2626"}" aria-hidden="true"></span><span>${escapeHtml(item.name)}${!item.isActive ? " (Inactive)" : ""}</span></label>`).join("") : '<span class="text-muted">No active Market Types</span>';
+    updateMarketTypeSwatch();
+  };
+  if (section === "nanoMarkets") {
+    renderMarketTypes();
+    form.querySelector("[data-market-type-options]").addEventListener("change", event => {
+      const input = event.target;
+      if (input.name !== "marketTypeIds") return;
+      marketTypeSelection = input.checked ? [...marketTypeSelection.filter(id => id !== input.value), input.value] : marketTypeSelection.filter(id => id !== input.value);
+      if (event.target.dataset.active === "false" && !event.target.checked) event.target.disabled = true;
+      updateMarketTypeSwatch();
+    });
+    root.onkeydown = event => { if (event.key === "Escape") { const details = form.querySelector("[data-market-types]"); details.open = false; details.querySelector("summary").focus(); } };
+  }
+  const rows = records.data || [];
+  const renderRows = () => {
+    const text = root.querySelector("[data-location-search]").value.trim().toLowerCase();
+    const filtered = text.length < 2 ? rows : rows.filter((item) => [item.name, item.code, item.parentName].some((value) => String(value || "").toLowerCase().includes(text)));
+    root.querySelector("[data-location-results]").innerHTML = table(["Name", "Code", config.parent, "Open", ""], filtered.map((item) => `<tr>
+      <td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.code)}</td><td>${escapeHtml(item.parentName || "-")}</td>
+    <td>${status(item.isOpen ? "open" : "closed")}</td><td class="text-end">
+        <button class="btn btn-soft btn-xs" data-location-command="preview" data-id="${item.id}" type="button" ${item.polygonDescription ? "" : "disabled"}>View on Map</button>
+        <button class="btn btn-soft btn-xs" data-location-command="edit" data-id="${item.id}" type="button">Edit</button>
+        ${isSuperAdminUser() ? `<button class="btn btn-outline-danger btn-xs" data-location-command="delete" data-id="${item.id}" type="button">Delete</button>` : ""}
+      </td></tr>`).join(""));
+  };
+  renderRows();
+  root.querySelector("[data-location-search]").addEventListener("input", renderRows);
+  const parentRows = parents.data || [];
+  const updateMapParent = () => {
+    const parent = parentRows.find(item => item.id === form.elements.parentId.value);
+    locationMapEditor?.setParent(parent?.polygonDescription || "");
+    if (["zones", "clusters", "microMarkets", "nanoMarkets"].includes(section)) {
+      const selectedParentId = form.elements.parentId.value;
+      const editingId = form.elements.id.value;
+      locationMapEditor?.setReferencePolygons(rows.filter(item => item.id !== editingId && (!selectedParentId || item.parentId === selectedParentId)));
+    }
+  };
+  form.elements.parentId.addEventListener("change", updateMapParent);
+  form.addEventListener("reset", () => {
+    form.elements.id.value = "";
+    setTimeout(() => { if (form.isConnected) { locationMapEditor?.setWkt(""); updateMapParent(); if (section === "nanoMarkets") renderMarketTypes(); } }, 0);
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submit = form.querySelector('[type="submit"]');
+    if (submit.disabled) return;
+    submit.disabled = true;
+    try {
+      const id = form.elements.id.value;
+      const body = { parentId: form.elements.parentId.value, name: form.elements.name.value, code: form.elements.code.value, polygonDescription: form.elements.polygonDescription.value, isOpen: form.elements.isOpen.checked };
+      if (section === "nanoMarkets") body.marketTypeIds = selectedMarketTypeIds();
+      await api(id ? `${endpoint}/${id}` : endpoint, { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+      await loadLocationHierarchyPage(section);
+    } catch (error) { showAlert(error.message); }
+    finally { submit.disabled = false; }
+  });
+  root.onclick = async (event) => {
+    const button = event.target.closest("[data-location-command]");
+    if (!button || button.disabled) return;
+    const item = rows.find((row) => row.id === button.dataset.id);
+    if (!item) return;
+    try {
+      if (button.dataset.locationCommand === "edit") {
+        for (const field of ["id", "parentId", "name", "code", "polygonDescription"]) form.elements[field].value = item[field] || "";
+        form.elements.isOpen.checked = Boolean(item.isOpen);
+        if (section === "nanoMarkets") renderMarketTypes(item.marketTypeIds || (item.marketTypeId ? [item.marketTypeId] : []));
+        locationMapEditor?.setWkt(item.polygonDescription || "");
+        updateMapParent();
+        form.elements.name.focus();
+      } else if (button.dataset.locationCommand === "preview") {
+        await renderPolygonMap(item, config.endpoint);
+      } else if (confirm(`Delete ${item.name}?`)) {
+        button.disabled = true;
+        await api(`${endpoint}/${item.id}`, { method: "DELETE" });
+        await loadLocationHierarchyPage(section);
+      }
+    } catch (error) { showAlert(error.message); button.disabled = false; }
+  };
+  const mapRoot = form.querySelector("[data-location-map-editor]");
+  try {
+    const level = config.endpoint;
+    const parentLevel = { zones: "zones", clusters: "zones", "micro-markets": "clusters", "nano-markets": "micro-markets" }[level];
+    const editor = await window.ZigoPolygonEditor.create({ root: mapRoot, textarea: form.elements.polygonDescription, parseWkt: parseWktPolygon, color: locationPolygonStyles[level].color, parentColor: locationPolygonStyles[parentLevel].color, nameInput: form.elements.name, labelStrips: true });
+    if (!form.isConnected || (state.section && state.section !== section)) { editor.destroy(); return; }
+    locationMapEditor = editor;
+    updateMapParent();
+    if (section === "nanoMarkets") updateMarketTypeSwatch();
+  } catch (error) { if (form.isConnected) mapRoot.querySelector("[data-map-message]").textContent = error.message; }
+}
+
+async function loadStateCityLocations() {
+  const [states, cities] = await Promise.all([api("/masters/states"), api("/masters/cities")]);
+  cache.states = states.data || [];
+  cache.cities = cities.data || [];
+  $("#locationsSection").innerHTML = pageTitleBlock("States & Cities", "") + `<div class="master-grid">
+    ${panel("States", "", `<form class="master-form stack" data-form="state" id="stateForm"><input type="hidden" name="id"><input class="form-control" name="name" placeholder="State name" required><input class="form-control" name="code" placeholder="state_code" required><input class="form-control" name="countryName" placeholder="Country" value="India"><label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label><div class="form-actions"><button class="btn btn-primary" id="stateSubmitButton">Create State</button><button class="btn btn-outline-secondary d-none" id="cancelStateEditButton" type="button">Cancel</button></div></form>` + table(["Name", "Code", "Country", "Status", ""], stateRows(cache.states)))}
+    ${panel("Cities", "", `<form class="master-form stack" data-form="city" id="cityForm"><input type="hidden" name="id"><select class="form-select" name="stateId"><option value="">State optional</option>${optionRows(activeItems(cache.states))}</select><input class="form-control" name="name" placeholder="City name" required><input class="form-control" name="code" placeholder="city_code" required><label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label><div class="form-actions"><button class="btn btn-primary" id="citySubmitButton">Create City</button><button class="btn btn-outline-secondary d-none" id="cancelCityEditButton" type="button">Cancel</button></div></form>` + table(["Name", "Code", "State", "Status", ""], cityRows(cache.cities)))}
+  </div>`;
 }
 
 async function loadLocations() {
@@ -15829,6 +16683,7 @@ const loaders = {
   bookings: loadBookings,
   payments: loadPayments,
   offerMaster: loadOfferMaster,
+  assistantAvailable: loadAssistantAvailabilityBoard,
   bookingsReport: loadBookingsReport,
   customerReport: loadCustomerReport,
   assistantReport: loadAssistantReport,
@@ -15841,7 +16696,12 @@ const loaders = {
   customers: loadCustomers,
   customerAddresses: loadCustomerAddressesScreen,
   masters: loadMasters,
-  locations: loadLocations,
+  locations: loadStateCityLocations,
+  zones: () => loadLocationHierarchyPage("zones"),
+  clusters: () => loadLocationHierarchyPage("clusters"),
+  microMarkets: () => loadLocationHierarchyPage("microMarkets"),
+  nanoMarkets: () => loadLocationHierarchyPage("nanoMarkets"),
+  marketTypes: loadMarketTypes,
   services: loadServices,
   categoryServices: loadCategoryServices,
   categories: loadCategories,
@@ -15872,6 +16732,7 @@ const titles = {
   bookings: "Bookings",
   payments: "Payments",
   offerMaster: "Offer Master",
+  assistantAvailable: "Assistant Available",
   bookingsReport: "Bookings Report",
   customerReport: "Customer Report",
   assistantReport: "Assistant Report",
@@ -15884,7 +16745,12 @@ const titles = {
   customers: "Customers",
   customerAddresses: "Customer Addresses",
   masters: "Masters",
-  locations: "Locations",
+  locations: "States & Cities",
+  zones: "Zone",
+  clusters: "Cluster",
+  microMarkets: "Micro Market",
+  nanoMarkets: "Nano Market",
+  marketTypes: "Market Type",
   services: "Services",
   categoryServices: "Service Master",
   categories: "Categories",
@@ -15921,6 +16787,7 @@ function setNavGroupOpen(group, isOpen) {
 async function showSection(section) {
   clearAlert();
   const nextSection = loaders[section] && $(`#${section}Section`) ? section : "dashboard";
+  if (!locationHierarchyPages[nextSection]) { locationMapEditor?.destroy(); locationMapEditor = null; }
   if (nextSection === "bookings") acknowledgeNewBookingAlert();
   state.section = nextSection;
   pageTitle.textContent = titles[nextSection] || nextSection;
@@ -15930,7 +16797,9 @@ async function showSection(section) {
   document.querySelectorAll(".nav-collapsible").forEach((group) => {
     if (group.querySelector(`[data-section="${CSS.escape(nextSection)}"]`)) setNavGroupOpen(group, true);
   });
+  stopAssistantAvailabilityBoardAutoRefresh();
   await loaders[nextSection]();
+  if (nextSection === "assistantAvailable") startAssistantAvailabilityBoardAutoRefresh();
   $("#bookingMasterAssistantWidget")?.classList.toggle("d-none", nextSection !== "bookingMaster");
   startBookingRealtime();
   updateBookingBell();
@@ -17619,9 +18488,11 @@ document.addEventListener("submit", async (event) => {
       $("#assistantMasterEditModal").classList.add("d-none");
     }
     if (formName === "assistant-master-cluster") {
-      await api(`/assistant-master/${data.assistantId}/cluster`, {
+      if (!assistantAreaEditor) throw new Error("Area controls are still loading.");
+      const normalize = area => ({...area, zoneId: area.zoneId || null});
+      await api(`/assistant-master/${data.assistantId}/areas`, {
         method: "POST",
-        body: JSON.stringify({ clusterId: data.clusterId })
+        body: JSON.stringify({ working: normalize(assistantAreaEditor.working), assign: normalize(assistantAreaEditor.assign) })
       });
       $("#assistantMasterEditModal").classList.add("d-none");
     }
@@ -17713,12 +18584,42 @@ document.querySelectorAll(".nav-child, .nav-item").forEach((button) => {
   });
 });
 
+const assistantAvailabilityBoardVisibilityHandler = () => {
+  if (document.visibilityState === "visible" && state.section === "assistantAvailable") {
+    refreshAssistantAvailabilityBoardFromRealtime();
+  }
+};
+document.addEventListener("visibilitychange", assistantAvailabilityBoardVisibilityHandler);
+
 document.addEventListener("input", (event) => {
   const input = event.target;
   if (input.closest?.("#taxMasterForm")) {
     taxMasterEvaluateFormula(input.closest("#taxMasterForm"));
   }
-  if (input instanceof HTMLInputElement && input.id === "paymentSearchInput") {
+  if (input instanceof HTMLInputElement && input.id === "assistantReportSearchInput") {
+    assistantReportFilters.search = input.value || "";
+    if (assistantReportSearchTimer) clearTimeout(assistantReportSearchTimer);
+    const selectionStart = input.selectionStart;
+    const selectionEnd = input.selectionEnd;
+    assistantReportSearchTimer = setTimeout(() => {
+      renderAssistantReport();
+      requestAnimationFrame(() => {
+        const replacement = document.getElementById("assistantReportSearchInput");
+        if (!(replacement instanceof HTMLInputElement)) return;
+        replacement.focus({ preventScroll: true });
+        if (selectionStart !== null && selectionEnd !== null) replacement.setSelectionRange(selectionStart, selectionEnd);
+      });
+    }, 180);
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.id === "assistantAvailabilitySearchInput") {
+    assistantAvailabilityBoardFilters.search = input.value || "";
+    if (assistantAvailabilityBoardSearchTimer) clearTimeout(assistantAvailabilityBoardSearchTimer);
+    assistantAvailabilityBoardSearchTimer = setTimeout(() => {
+      if (state.section === "assistantAvailable") loadAssistantAvailabilityBoard().catch((error) => showAlert(error.message));
+    }, 250);
+    return;
+  }  if (input instanceof HTMLInputElement && input.id === "paymentSearchInput") {
     paymentFilters.search = input.value || "";
     paymentFilters.page = 1;
     if (paymentSearchTimer) clearTimeout(paymentSearchTimer);
@@ -17730,8 +18631,22 @@ document.addEventListener("input", (event) => {
     const reportKey = reportToolbar.dataset.reportToolbar || "";
     const definition = adminReportDefinition(reportKey);
     if (!definition) return;
-    getAdminReportFilter(reportKey).search = input.value || "";
-    getAdminReportFilter(reportKey).page = 1;
+    const filters = getAdminReportFilter(reportKey);
+    const nextSearch = input.value || "";
+    const normalizedSearch = nextSearch.trim();
+    if (normalizedSearch.length === 1) {
+      // Search starts from two characters. Keep the toolbar mounted and clear any prior filter.
+      if (filters.search) {
+        filters.search = "";
+        filters.page = 1;
+        if (reportKey === "reviewsReport") loadReviewsReport().catch((error) => showAlert(error.message));
+        else if (reportKey === "unserviceableLocationsReport") loadUnserviceableLocationsReport().catch((error) => showAlert(error.message));
+        else definition.render();
+      }
+      return;
+    }
+    filters.search = nextSearch;
+    filters.page = 1;
     if (adminReportSearchTimers[reportKey]) clearTimeout(adminReportSearchTimers[reportKey]);
     adminReportSearchTimers[reportKey] = setTimeout(() => {
       if (reportKey === "reviewsReport") loadReviewsReport().catch((error) => showAlert(error.message));
@@ -17744,7 +18659,31 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   const input = event.target;
-  if (input instanceof HTMLInputElement && input.matches("[data-offer-image-upload]")) {
+  if (input instanceof HTMLSelectElement && input.dataset.assistantAvailabilityFilter) {
+  if (input instanceof HTMLSelectElement && input.dataset.assistantReportFilter) {
+    const key = input.dataset.assistantReportFilter;
+    assistantReportFilters[key] = input.value || "";
+    if (key === "stateId") { assistantReportFilters.cityId = ""; assistantReportFilters.zoneId = ""; assistantReportFilters.clusterId = ""; }
+    else if (key === "cityId") { assistantReportFilters.zoneId = ""; assistantReportFilters.clusterId = ""; }
+    else if (key === "zoneId") { assistantReportFilters.clusterId = ""; }
+    renderAssistantReport();
+    return;
+  }
+    const key = input.dataset.assistantAvailabilityFilter;
+    assistantAvailabilityBoardFilters[key] = input.value || "";
+    if (key === "stateId") {
+      assistantAvailabilityBoardFilters.cityId = "";
+      assistantAvailabilityBoardFilters.zoneId = "";
+      assistantAvailabilityBoardFilters.clusterId = "";
+    } else if (key === "cityId") {
+      assistantAvailabilityBoardFilters.zoneId = "";
+      assistantAvailabilityBoardFilters.clusterId = "";
+    } else if (key === "zoneId") {
+      assistantAvailabilityBoardFilters.clusterId = "";
+    }
+    await loadAssistantAvailabilityBoard();
+    return;
+  }  if (input instanceof HTMLInputElement && input.matches("[data-offer-image-upload]")) {
     const file = input.files?.[0];
     if (!file) return;
     try {
@@ -18425,7 +19364,34 @@ document.addEventListener("drop", async (event) => {
 
 document.addEventListener("click", async (event) => {
   if (event.target.closest?.('a[href^="https://wa.me/"]')) return;
-  const restartBookingLiveSyncButton = event.target.closest?.('[data-action="restart-booking-live-sync"]');
+  const assistantReportRow = event.target.closest?.('[data-action="open-assistant-report-detail"]');
+  if (assistantReportRow && state.section === "assistantReport") {
+    event.preventDefault();
+    await openAssistantReportDetail(assistantReportRow.dataset.id || "");
+    return;
+  }
+  const refreshAssistantReportDetail = event.target.closest?.('[data-action="refresh-assistant-report-detail"]');
+  if (refreshAssistantReportDetail) {
+    event.preventDefault();
+    await openAssistantReportDetail(refreshAssistantReportDetail.dataset.id || "", {
+      startDate: $("#assistantReportDetailStartDate")?.value || todayInputDate(),
+      endDate: $("#assistantReportDetailEndDate")?.value || todayInputDate()
+    });
+    return;
+  }
+  const assistantAvailabilityTab = event.target.closest?.('[data-action="assistant-availability-tab"]');
+  if (assistantAvailabilityTab && state.section === "assistantAvailable") {
+    event.preventDefault();
+    assistantAvailabilityBoardFilters.tab = assistantAvailabilityTab.dataset.tab === "available" ? "available" : "blocked";
+    await loadAssistantAvailabilityBoard();
+    return;
+  }
+  const refreshAssistantAvailability = event.target.closest?.('[data-action="refresh-assistant-availability"]');
+  if (refreshAssistantAvailability && state.section === "assistantAvailable") {
+    event.preventDefault();
+    await loadAssistantAvailabilityBoard();
+    return;
+  }  const restartBookingLiveSyncButton = event.target.closest?.('[data-action="restart-booking-live-sync"]');
   if (restartBookingLiveSyncButton) {
     event.preventDefault();
     try {
@@ -19893,6 +20859,7 @@ document.addEventListener("click", async (event) => {
     }
     if (action === "open-assistant-master-cell") {
       openAssistantMasterEditModal(id, button.dataset.field || "basic");
+      if (button.dataset.areaListingTab) document.querySelector(`[data-area-tab="${button.dataset.areaListingTab}"]`)?.click();
       return;
     }
     if (action === "open-assigned-assistant-profile") {
@@ -20794,7 +21761,29 @@ document.addEventListener("keydown", (event) => {
   openBookingReportDetailModal(row.dataset.reportBookingId).catch((error) => showAlert(error.message));
 });
 
-$("#refreshCurrentButton").addEventListener("click", () => showSection(state.section));
+$("#refreshCurrentButton").addEventListener("click", async () => {
+  const button = $("#refreshCurrentButton");
+  button.classList.add("is-refreshing");
+  try { await showSection(state.section); } finally { button.classList.remove("is-refreshing"); }
+});
+
+document.addEventListener("click", async (event) => {
+  const action = event.target.closest?.("[data-action]")?.dataset.action;
+  if (action !== "dashboard-today" && action !== "dashboard-apply-filter") return;
+  if (action === "dashboard-today") {
+    const today = dashboardTodayDate();
+    dashboardDateFrom = today;
+    dashboardDateTo = today;
+  } else {
+    dashboardDateFrom = $("#dashboardFromDate")?.value || dashboardDateFrom;
+    dashboardDateTo = $("#dashboardToDate")?.value || dashboardDateTo;
+    if (!dashboardDateFrom || !dashboardDateTo || dashboardDateFrom > dashboardDateTo) {
+      showAlert("Choose a valid From and To date.", "warning");
+      return;
+    }
+  }
+  await loadDashboard();
+});
 bookingBellButton?.addEventListener("click", () => {
   acknowledgeNewBookingAlert();
   if (state.section === "bookings") loadBookings(bookingActiveTab).catch((error) => showAlert(error.message));
@@ -20803,6 +21792,8 @@ bookingBellButton?.addEventListener("click", () => {
 $("#profileChipButton").addEventListener("click", openProfileModal);
 $("#closeProfileModalButton").addEventListener("click", closeProfileModal);
 $("#closePolygonModalButton").addEventListener("click", () => {
+  polygonMapLoading?.destroy(); polygonMapLoading = null;
+  polygonMapCleanup?.(); polygonMapCleanup = null;
   $("#polygonModal").classList.add("d-none");
   if (polygonMapInstance?.remove) polygonMapInstance.remove();
   polygonMapInstance = null;
@@ -20961,9 +21952,10 @@ document.addEventListener("change", (event) => {
     if (event.target?.matches?.(selector)) renderAssistantMasterRecords();
   });
 });
-["#assistantCityFilter", "#assistantZoneFilter", "#assistantClusterFilter"].forEach((selector) => {
+["#assistantCityFilter", "#assistantZoneFilter", "#assistantClusterFilter", "#assistantMicroMarketFilter", "#assistantNanoMarketFilter"].forEach((selector) => {
   document.addEventListener("change", (event) => {
     if (event.target?.matches?.(selector)) {
+      refreshAssistantListingLocationFilters();
       assistantPage = 1;
       renderAssistantRecords();
     }
@@ -20973,8 +21965,33 @@ $("#logoutButton").addEventListener("click", () => {
   clearAdminSession();
 });
 
-if (state.token) {
-  showAdmin();
-  refreshSignedInUser().catch(() => {});
-  showSection("dashboard");
+let adminSessionCheckPromise = null;
+function adminTokenNeedsRefresh() {
+  try { return !state.token || Number(JSON.parse(atob(state.token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))).exp || 0) * 1000 <= Date.now() + 120000; }
+  catch { return true; }
+}
+function checkAdminSession() {
+  if (adminSessionCheckPromise) return adminSessionCheckPromise;
+  if ((!state.token && !state.refreshToken) || document.visibilityState === 'hidden' || navigator.onLine === false) return Promise.resolve();
+  adminSessionCheckPromise = (async () => {
+    if (adminTokenNeedsRefresh() && state.refreshToken) await refreshAdminSession();
+    await api('/auth/session');
+  })().catch(error => { if ([400,401,403].includes(Number(error.status))) clearAdminSession('Unable to sign in. Please contact support.'); })
+    .finally(() => { adminSessionCheckPromise = null; });
+  return adminSessionCheckPromise;
+}
+window.addEventListener('storage', event => { if (event.key === 'zigoAdminToken' && !event.newValue && (state.token || state.refreshToken)) clearAdminSession(); });
+window.addEventListener('focus', () => { void checkAdminSession(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void checkAdminSession(); });
+setInterval(() => { void checkAdminSession(); }, 30000);
+if (state.token || state.refreshToken) {
+  (async () => {
+    if (adminTokenNeedsRefresh() && state.refreshToken) {
+      try { await refreshAdminSession(); }
+      catch (error) { if ([400,401,403].includes(Number(error.status))) { clearAdminSession(); return; } }
+    }
+    showAdmin();
+    await refreshSignedInUser().catch(() => {});
+    if (state.token) showSection('dashboard');
+  })();
 }

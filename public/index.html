@@ -3,16 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Zigo Admin</title>
+    <title>ZIGO-Trusted Assistant</title>
+    <link rel="icon" href="./favicon.ico" sizes="any">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
-    <link rel="stylesheet" href="./styles.css?v=booking-assignment-ring-v4-20260722" />
+    <link rel="stylesheet" href="./styles.css?v=assistant-market-filters-20261005" />
   </head>
   <body>
     <main id="loginView" class="auth-page">
       <section class="auth-card">
         <img class="auth-card-logo" src="./assets/zigo-logo-new.png" alt="ZIGO" />
         <h1 class="auth-title">Get Started</h1>
-        <p class="auth-copy">Sign in to manage ZIGO.</p>
+        <p class="auth-copy">Sign in to manage ZIGO</p>
         <div id="loginAlert" class="alert alert-danger d-none"></div>
         <form id="loginForm" class="vstack gap-3">
           <input class="form-control form-control-lg" name="identifier" value="admin@zigo.local" required />
@@ -33,18 +34,24 @@
             <button class="nav-item active" data-section="dashboard" type="button">
               <span class="nav-icon">DB</span>Dashboard<span class="nav-chevron">Live</span>
             </button>
-            <div class="nav-children">
+            <!-- <div class="nav-children">
               <button class="nav-child active" data-section="dashboard" type="button">Overview</button>
-            </div>
+            </div> -->
           </div>
+            <button class="nav-child nav-child-with-badge" data-section="bookings" type="button">
+                <span>Bookings</span><span id="pendingAssignmentCount" class="nav-count-badge d-none" aria-label="Bookings awaiting assignment">0</span>
+              </button>
+              
+              <button class="nav-child" data-section="assistant" type="button">Assistant</button>
+                  <button class="nav-child" data-section="users" type="button">Users</button>
           <div class="nav-group nav-collapsible" data-nav-group="categoryMaster">
             <button class="nav-item" data-nav-toggle="categoryMaster" type="button" aria-expanded="false">
               <span class="nav-icon">CM</span>Category Master<span class="nav-chevron" aria-hidden="true">▾</span>
             </button>
             <div class="nav-children">
-              <button class="nav-child" data-section="categoryServices" type="button">Service Master</button>
-              <button class="nav-child" data-section="categories" type="button">Categories</button>
-              <button class="nav-child" data-section="categoryPrice" type="button">Category Price</button>
+              <button class="nav-child" data-section="categoryServices" type="button">Categories</button>
+              <button class="nav-child" data-section="categories" type="button">Sub-Categories</button>
+              <button class="nav-child" data-section="categoryPrice" type="button">Sub-Category Price</button>
               <button class="nav-child" data-section="bookingEngine" type="button">Booking Engine</button>
               <button class="nav-child" data-section="taxMaster" type="button">Tax Master</button>
               <button class="nav-child" data-section="paymentMode" type="button">Payment Methods</button>
@@ -52,7 +59,7 @@
           </div>
           <div class="nav-group nav-collapsible" data-nav-group="reports">
             <button class="nav-item" data-nav-toggle="reports" type="button" aria-expanded="false">
-              <span class="nav-icon">RP</span>Reports<span class="nav-chevron" aria-hidden="true">â–¾</span>
+              <span class="nav-icon">RP</span>Reports<span class="nav-chevron" aria-hidden="true">▾</span>
             </button>
             <div class="nav-children">
               <button class="nav-child" data-section="bookingsReport" type="button">Bookings Report</button>
@@ -63,31 +70,41 @@
               <button class="nav-child" data-section="unserviceableLocationsReport" type="button">Not Serviceable Locations</button>
             </div>
           </div>
+           <div class="nav-group nav-collapsible" data-nav-group="locations">
+            <button class="nav-item" data-nav-toggle="locations" type="button" aria-expanded="false">
+              <span class="nav-icon">L</span>Locations<span class="nav-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div class="nav-children">
+              <button class="nav-child" data-section="locations" type="button">States &amp; Cities</button>
+              <button class="nav-child" data-section="zones" type="button">Zone</button>
+              <button class="nav-child" data-section="clusters" type="button">Cluster</button>
+              <button class="nav-child" data-section="microMarkets" type="button">Micro Market</button>
+              <button class="nav-child" data-section="nanoMarkets" type="button">Nano Market</button>
+              <button class="nav-child" data-section="marketTypes" type="button">Market Type</button>
+             </div>
+          </div>      
           <div class="nav-group nav-root-list open">
             <div class="nav-children">
-              <button class="nav-child" data-section="operations" type="button">Operations</button>
-              <button class="nav-child nav-child-with-badge" data-section="bookings" type="button">
-                <span>Bookings</span><span id="pendingAssignmentCount" class="nav-count-badge d-none" aria-label="Bookings awaiting assignment">0</span>
-              </button>
+              <!-- <button class="nav-child" data-section="operations" type="button">Operations</button> -->
+            
               <button class="nav-child" data-section="payments" type="button">Payments</button>
               <button class="nav-child" data-section="offerMaster" type="button">Offer Master</button>
+              <button class="nav-child" data-section="assistantAvailable" type="button">Assistant Available</button>
               <button class="nav-child" data-section="customerDisputes" type="button">Customer Disputes</button>
               <button class="nav-child" data-section="supportTickets" type="button">Customer Support</button>
               <button class="nav-child" data-section="bookingMaster" type="button">Booking Master</button>
               <button class="nav-child" data-section="customers" type="button">Customers</button>
               <button class="nav-child" data-section="masters" type="button">Masters</button>
-              <button class="nav-child" data-section="locations" type="button">Locations</button>
               <button class="nav-child" data-section="services" type="button">Services</button>
-              <button class="nav-child" data-section="clusterServices" type="button">Cluster Services</button>
+              <!-- <button class="nav-child" data-section="clusterServices" type="button">Cluster Services</button> -->
               <button class="nav-child" data-section="bookingTypes" type="button">Booking Type Master</button>
               <button class="nav-child" data-section="surgeMaster" type="button">Surge Master</button>
               <button class="nav-child" data-section="priceMaster" type="button">Price Master</button>
               <button class="nav-child" data-section="taxMaster" type="button">Tax Master</button>
               <button class="nav-child" data-section="stores" type="button">Stores</button>
-              <button class="nav-child" data-section="assistant" type="button">Assistant</button>
               <button class="nav-child" data-section="vehicles" type="button">Vehicle Master</button>
               <button class="nav-child" data-section="verification" type="button">Verification</button>
-              <button class="nav-child" data-section="users" type="button">Users</button>
+          
               <button class="nav-child" data-section="userRoles" type="button">User Roles</button>
               <button class="nav-child" data-section="roles" type="button">Roles</button>
               <button class="nav-child" data-section="modules" type="button">Modules</button>
@@ -125,6 +142,7 @@
           <section id="bookingsSection" class="page-section d-none"></section>
           <section id="paymentsSection" class="page-section d-none"></section>
           <section id="offerMasterSection" class="page-section d-none"></section>
+          <section id="assistantAvailableSection" class="page-section d-none"></section>
           <section id="bookingsReportSection" class="page-section d-none"></section>
           <section id="customerReportSection" class="page-section d-none"></section>
           <section id="assistantReportSection" class="page-section d-none"></section>
@@ -138,6 +156,11 @@
           <section id="customerAddressesSection" class="page-section d-none"></section>
           <section id="mastersSection" class="page-section d-none"></section>
           <section id="locationsSection" class="page-section d-none"></section>
+          <section id="zonesSection" class="page-section d-none"></section>
+          <section id="clustersSection" class="page-section d-none"></section>
+          <section id="microMarketsSection" class="page-section d-none"></section>
+          <section id="nanoMarketsSection" class="page-section d-none"></section>
+          <section id="marketTypesSection" class="page-section d-none"></section>
           <section id="servicesSection" class="page-section d-none"></section>
           <section id="categoryServicesSection" class="page-section d-none"></section>
           <section id="categoriesSection" class="page-section d-none"></section>
@@ -232,15 +255,23 @@
       <div class="map-modal-card">
         <div class="map-modal-header">
           <div>
-            <p>Cluster Boundary</p>
+            <p id="polygonModalLevel">Cluster Boundary</p>
             <h2 id="polygonModalTitle">Polygon Map</h2>
           </div>
-          <button id="closePolygonModalButton" class="btn btn-light btn-sm" type="button">Close</button>
+          <div class="polygon-map-header-actions"><button id="polygonMapFullWidthButton" class="polygon-map-control" type="button" title="Full-width map" aria-label="Full-width map" aria-pressed="false"><i data-lucide="Maximize2"></i></button><button id="closePolygonModalButton" class="btn btn-light btn-sm" type="button">Close</button></div>
         </div>
         <div id="polygonMapAlert" class="alert alert-danger d-none"></div>
+        <div id="polygonMapFilters" class="polygon-map-filters d-none"></div>
+        <div id="polygonMapLegend" class="polygon-map-legend"></div>
         <div id="polygonMapWrap" class="polygon-map-wrap">
           <div id="polygonMap" class="polygon-map"></div>
           <svg id="polygonOverlay" class="polygon-overlay" aria-hidden="true"></svg>
+          <div class="map-loading" data-map-loading role="status" aria-label="Loading map" hidden><span class="map-loading-spinner" aria-hidden="true"></span></div>
+          <div id="polygonMapControls" class="polygon-map-controls" role="group" aria-label="Map controls">
+            <button type="button" class="polygon-map-control" data-map-view-command="zoom-in" title="Zoom in" aria-label="Zoom in" disabled><i data-lucide="Plus"></i></button>
+            <button type="button" class="polygon-map-control" data-map-view-command="zoom-out" title="Zoom out" aria-label="Zoom out" disabled><i data-lucide="Minus"></i></button>
+            <button type="button" class="polygon-map-control" data-map-view-command="fit" title="Fit visible polygons" aria-label="Fit visible polygons" disabled><i data-lucide="Scan"></i></button>
+          </div>
         </div>
         <pre id="polygonWktPreview" class="polygon-wkt"></pre>
       </div>
@@ -429,6 +460,8 @@
         </div>
       </div>
     </div>
-    <script src="./app.js?v=unserviceable-report-v1-20260804"></script>
+    <script src="./ola-maps.js?v=20261004"></script>
+    <script src="./assets/location-map-editor.js?v=location-map-loading-20261005"></script>
+    <script src="./app.js?v=persistent-session-20261005"></script>
   </body>
 </html>

@@ -214,6 +214,8 @@ function tokenIsExpired(token, skewSeconds = 30) {
 }
 
 const storedToken = localStorage.getItem(tokenKey) || "";
+const refreshTokenKey = `zigoPortalRefreshToken:${actor}`;
+const storedRefreshToken = localStorage.getItem(refreshTokenKey) || "";
 const resourceCacheKey = `zigoPortalResourceCache:${actor}`;
 const portalBuildVersion = "webview-resume-state-v1-20260723";
 const portalBuildVersionKey = `zigoPortalBuildVersion:${actor}`;
@@ -226,15 +228,16 @@ const cachedSession = readJsonStorage(sessionCacheKey, {}) || {};
 const cachedResourceStore = portalBuildVersionChanged ? {} : (readJsonStorage(resourceCacheKey, {}) || {});
 const portalResourceCache = new Map(Object.entries(cachedResourceStore).filter(([key]) => portalResourceCacheAllowed(key)));
 const portalResourceInflight = new Map();
+let portalSessionGeneration = 0;
 const nativeLocationRequests = new Map();
 localStorage.removeItem("zigoPortalFavorites:customer");
 localStorage.removeItem("zigoPortalFavorites:assistant");
 localStorage.removeItem("zigoAssistantPortalRealtimeLastEventId");
 localStorage.removeItem("zigoCustomerPortalRealtimeLastEventId");
 if (storedToken && tokenIsExpired(storedToken)) {
+  // Preserve the cached session and long-lived refresh token so a WebView resume
+  // can silently obtain a new access token instead of forcing a login.
   localStorage.removeItem(tokenKey);
-  localStorage.removeItem(sessionCacheKey);
-  localStorage.removeItem(resourceCacheKey);
 }
 
 function normalizeFavorites(input = {}) {
@@ -247,6 +250,7 @@ function normalizeFavorites(input = {}) {
 
 const state = {
   token: storedToken && !tokenIsExpired(storedToken) ? storedToken : "",
+  refreshToken: storedRefreshToken,
   user: storedToken && !tokenIsExpired(storedToken) ? (cachedSession.user || null) : null,
   bookings: actor === "customer" && storedToken && !tokenIsExpired(storedToken)
     ? normalizeArray(cachedSession.bookings)
@@ -257,7 +261,7 @@ const state = {
     counts: { accepted: 0, working: 0, success: 0, rejected: 0, cancelled: 0, hold: 0 },
     total: 0
   },
-  splashDone: actor === "customer" && Boolean(storedToken && !tokenIsExpired(storedToken) && cachedSession.cachedAt),
+  splashDone: actor === "customer" && Boolean((storedToken || storedRefreshToken) && cachedSession.cachedAt),
   sessionRestoring: false,
   connectionLost: !navigator.onLine,
   loginPhone: "",
@@ -317,6 +321,7 @@ const state = {
   customerHomeCategorySheetOpen: false,
   customerHomeCategorySheetId: "",
   customerHomeCategorySheetServiceId: "",
+  customerHomeCategorySheetCategoryIds: [],
   customerHomeCategorySheetExpanded: false,
   customerHomeDurationSheetOpen: false,
   customerHomeDurationSheetCategoryId: "",
@@ -399,6 +404,7 @@ const state = {
   customerTrackLiveRouteZoomDelta: 0,
   customerPaymentProofRequest: null,
   customerTrackRatingThanks: null,
+  customerTrackExtensionSheet: null,
   customerTrackTipsByBooking: {},
   portalQuickReplies: {},
   customerCancelBookingId: "",
@@ -413,6 +419,7 @@ const state = {
   customerAvailabilityLoading: false,
   customerAvailabilityError: "",
   selectedPayment: "cash",
+  customerUseWallet: false,
   customerPaymentSheetOpen: false,
   customerPaymentSheetContext: null,
   customerPaymentBusy: false,
@@ -570,6 +577,13 @@ let customerRealtimeSource = null;
 let customerRealtimeRefreshTimer = null;
 let customerRealtimeRefreshBusy = false;
 let customerRealtimeLastEventId = "";
+let customerRealtimeConnected = false;
+let customerTrackFallbackRefreshTimer = null;
+let customerTrackFallbackRefreshBusy = false;
+let trackingHubConnection = null;
+let trackingHubBookingId = "";
+let trackingHubConnected = false;
+let trackingHubStarting = false;
 let customerTrackSuppressOwnRealtimeUntil = 0;
 let customerTrackSuppressOwnRealtimeBookingId = "";
 let customerTrackScrollSettledTimer = null;
@@ -596,7 +610,6 @@ let customerLocationMapRenderFrame = null;
 let customerLocationMapRenderToken = 0;
 let customerLocationClusterPolygonCache = [];
 let customerLocationServiceBoundaries = [];
-let customerOlaMapsScriptPromise = null;
 let customerOlaLocationMap = null;
 let customerOlaLocationMapResolved = null;
 let customerSearchPlaceholderTimer = null;
@@ -804,8 +817,10 @@ function portalCachedGet(path, { cacheKey = path, forceRefresh = false, maxAgeMs
   } else if (portalResourceInflight.has(key)) {
     return portalResourceInflight.get(key);
   }
+  const generation = portalSessionGeneration;
   const request = api(path)
     .then((payload) => {
+      if (generation !== portalSessionGeneration) return payload;
       writePortalResourceCache(key, payload);
       return payload;
     })
@@ -817,34 +832,53 @@ function portalCachedGet(path, { cacheKey = path, forceRefresh = false, maxAgeMs
 }
 
 async function api(path, options = {}) {
+  const generation = portalSessionGeneration;
+  // Best-effort telemetry must not invalidate an otherwise active session.
+  const { suppressSessionLogout = false, retryAfterRefresh = false, ...requestOptions } = options;
   if (state.token && tokenIsExpired(state.token)) {
-    clearPortalSession();
-    const error = new Error("Session expired. Please login again.");
-    error.status = 401;
-    throw error;
+    const refreshed = await refreshPortalAccessToken();
+    if (!refreshed) {
+      if (shouldPreservePortalSessionAfterRefreshFailure()) {
+        state.connectionLost = true;
+        setTimeout(() => { if (state.connectionLost) renderConnectionLostPage(); }, 0);
+        const networkError = new Error("Connection lost.");
+        networkError.status = 0;
+        throw networkError;
+      }
+      clearPortalSession();
+      const error = new Error("Session expired. Please login again.");
+      error.status = 401;
+      throw error;
+    }
   }
   let response;
   try {
     response = await fetch(withBasePath(path), {
-      ...options,
+      ...requestOptions,
       headers: {
         "Content-Type": "application/json",
         ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
-        ...(options.headers || {})
+        ...(requestOptions.headers || {})
       }
     });
   } catch (error) {
+    if (generation !== portalSessionGeneration) { const cancelled = new Error('Session ended.'); cancelled.status = 401; throw cancelled; }
     state.connectionLost = true;
-    setTimeout(renderConnectionLostPage, 0);
+    setTimeout(() => { if (state.connectionLost) renderConnectionLostPage(); }, 0);
     const networkError = new Error("Connection lost.");
     networkError.status = 0;
     throw networkError;
   }
   const payload = await response.json().catch(() => ({}));
+  if (generation !== portalSessionGeneration) { const cancelled = new Error('Session ended.'); cancelled.status = 401; throw cancelled; }
   if (!response.ok) {
+    if (response.status === 401 && !retryAfterRefresh && state.refreshToken && !String(path).includes("/session/refresh")) {
+      const refreshed = await refreshPortalAccessToken();
+      if (refreshed) return api(path, { ...requestOptions, suppressSessionLogout, retryAfterRefresh: true });
+    }
     const error = new Error(payload.error?.message || payload.message || "Request failed.");
     error.status = response.status;
-    if (shouldClearPortalSessionForError(error)) {
+    if (!suppressSessionLogout && shouldClearPortalSessionForError(error)) {
       forcePortalSessionLogout(error.message);
     }
     throw error;
@@ -899,6 +933,8 @@ function persistPendingCustomerRazorpayOrder(order = {}) {
     amountPaise: Number(order.amountPaise || 0),
     currency: String(order.currency || "INR"),
     confirmBooking: Boolean(order.confirmBooking),
+    addOnId: String(order.addOnId || ""),
+    addOnKind: String(order.addOnKind || ""),
     createdAt: new Date().toISOString()
   });
 }
@@ -951,21 +987,26 @@ async function startCustomerRazorpayCheckout(paymentContext = state.customerPaym
   }
   customerRazorpayCheckoutBusy = true;
   const contextAmount = Number(paymentContext?.amount || 0);
-  const amountPaise = Math.round((contextAmount > 0 ? contextAmount : Number(cartTotals().toPay || 0)) * 100);
+  const cartAmountPaise = Math.round(Number(cartTotals().toPay || 0) * 100);
+  const selectedWalletPaise = state.customerUseWallet ? Math.min(Math.max(0, Number(state.user?.wallet?.availableBalancePaise || 0)), cartAmountPaise) : 0;
+  const amountPaise = Math.round(contextAmount > 0 ? contextAmount * 100 : Math.max(0, cartAmountPaise - selectedWalletPaise));
   let order;
   let checkoutAmount;
   let checkoutOrderId;
   try {
     if (amountPaise < 100) throw new Error("Minimum online payment amount is ₹1.");
     await loadRazorpayCheckoutScript();
-    const orderPayload = await api("/portal/customer/payments/razorpay/orders", {
-      method: "POST",
-      body: JSON.stringify({
-        amountPaise,
-        currency: "INR",
-        ...customerPaymentBookingContext(paymentContext)
-      })
-    });
+    const addOn = paymentContext?.addOn && typeof paymentContext.addOn === "object" ? paymentContext.addOn : null;
+    const orderPath = addOn?.kind === "extension"
+      ? `/portal/customer/bookings/${encodeURIComponent(paymentContext.bookingId)}/extensions/razorpay-order`
+      : addOn?.kind === "tip"
+        ? `/portal/customer/bookings/${encodeURIComponent(paymentContext.bookingId)}/tips/razorpay-order`
+        : "/portal/customer/payments/razorpay/orders";
+    const orderBody = addOn?.kind === "extension" ? { durationMinutes: addOn.durationMinutes }
+      : addOn?.kind === "tip" ? { amountPaise }
+        : { amountPaise, currency: "INR", ...customerPaymentBookingContext(paymentContext) };
+    // Provider/order errors must not be treated as a customer-session failure.
+    const orderPayload = await api(orderPath, { method: "POST", body: JSON.stringify(orderBody), suppressSessionLogout: Boolean(addOn) });
     order = orderPayload.data || {};
     if (order.bookingReference) state.customerBookingReference = order.bookingReference;
     checkoutAmount = Number(order.amount || amountPaise);
@@ -979,7 +1020,9 @@ async function startCustomerRazorpayCheckout(paymentContext = state.customerPaym
       bookingReference: order.bookingReference || state.customerBookingReference || "",
       amountPaise: checkoutAmount,
       currency: order.currency || "INR",
-      confirmBooking: !paymentContext?.bookingId
+      confirmBooking: !paymentContext?.bookingId,
+      addOnId: order.addOnId || "",
+      addOnKind: addOn?.kind || ""
     });
   } catch (error) {
     customerRazorpayCheckoutBusy = false;
@@ -1080,7 +1123,8 @@ async function startCustomerRazorpayCheckout(paymentContext = state.customerPaym
             amountPaise: Number(order.amount || amountPaise),
             currency: order.currency || "INR",
             bookingReference: order.bookingReference || state.customerBookingReference || "",
-            verifiedAt: new Date().toISOString()
+            verifiedAt: new Date().toISOString(),
+            addOnId: order.addOnId || ""
           };
           if (customerPaymentResultStatus(verifiedPayment) !== "success") {
             const reconciled = await waitForCustomerRazorpayFinalStatus({ orderId: response.razorpay_order_id });
@@ -1145,6 +1189,18 @@ function customerPaymentResultStatus(payment = {}) {
   return payment?.verified ? "success" : "pending";
 }
 
+async function finalizeRecoveredCustomerRazorpayAddOn(pending, payment = {}) {
+  const bookingId = String(pending?.bookingId || payment?.bookingId || "").trim();
+  const addOnId = String(pending?.addOnId || payment?.addOnId || "").trim();
+  const addOnKind = String(pending?.addOnKind || "").trim().toLowerCase();
+  if (!bookingId || !addOnId || addOnKind !== "extension") return payment;
+  const payload = await api(`/portal/customer/bookings/${encodeURIComponent(bookingId)}/add-ons/${encodeURIComponent(addOnId)}/complete`, {
+    method: "POST",
+    suppressSessionLogout: true
+  });
+  return { ...payment, bookingId, addOnId, addOn: payload?.data || null };
+}
+
 async function reconcilePendingCustomerRazorpayOrder({ orderId = "" } = {}) {
   if (actor !== "customer" || !state.token || customerRazorpayReconcileBusy) return null;
   const pending = readPendingCustomerRazorpayOrder();
@@ -1166,6 +1222,9 @@ async function reconcilePendingCustomerRazorpayOrder({ orderId = "" } = {}) {
     const status = customerPaymentResultStatus(result);
     if (status === "pending") return result;
     const bookingId = String(result.bookingId || pending?.bookingId || "").trim();
+    if (status === "success" && pending?.addOnId) {
+      Object.assign(result, await finalizeRecoveredCustomerRazorpayAddOn(pending, result));
+    }
     const keepUntilBookingIsLinked = status === "success" && Boolean(pending?.confirmBooking) && !bookingId;
     if (!keepUntilBookingIsLinked) clearPendingCustomerRazorpayOrder(targetOrderId);
     if (status === "success") {
@@ -1335,6 +1394,68 @@ function portalQuickReplyUpdateType(actionType = "") {
   return "text";
 }
 
+function persistPortalTokens() {
+  if (state.token) localStorage.setItem(tokenKey, state.token);
+  if (state.refreshToken) localStorage.setItem(refreshTokenKey, state.refreshToken);
+}
+
+function applyPortalTokenPair(data = {}) {
+  const token = String(data.token || "").trim();
+  const refreshToken = String(data.refreshToken || state.refreshToken || "").trim();
+  if (!token) throw new Error("Portal session refresh did not return an access token.");
+  state.token = token;
+  state.refreshToken = refreshToken;
+  persistPortalTokens();
+}
+
+let portalSessionRefreshPromise = null;
+let portalRefreshFailure = "";
+
+function shouldPreservePortalSessionAfterRefreshFailure() {
+  return Boolean(state.refreshToken) && portalRefreshFailure === "unavailable";
+}
+
+async function refreshPortalAccessToken() {
+  if (portalSessionRefreshPromise) return portalSessionRefreshPromise;
+  const refreshToken = String(state.refreshToken || localStorage.getItem(refreshTokenKey) || "").trim();
+  if (!refreshToken) {
+    portalRefreshFailure = "missing";
+    return false;
+  }
+  portalRefreshFailure = "";
+  const generation = portalSessionGeneration;
+  portalSessionRefreshPromise = fetch(withBasePath(`/portal/${actor}/session/refresh`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refreshToken })
+  })
+    .then(async (response) => {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        portalRefreshFailure = [400, 401, 403].includes(response.status) ? "invalid" : "unavailable";
+        return false;
+      }
+      if (generation !== portalSessionGeneration) { portalRefreshFailure = 'invalid'; return false; }
+      applyPortalTokenPair(payload.data || payload || {});
+      portalRefreshFailure = "";
+      return true;
+    })
+    .catch(() => {
+      portalRefreshFailure = "unavailable";
+      return false;
+    })
+    .finally(() => { portalSessionRefreshPromise = null; });
+  return portalSessionRefreshPromise;
+}
+
+async function refreshPortalSessionIfDue() {
+  if (document.visibilityState === "hidden" || !state.refreshToken || !tokenIsExpired(state.token, 120)) return true;
+  const refreshed = await refreshPortalAccessToken();
+  if (refreshed) return true;
+  if (shouldPreservePortalSessionAfterRefreshFailure()) return false;
+  forcePortalSessionLogout("Your session has expired. Please login again.");
+  return false;
+}
 function writePortalSessionCache() {
   if (!state.token) return;
   writeJsonStorage(sessionCacheKey, {
@@ -1368,7 +1489,17 @@ function writePortalSessionCache() {
 }
 
 function clearPortalSession() {
+  portalSessionGeneration++;
+  Object.keys(cachedSession).forEach(key => { delete cachedSession[key]; });
+  portalResourceInflight.clear();
+  for (const storage of [localStorage, sessionStorage]) {
+    Object.keys(storage).filter(key => key.startsWith('zigoPortal') && key.endsWith(`:${actor}`)).forEach(key => storage.removeItem(key));
+  }
+  if (actor === 'customer') localStorage.removeItem(CUSTOMER_SUPPORT_READ_COUNTS_KEY);
+  assistantRealtimeLastEventId = '';
+  customerRealtimeLastEventId = '';
   state.token = "";
+  state.refreshToken = "";
   state.user = null;
   state.logoutConfirmOpen = false;
   state.customerProfileEditOpen = false;
@@ -1433,6 +1564,7 @@ function clearPortalSession() {
   state.locationServiceability = null;
   state.customerAddresses = [];
   localStorage.removeItem(tokenKey);
+  localStorage.removeItem(refreshTokenKey);
   localStorage.removeItem(sessionCacheKey);
   localStorage.removeItem(pendingRazorpayKey);
   clearPortalResourceCache();
@@ -1444,7 +1576,8 @@ function shouldClearPortalSessionForError(error) {
   const status = Number(error?.status || 0);
   if (!state.token || ![401, 403, 404].includes(status)) return false;
   const message = String(error?.message || "").toLowerCase();
-  if (status === 401) return true;
+  if (message.includes('account is not active') || message.includes('account access ended')) return true;
+  if (status === 401) return !shouldPreservePortalSessionAfterRefreshFailure();
   if (actor === "customer") {
     return message.includes("customer account is deactive")
       || message.includes("only customer users can login")
@@ -1463,6 +1596,9 @@ function shouldClearPortalSessionForError(error) {
 function forcePortalSessionLogout(message = "") {
   const text = String(message || "").trim();
   clearPortalSession();
+  state.connectionLost = navigator.onLine === false;
+  state.sessionRestoring = false;
+  if (!state.connectionLost) removeConnectionLostPage();
   state.codeSent = false;
   state.loginPhone = "";
   state.loginError = text || "Your account session ended. Please login again.";
@@ -1533,9 +1669,149 @@ function stopAssistantRealtime() {
 function stopCustomerRealtime() {
   if (customerRealtimeSource) customerRealtimeSource.close();
   customerRealtimeSource = null;
+  customerRealtimeConnected = false;
   if (customerRealtimeRefreshTimer) clearTimeout(customerRealtimeRefreshTimer);
   customerRealtimeRefreshTimer = null;
   customerRealtimeRefreshBusy = false;
+}
+
+function trackingHubUrl() {
+  const configured = String(document.querySelector('meta[name="zigo-tracking-hub-url"]')?.content || "").trim();
+  if (configured) return configured;
+  if (["localhost", "127.0.0.1", "::1"].includes(window.location.hostname)) {
+    return `${window.location.protocol}//${window.location.hostname}:5100/hubs/tracking`;
+  }
+  return withBasePath("/tracking/hubs/tracking");
+}
+
+function desiredTrackingBookingId() {
+  if (!state.token) return "";
+  if (actor === "customer") {
+    if (state.customerView !== "track") return "";
+    const booking = state.confirmedBooking || {};
+    const status = String(customerTrackStatus(booking)).toLowerCase();
+    return status === "working" ? String(booking.id || booking.bookingId || "").trim() : "";
+  }
+  const activeTask = normalizeArray(state.tasks).find((task) => {
+    const status = String(task.statusCode || task.assignmentStatus || task.status || "").toLowerCase();
+    return ["working", "in_progress", "approval_pending"].includes(status);
+  });
+  return activeTask ? String(activeTask.bookingId || activeTask.serviceRequestId || "").trim() : "";
+}
+
+function stopPortalTrackingHub() {
+  const connection = trackingHubConnection;
+  trackingHubConnection = null;
+  trackingHubBookingId = "";
+  trackingHubConnected = false;
+  trackingHubStarting = false;
+  if (connection) void connection.stop().catch(() => undefined);
+  syncCustomerTrackFallbackRefresh();
+}
+
+function handleTrackingHubEvent(event = {}) {
+  const bookingId = String(event.bookingId || event.payload?.bookingId || "").trim();
+  if (!bookingId) return;
+  if (actor === "customer") {
+    const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+    const patch = event.type === "assistant.location.updated"
+      ? { ...payload, bookingId, liveRoutePing: payload }
+      : { ...payload, bookingId };
+    applyCustomerTrackRealtimePatch(patch, event.type || "booking.updated");
+    return;
+  }
+  if (event.type !== "assistant.location.updated") {
+    void refreshAssistantTasksRealtime(null, { immediate: true });
+  }
+}
+
+async function syncPortalTrackingHub() {
+  const bookingId = desiredTrackingBookingId();
+  if (!bookingId || !state.token || !window.signalR?.HubConnectionBuilder) {
+    if (trackingHubConnection) stopPortalTrackingHub();
+    return;
+  }
+  if (trackingHubConnection && trackingHubConnected && trackingHubBookingId === bookingId) return;
+  if (trackingHubStarting) return;
+  if (trackingHubConnection) stopPortalTrackingHub();
+
+  trackingHubStarting = true;
+  const connection = new window.signalR.HubConnectionBuilder()
+    .withUrl(trackingHubUrl(), { accessTokenFactory: () => state.token || "" })
+    .withAutomaticReconnect([0, 1000, 3000, 8000, 15000])
+    .build();
+  trackingHubConnection = connection;
+  trackingHubBookingId = bookingId;
+  connection.on("tracking.updated", handleTrackingHubEvent);
+  connection.onreconnected(async () => {
+    if (connection !== trackingHubConnection) return;
+    try {
+      await connection.invoke("JoinBooking", trackingHubBookingId);
+      trackingHubConnected = true;
+      syncCustomerTrackFallbackRefresh();
+    } catch {
+      trackingHubConnected = false;
+      syncCustomerTrackFallbackRefresh();
+    }
+  });
+  connection.onclose(() => {
+    if (connection !== trackingHubConnection) return;
+    trackingHubConnected = false;
+    syncCustomerTrackFallbackRefresh();
+  });
+  try {
+    await connection.start();
+    if (connection !== trackingHubConnection || bookingId !== desiredTrackingBookingId()) {
+      await connection.stop();
+      return;
+    }
+    await connection.invoke("JoinBooking", bookingId);
+    trackingHubConnected = true;
+  } catch (error) {
+    if (connection === trackingHubConnection) {
+      trackingHubConnected = false;
+      // Rollout-safe: SSE keeps existing tracking working until gateway deployment completes.
+      console.info("Tracking hub is unavailable; using portal realtime fallback.", error);
+    }
+  } finally {
+    if (connection === trackingHubConnection) trackingHubStarting = false;
+    syncCustomerTrackFallbackRefresh();
+  }
+}
+
+function customerTrackCanRefreshInBackground() {
+  if (actor !== "customer" || !state.token || state.customerView !== "track" || document.visibilityState === "hidden") return false;
+  const bookingId = String(state.confirmedBooking?.id || state.confirmedBooking?.bookingId || "").trim();
+  const status = String(customerTrackStatus(state.confirmedBooking || {})).toLowerCase();
+  return Boolean(bookingId) && !["completed", "success", "done", "cancelled", "canceled", "failed", "rejected"].includes(status);
+}
+
+async function refreshCustomerTrackFallback() {
+  if (!customerTrackCanRefreshInBackground() || customerTrackFallbackRefreshBusy) return;
+  const bookingId = String(state.confirmedBooking?.id || state.confirmedBooking?.bookingId || "").trim();
+  customerTrackFallbackRefreshBusy = true;
+  try {
+    await refreshCustomerBookingRealtime(bookingId);
+  } finally {
+    customerTrackFallbackRefreshBusy = false;
+  }
+}
+
+function syncCustomerTrackFallbackRefresh() {
+  // SignalR is the primary low-latency route transport and SSE is the rollout fallback.
+  // Only use an infrequent REST safety refresh when neither transport is connected.
+  const shouldRun = customerTrackCanRefreshInBackground() && !trackingHubConnected && !customerRealtimeConnected;
+  if (!shouldRun) {
+    if (customerTrackFallbackRefreshTimer) clearInterval(customerTrackFallbackRefreshTimer);
+    customerTrackFallbackRefreshTimer = null;
+    return;
+  }
+  if (customerTrackFallbackRefreshTimer) return;
+  // SSE remains the immediate update channel. This bounded safety sync covers mobile
+  // WebViews/proxies that drop an otherwise valid EventSource connection.
+  customerTrackFallbackRefreshTimer = setInterval(() => {
+    void refreshCustomerTrackFallback();
+  }, 30000);
 }
 
 function scheduleAssistantTaskRefresh(message = null) {
@@ -1548,6 +1824,8 @@ function scheduleAssistantTaskRefresh(message = null) {
   const tasks = await portalCachedGet("/portal/assistant/tasks", { cacheKey: "/portal/assistant/tasks", forceRefresh: true });
       state.tasks = tasks.data || [];
       rebuildAssistantTaskTabIndex();
+      if (state.assistantIsOnline && assistantHasActiveTrackingTask()) startAssistantLocationPings();
+      void syncPortalTrackingHub();
       writePortalSessionCache();
       if (state.token) {
         if (!renderAssistantTaskView()) render();
@@ -1577,12 +1855,18 @@ async function refreshAssistantTasksRealtime(message = null, { immediate = false
     clearTimeout(assistantRealtimeRefreshTimer);
     assistantRealtimeRefreshTimer = null;
   }
-  if (assistantRealtimeRefreshBusy) return null;
+  if (assistantRealtimeRefreshBusy) {
+    // Queue a follow-up state fetch so an assignment/start/completion event is never lost.
+    scheduleAssistantTaskRefresh(message);
+    return null;
+  }
   assistantRealtimeRefreshBusy = true;
   try {
     const tasks = await portalCachedGet("/portal/assistant/tasks", { cacheKey: "/portal/assistant/tasks", forceRefresh: true });
     state.tasks = tasks.data || [];
     rebuildAssistantTaskTabIndex();
+      if (state.assistantIsOnline && assistantHasActiveTrackingTask()) startAssistantLocationPings();
+      void syncPortalTrackingHub();
     writePortalSessionCache();
     if (state.token && !renderAssistantTaskView()) render();
     if (message) notify(message);
@@ -1615,6 +1899,7 @@ function isImmediateAssistantRealtimeEvent(type = "", payload = {}) {
 }
 
 function startAssistantRealtime(force = false) {
+  void syncPortalTrackingHub();
   if (actor !== "assistant" || !state.token || !window.EventSource) return;
   if (assistantRealtimeSource && !force) return;
   stopAssistantRealtime();
@@ -1624,6 +1909,7 @@ function startAssistantRealtime(force = false) {
   assistantRealtimeSource.addEventListener("assistant_task_changed", (event) => {
     try {
       const payload = JSON.parse(event.data || "{}");
+      if (payload.type === 'user.session.revoked' && payload.payload?.userId === state.user?.id) { forcePortalSessionLogout('Unable to sign in. Please contact support.'); return; }
       if (payload.id) {
         assistantRealtimeLastEventId = String(payload.id);
       }
@@ -1804,7 +2090,7 @@ async function refreshCustomerBookingRealtime(bookingId = "", { message = "", fo
       syncCustomerBookingsDom({ snapshot: customerScrollSnapshot() });
     } else if (shouldUpdateTrack || forceTrack) {
       state.confirmedBooking = updated;
-      renderTrackRealtimeUpdate({ force: true });
+      renderTrackRealtimeUpdate({ force: forceTrack });
     }
     if (message && state.customerView !== "track") notify(message);
     return updated;
@@ -1834,6 +2120,8 @@ async function syncPortalBookingStatusNow(bookingId = "", source = "") {
       const tasks = await portalCachedGet("/portal/assistant/tasks", { cacheKey: "/portal/assistant/tasks", forceRefresh: true });
       state.tasks = tasks.data || [];
       rebuildAssistantTaskTabIndex();
+      if (state.assistantIsOnline && assistantHasActiveTrackingTask()) startAssistantLocationPings();
+      void syncPortalTrackingHub();
       writePortalSessionCache();
       if (!renderAssistantTaskView()) render();
     }
@@ -2021,8 +2309,9 @@ function startCustomerRealtime(force = false) {
       const patchedTrack = applyCustomerTrackRealtimePatch(eventPayload, eventType);
       const eventBookingId = String(eventPayload.bookingId || eventPayload.serviceRequestId || eventPayload.id || "").trim();
       if (eventPayload.liveRoutePing) return;
-      if (eventBookingId && isImmediateCustomerRealtimeEvent(eventType, eventPayload)) {
-        void refreshCustomerBookingRealtime(eventBookingId, { message: payload.message || "Booking updated." });
+      if (eventBookingId && state.customerView === "track" && String(state.confirmedBooking?.id || state.confirmedBooking?.bookingId || "") === eventBookingId) {
+        // Lifecycle events must update immediately; do not defer behind scroll/overlay guards.
+        void refreshCustomerBookingRealtime(eventBookingId, { message: payload.message || "Booking updated.", forceTrack: true });
         return;
       }
       scheduleCustomerBookingRefresh(payload.message || "Booking updated.", { bookingId: eventBookingId, immediate: Boolean(patchedTrack) });
@@ -2040,9 +2329,19 @@ function startCustomerRealtime(force = false) {
     }
     forcePortalSessionLogout(message);
   });
-  customerRealtimeSource.addEventListener("connected", () => {});
+  customerRealtimeSource.addEventListener("connected", () => {
+    customerRealtimeConnected = true;
+    syncCustomerTrackFallbackRefresh();
+    // Fetch the authoritative record after every successful (re)connection so events
+    // that occurred during a mobile/proxy disconnect are reflected without a reload.
+    void refreshCustomerTrackFallback();
+  });
   customerRealtimeSource.onerror = () => {
-    // EventSource reconnects automatically. Keep current bookings visible while it reconnects.
+    customerRealtimeConnected = false;
+    syncCustomerTrackFallbackRefresh();
+    // EventSource reconnects automatically. The fallback keeps the active booking fresh
+    // while that reconnect is in progress.
+    void refreshCustomerTrackFallback();
   };
 }
 
@@ -4257,7 +4556,8 @@ function customerPaymentMethods() {
     seen.add(value);
     const configuredIcon = ["wallet", "cash", "receipt", "business", "package"].includes(String(metadata.icon || "")) ? String(metadata.icon) : "package";
     const walletBalancePaise = Math.max(0, Number(
-      state.user?.walletBalancePaise
+      state.user?.wallet?.availableBalancePaise
+      ?? state.user?.walletBalancePaise
       ?? state.user?.metadata?.walletBalancePaise
       ?? state.portalConfig?.walletBalancePaise
       ?? metadata.walletBalancePaise
@@ -4362,7 +4662,7 @@ customerCartConfirmBarHtml = function customerCartConfirmBarHtmlOverride(totals 
         <span class="customer-payment-select static">Cash payment</span>
       </div>
       <div class="customer-pay-amount">
-        <b><span>₹</span>${escapeHtml(amount.toFixed(0))}</b>
+        <b><span>₹</span>${escapeHtml((walletAppliedPaise > 0 ? remainingAmount : amount).toFixed(0))}</b>
         ${discount > 0 ? `<del>${escapeHtml(money(total))}</del><em>Save ${escapeHtml(money(discount))}</em>` : ""}
       </div>
       <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length ? "" : "disabled"}><span>Proceed to Pay</span></button>
@@ -4370,10 +4670,23 @@ customerCartConfirmBarHtml = function customerCartConfirmBarHtmlOverride(totals 
   </div>`;
 };
 
+function customerPaymentSheetMethods() {
+  const methods = customerPaymentMethods();
+  const context = state.customerPaymentSheetContext || {};
+  if (!context.bookingId || context.addOn?.kind) return methods;
+  const booking = customerTrackCurrentBooking(context.bookingId)
+    || normalizeArray(state.bookings).find((item) => String(item?.id || item?.bookingId || "") === String(context.bookingId))
+    || state.confirmedBooking
+    || {};
+  const bookedPaymentType = String(customerBookingPaymentState(booking).type || "").toLowerCase().replace(/[\s-]+/g, "_");
+  const wasBookedWithCash = ["cash", "cod", "cash_on_delivery"].includes(bookedPaymentType);
+  return wasBookedWithCash ? methods.filter((method) => String(method.value || "").toLowerCase() !== "cash") : methods;
+}
+
 function customerPaymentSheetHtml() {
   if (!state.customerPaymentSheetOpen) return "";
   const contextAmount = Math.max(0, Number(state.customerPaymentSheetContext?.amount || 0));
-  const methods = customerPaymentMethods();
+  const methods = customerPaymentSheetMethods();
   return `<div class="customer-payment-mode-backdrop" data-review-payment-sheet-backdrop>
     <section class="customer-payment-mode-sheet" role="dialog" aria-modal="true" aria-label="Select Payment Method">
       <button class="customer-payment-mode-handle" type="button" data-close-review-payment-sheet aria-label="Close payment method"></button>
@@ -4433,7 +4746,7 @@ function customerCartConfirmBarHtml(totals = cartTotals(), activeBookingType = c
         <span class="customer-payment-select static">Cash payment</span>
       </div>
       <div class="customer-pay-amount">
-        <b><span>â‚¹</span>${escapeHtml(amount.toFixed(0))}</b>
+        <b><span>â‚¹</span>${escapeHtml((walletAppliedPaise > 0 ? remainingAmount : amount).toFixed(0))}</b>
         ${discount > 0 ? `<del>${escapeHtml(money(total))}</del><em>Save ${escapeHtml(money(discount))}</em>` : ""}
       </div>
       <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length ? "" : "disabled"}><span>Proceed to Pay</span></button>
@@ -4479,7 +4792,14 @@ customerCartConfirmBarHtml = function customerCartConfirmBarHtmlFinal(totals = c
   const selectedPaymentAvailable = selectablePaymentMethods.some((method) => method.value === state.selectedPayment);
   if (!selectedPaymentAvailable) state.selectedPayment = selectablePaymentMethods[0]?.value || "";
   const selectedPayment = String(state.selectedPayment || "").toLowerCase();
-  const hasPaymentChoice = paymentMethods.length > 1;
+  const walletBalancePaise = Math.max(0, Number(state.user?.wallet?.availableBalancePaise || state.user?.walletBalancePaise || 0));
+  const bookingAmountPaise = Math.max(0, Math.round(amount * 100));
+  const walletAppliedPaise = state.customerUseWallet ? Math.min(walletBalancePaise, bookingAmountPaise) : 0;
+  const remainingAmount = Math.max(0, (bookingAmountPaise - walletAppliedPaise) / 100);
+  const walletControl = walletBalancePaise > 0
+    ? `<label class="customer-wallet-use-control"><input type="checkbox" data-use-customer-wallet ${state.customerUseWallet ? "checked" : ""}><span>Use ZIGO Wallet</span><b>${escapeHtml(money(walletBalancePaise / 100))}</b></label>`
+    : "";
+  const hasPaymentChoice = selectablePaymentMethods.length > 1;
   const paymentMethodControl = hasPaymentChoice
     ? `<button class="customer-payment-mode-field" type="button" data-open-review-payment-sheet aria-label="Change payment mode">
         ${customerIcon(customerPaymentIcon(selectedPayment))}
@@ -4494,8 +4814,9 @@ customerCartConfirmBarHtml = function customerCartConfirmBarHtmlFinal(totals = c
     <div class="customer-pay-main">
       <div class="customer-pay-left">
         ${paymentMethodControl}
+        ${walletControl}
         <div class="customer-pay-amount">
-          <b><span>₹</span>${escapeHtml(amount.toFixed(0))}</b>
+          <b><span>₹</span>${escapeHtml((walletAppliedPaise > 0 ? remainingAmount : amount).toFixed(0))}</b>
           ${discount > 0 ? `<del>${escapeHtml(money(total))}</del><em>Save ${escapeHtml(money(discount))}</em>` : ""}
         </div>
       </div>
@@ -4907,10 +5228,7 @@ async function addCustomerCartLocationStop(candidate = {}) {
   assertCustomerCartLocationNotDuplicate(candidate);
   const stop = await validateCustomerCartLocation(candidate);
   if (!stop.clusterId) throw new Error("This location is not in an active working cluster.");
-  const primary = customerPrimaryCartLocationStop();
-  if (primary?.clusterId && stop.clusterId !== primary.clusterId) {
-    throw new Error("All booking locations must be in the same active cluster.");
-  }
+  await validateCustomerCartLocationRoute([...stops, stop]);
   const duplicate = stops.some((item) => customerCartLocationKey(item) === customerCartLocationKey(stop));
   if (duplicate) throw new Error("This location is already added to this booking.");
   state.customerRoutePrimaryCleared = false;
@@ -4940,10 +5258,7 @@ async function replaceCustomerCartLocationStop(index, candidate = {}) {
   const stop = await validateCustomerCartLocation(candidate);
   if (!stop.clusterId) throw new Error("This location is not in an active working cluster.");
   const remainingStops = stops.filter((_, itemIndex) => itemIndex !== replaceIndex);
-  const clusterSource = remainingStops.find((item) => item.clusterId);
-  if (clusterSource?.clusterId && stop.clusterId !== clusterSource.clusterId) {
-    throw new Error("All booking locations must be in the same active cluster.");
-  }
+  await validateCustomerCartLocationRoute([...remainingStops, stop]);
   const duplicate = remainingStops.some((item) => customerCartLocationKey(item) === customerCartLocationKey(stop));
   if (duplicate) throw new Error("This location is already added to this booking.");
   const nextStops = [...stops];
@@ -5487,10 +5802,10 @@ function mergeCustomerCatalogCategoryPricing(catalog = {}) {
   return state.catalog;
 }
 
-async function refreshCustomerCategoryDurationData(categoryId = "") {
+async function refreshCustomerCategoryDurationData(categoryId = "", availableFor = "duration", clusterOverride = "") {
   const targetCategoryId = String(categoryId || "").trim();
-  const clusterId = selectedCustomerClusterId();
-  if (!targetCategoryId || !clusterId) return customerHomeCategoryPriceDurationOptions(targetCategoryId, { availableFor: "duration" });
+  const clusterId = String(clusterOverride || selectedCustomerClusterId() || "").trim();
+  if (!targetCategoryId || !clusterId) return customerHomeCategoryPriceDurationOptions(targetCategoryId, { availableFor, clusterId });
   const url = customerCatalogUrl({ clusterId, categoryId: targetCategoryId });
   const payload = await portalCachedGet(url, {
     cacheKey: customerCatalogCacheKey(url),
@@ -5498,15 +5813,15 @@ async function refreshCustomerCategoryDurationData(categoryId = "") {
     maxAgeMs: 0
   });
   mergeCustomerCatalogCategoryPricing(payload.data || {});
-  return customerHomeCategoryPriceDurationOptions(targetCategoryId, { availableFor: "duration" });
+  return customerHomeCategoryPriceDurationOptions(targetCategoryId, { availableFor, clusterId });
 }
 
 function customerPriceScopeRank(rule = {}) {
   return ({ all: 1, state: 2, city: 3, zone: 4, cluster: 5 }[rule.scopeType || "all"] || 1);
 }
 
-function customerRuleMatchesCurrentCluster(rule = {}) {
-  const clusterId = selectedCustomerClusterId();
+function customerRuleMatchesCurrentCluster(rule = {}, clusterOverride = "") {
+  const clusterId = String(clusterOverride || selectedCustomerClusterId() || "").trim();
   return rule.scopeType !== "cluster" || !clusterId || String(rule.clusterId || "") === String(clusterId);
 }
 
@@ -6507,16 +6822,23 @@ function bottomCartBar() {
           const first = items[0] || {};
           const typeInfo = customerTrackBookingTypeInfo(booking);
           const image = String(first.categoryImageUrl || first.category?.imageUrl || first.category?.categoryImageUrl || first.imageUrl || booking.metadata?.categoryImageUrl || booking.categoryDetails?.imageUrl || "").trim();
-          const categoryName = first.categoryName || first.name || customerBookingServiceSummary(booking);
+          const categoryName = customerCategoryMasterCategoryName(first, booking) || first.subCategoryName || first.sub_category_name || first.categoryName || first.name || customerBookingServiceSummary(booking);
           const durationMinutes = Number(booking.durationMinutes || first.durationMinutes || booking.metadata?.durationMinutes || 0) || customerTrackBaseDurationMinutes(booking, items);
           const duration = customerTrackDurationUnitText(durationMinutes);
-          return `<button class="customer-ongoing-task-card" type="button" data-track-booking="${escapeHtml(booking.id || "")}">
+          const isWorking = ["working", "in_progress", "approval_pending"].includes(String(customerTrackStatus(booking) || "").toLowerCase());
+          const liveTaskHtml = customerHomeOngoingBookingLiveHtml(booking, items);
+          const canExtend = isWorking && Boolean(customerTrackExtendDurationHtml(booking, items, "working"));
+          const extendHtml = canExtend ? `<span class="customer-ongoing-task-extend" style="position:absolute !important;left:auto !important;right:100px !important;bottom:10px !important;">${customerTrackIcon("plus")}Extend</span>` : "";
+          const totalTimeHtml = customerTrackTotalTimeHtml(booking, items, { liveCountdown: isWorking });
+          return `<button class="customer-ongoing-task-card${isWorking ? " has-live-task" : ""}" type="button" data-track-booking="${escapeHtml(booking.id || "")}">
             <span class="customer-ongoing-task-icon">${image ? `<img src="${escapeHtml(assetUrl(image))}" alt="">` : customerIcon("spark")}</span>
-            <span class="customer-ongoing-task-copy">
+            <span class="customer-ongoing-task-copy customer-ongoing-task-details" style="position:absolute !important;top:10px !important;left:52px !important;right:auto !important;width:170px !important;display:block !important;text-align:left !important;transform:translateX(-66px) !important;">
               <small>${customerTrackIcon(typeInfo.icon)}${escapeHtml(typeInfo.label)}</small>
               <b><span>${escapeHtml(categoryName)}</span><em>${customerTrackIcon("watch")}${escapeHtml(duration)}</em></b>
             </span>
-            ${customerTrackTotalTimeHtml(booking, items)}
+            ${liveTaskHtml}
+            ${extendHtml}
+            ${totalTimeHtml}
           </button>`;
         }).join("")}
       </div>
@@ -6530,6 +6852,18 @@ function bottomCartBar() {
     <div><small>To Pay</small><b>${money(totals.toPay)}</b></div>
     <button class="primary-btn" type="button" data-view="cart">Review</button>
   </div>`;
+}
+
+function customerHomeOngoingBookingLiveHtml(booking = {}, items = []) {
+  const status = String(customerTrackStatus(booking) || "").toLowerCase();
+  if (!["working", "in_progress", "approval_pending"].includes(status)) return "";
+  const metadata = booking.metadata || {};
+  const pins = metadata.taskPins || {};
+  const finishPin = String(pins.finishPin || metadata.finishPin || "").trim();
+  const pinHtml = /^\d{4}$/.test(finishPin)
+    ? `<span class="customer-ongoing-task-finish-pin"><small>Finish PIN</small><b>${finishPin.split("").map((digit) => `<i>${escapeHtml(digit)}</i>`).join("")}</b></span>`
+    : "";
+  return pinHtml ? `<span class="customer-ongoing-task-live">${pinHtml}</span>` : "";
 }
 
 function customerCartNoticeHtml() {
@@ -6557,7 +6891,7 @@ function showCustomerCartNotice(message, tone = "info") {
   customerCartNoticeTimer = setTimeout(() => {
     state.customerCartNotice = null;
     refreshCustomerCartNoticeOnly();
-  }, 5000);
+  }, 2500);
 }
 
 function htmlFirstElement(html = "") {
@@ -6718,12 +7052,18 @@ async function openCustomerPaymentMethodSheet(context = null) {
     bookingId: String(context.bookingId),
     assignmentId: String(context.assignmentId || ""),
     updateId: String(context.updateId || ""),
-    amount: Math.max(0, Number(context.amount || 0))
+    amount: Math.max(0, Number(context.amount || 0)),
+    addOn: context.addOn && typeof context.addOn === "object" ? { ...context.addOn } : null
   } : null;
-  const methods = await refreshCustomerPaymentMethodConfig();
+  await refreshCustomerPaymentMethodConfig();
+  const methods = customerPaymentSheetMethods();
   const selectableMethods = methods.filter((method) => !method.disabled);
   const currentSelectionAvailable = selectableMethods.some((method) => method.value === state.selectedPayment);
-  if (!currentSelectionAvailable) state.selectedPayment = selectableMethods[0]?.value || "";
+  if (!currentSelectionAvailable) {
+    state.selectedPayment = selectableMethods.find((method) => String(method.value || "").toLowerCase() === "razorpay")?.value
+      || selectableMethods[0]?.value
+      || "";
+  }
   if (!context?.bookingId && methods.length <= 1) {
     state.customerPaymentSheetOpen = false;
     refreshCustomerPaymentSheetOnly();
@@ -6745,6 +7085,17 @@ async function submitCustomerTrackCashPayment(context = {}) {
   const bookingId = String(context.bookingId || "").trim();
   const amount = Math.max(0, Number(context.amount || 0));
   if (!bookingId || !amount) throw new Error("Booking payment details are unavailable.");
+  if (String(context.addOn?.kind || "").toLowerCase() === "extension") {
+    const durationMinutes = Math.max(1, Math.round(Number(context.addOn?.durationMinutes || 0)));
+    const extension = await api(`/portal/customer/bookings/${encodeURIComponent(bookingId)}/extensions/cash`, {
+      method: "POST",
+      body: JSON.stringify({ durationMinutes }),
+      suppressSessionLogout: true
+    });
+    clearPortalResourceCache("/portal/customer/bookings");
+    await loadCustomerTrackedBooking(bookingId, { silent: true });
+    return extension?.data || extension || null;
+  }
   await postPortalTaskUpdate({
     bookingId,
     assignmentId: context.assignmentId || null,
@@ -7101,6 +7452,8 @@ function saveUnserviceableLocationInBackground(location, serviceability = null) 
 
   return api("/portal/customer/unserviceable-locations", {
     method: "POST",
+    suppressSessionLogout: true,
+    headers: state.token ? { "X-Portal-Authorization": `Bearer ${state.token}` } : {},
     body: JSON.stringify({
       title,
       address,
@@ -7846,12 +8199,17 @@ function customerHomeCategorySheetServiceId(category = {}) {
 }
 
 function customerHomeCategorySheetCategories() {
-  const allCategories = customerHomeCategories();
+  const allCategories = customerHomeCategories({ includeHiddenHome: true });
+  const fixedIds = [...new Set(normalizeArray(state.customerHomeCategorySheetCategoryIds).map(String).filter(Boolean))];
+  if (fixedIds.length) {
+    const byId = new Map(allCategories.map((category) => [String(category.id || ""), category]));
+    const rows = fixedIds.map((id) => byId.get(id)).filter(Boolean);
+    if (rows.length) return rows;
+  }
   const selected = customerHomeCategoryById(state.customerHomeCategorySheetId) || allCategories[0] || {};
   const serviceId = customerHomeCategorySheetServiceId(selected);
-  if (!serviceId) return allCategories;
-  const rows = customerHomeCategoriesForServiceMaster(serviceId, allCategories);
-  return rows.length ? rows : allCategories.filter((category) => String(category.id || "") === String(selected.id || ""));
+  if (!serviceId) return allCategories.filter((category) => String(category.id || "") === String(selected.id || ""));
+  return allCategories.filter((category) => String(category.serviceMasterId || category.service_master_id || category.config?.categorySettings?.serviceMasterId || categoryServiceId(category) || "") === serviceId);
 }
 
 function customerHomeServiceMasterIconHtml(icon = {}) {
@@ -7961,7 +8319,7 @@ function customerHomeCategoryTile(category = {}, service = {}, index = 0) {
     ? ` style="--category-image-width:${escapeHtml(effectiveImageWidth)}px;--category-image-height:${escapeHtml(effectiveImageHeight)}px;"`
     : "";
   return `<article class="zigo-home-category-card-wrap" data-customer-home-category-card="${escapeHtml(category.id || "")}" data-home-category-index="${index}">
-    <button class="zigo-home-category-card zigo-category-tone-${index % 6}${hasCustomImageSize ? " has-custom-category-image-size" : ""}" data-open-home-category-detail="${escapeHtml(category.id || "")}" type="button" aria-label="${escapeHtml(category.name || "Category")}"${sizeStyle}>
+    <button class="zigo-home-category-card zigo-category-tone-${index % 6}${hasCustomImageSize ? " has-custom-category-image-size" : ""}" data-open-home-category-detail="${escapeHtml(category.id || "")}" data-home-category-service-id="${escapeHtml(category.serviceMasterId || category.service_master_id || categoryServiceId(category) || "")}" type="button" aria-label="${escapeHtml(category.name || "Category")}"${sizeStyle}>
       <div class="zigo-home-category-image">${customerHomeTileVisual(category, resolvedService.icon || resolvedService.name || "Category", { slider: true })}${customerCategoryRatingBadgeHtml(category)}</div>
     </button>
     ${categoryName ? `<b class="zigo-home-category-name">${escapeHtml(categoryName)}</b>` : ""}
@@ -8232,7 +8590,7 @@ function customerHomeCategoryPriceDurationOptions(categoryId = state.customerHom
       rule.isActive !== false &&
       rule.isEnabled !== false &&
       String(rule.categoryId || "") === targetCategoryId &&
-      customerRuleMatchesCurrentCluster(rule) &&
+      customerRuleMatchesCurrentCluster(rule, options.clusterId) &&
       customerCategoryPriceRuleAvailableFor(rule, availableFor)
     )
     .slice()
@@ -8842,8 +9200,8 @@ function customerHomeTrustSection() {
 
 function customerHomeAppStatementSection() {
   return `<section class="customer-home-app-statement" aria-label="India first on-demand personal assistance app">
-    <h2><span>India's first</span><strong>on-demand personal</strong><strong>assistance app <img class="customer-home-app-heart" src="${assetUrl("/assets/zigo-heart-3d.svg")}" alt=""></strong></h2>
-    <img src="${assetUrl("/assets/zigo-logo-new.png")}" alt="ZIGO">
+    <h2><span>India's trusted</span><strong>on-demand personal</strong><strong>assistance app <img class="customer-home-app-heart" src="${assetUrl("/assets/zigo-heart-3d.svg")}" alt=""></strong></h2>
+    <img src="${assetUrl("/assets/zigo-logo-new.png")}" alt="ZIGO"><br/><br/><br/><br/>
   </section>`;
 }
 
@@ -10051,7 +10409,7 @@ function renderCustomerLocationSimpleMap() {
       const left = Math.round(x * 256 - topLeft.x);
       const top = Math.round(y * 256 - topLeft.y);
       const subdomain = ["a", "b", "c"][Math.abs(wrappedX + y) % 3];
-      tiles.push(`<img class="customer-simple-map-tile" src="https://${subdomain}.tile.openstreetmap.org/${zoom}/${wrappedX}/${y}.png" referrerpolicy="no-referrer" alt="" style="left:${left}px;top:${top}px">`);
+      tiles.push(`<img class="customer-simple-map-tile" src="${window.ZigoMaps.rasterTileUrl(zoom, wrappedX, y)}" alt="" style="left:${left}px;top:${top}px">`);
     }
   }
   const renderToken = ++customerLocationMapRenderToken;
@@ -10302,7 +10660,7 @@ function customerOlaMapConfig() {
   const maps = state.portalConfig?.maps || {};
   return {
     olaMapsApiKey: String(maps.olaMapsApiKey || state.portalConfig?.olaMapsApiKey || "").trim(),
-    olaMapsStyleUrl: String(maps.olaMapsStyleUrl || state.portalConfig?.olaMapsStyleUrl || "https://api.olamaps.io/tiles/vector/v1/styles/default-light-standard/style.json").trim()
+    olaMapsStyleUrl: String(maps.olaMapsStyleUrl || state.portalConfig?.olaMapsStyleUrl || window.ZigoMaps.styleUrl).trim()
   };
 }
 
@@ -10322,29 +10680,12 @@ async function ensureCustomerOlaMapConfig() {
 }
 
 function loadCustomerOlaMapsSdk() {
-  if (window.OlaMaps) return Promise.resolve();
-  if (customerOlaMapsScriptPromise) return customerOlaMapsScriptPromise;
-  customerOlaMapsScriptPromise = new Promise((resolve, reject) => {
-    const existing = document.querySelector("script[data-ola-maps-sdk]");
-    if (existing) {
-      existing.addEventListener("load", () => resolve(), { once: true });
-      existing.addEventListener("error", () => reject(new Error("Unable to load Ola Maps.")), { once: true });
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = "https://www.unpkg.com/olamaps-web-sdk@latest/dist/olamaps-web-sdk.umd.js";
-    script.async = true;
-    script.dataset.olaMapsSdk = "true";
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Unable to load Ola Maps Web SDK. Check internet access and CSP settings."));
-    document.head.appendChild(script);
-  });
-  return customerOlaMapsScriptPromise;
+  return window.ZigoMaps.loadSdk();
 }
 
 function cleanCustomerOlaStyleUrl(styleUrl) {
   try {
-    const url = new URL(styleUrl);
+    const url = new URL(styleUrl, window.location.href);
     url.searchParams.delete("api_key");
     return url.toString();
   } catch (error) {
@@ -10353,22 +10694,7 @@ function cleanCustomerOlaStyleUrl(styleUrl) {
 }
 
 function customerOlaFallbackRasterStyle() {
-  return {
-    version: 8,
-    sources: {
-      osm: {
-        type: "raster",
-        tiles: [
-          "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
-          "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
-          "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        ],
-        tileSize: 256,
-        attribution: "OpenStreetMap contributors"
-      }
-    },
-    layers: [{ id: "osm", type: "raster", source: "osm" }]
-  };
+  return window.ZigoMaps.rasterStyle();
 }
 
 function isCustomerOlaMapAuthOrDomainError(error) {
@@ -10586,7 +10912,7 @@ async function initializeCustomerLocationOlaMap() {
   };
   customerLocationLastMapSyncKey = `${Number(center.latitude).toFixed(6)},${Number(center.longitude).toFixed(6)}`;
   mapEl.innerHTML = `<div class="location-map-loading">Loading Ola Maps...</div>`;
-  const { olaMapsApiKey } = await ensureCustomerOlaMapConfig();
+  const { olaMapsApiKey, olaMapsStyleUrl } = await ensureCustomerOlaMapConfig();
   if (!olaMapsApiKey) throw new Error("Ola Maps API key is not configured.");
   await loadCustomerOlaMapsSdk();
   if (!document.body.contains(mapEl)) return;
@@ -10595,6 +10921,7 @@ async function initializeCustomerLocationOlaMap() {
   const initMap = (style) => olaMaps.init({
     style,
     container: "customerLocationMap",
+    transformRequest: window.ZigoMaps.transformRequest,
     center: [Number(center.longitude), Number(center.latitude)],
     zoom: customerLocationSimpleMap.zoom
   });
@@ -10620,7 +10947,7 @@ async function initializeCustomerLocationOlaMap() {
     });
   };
   let usedFallback = false;
-  customerOlaLocationMap = initMap("/customer-ola-raster-style.json");
+  customerOlaLocationMap = await initMap(olaMapsStyleUrl);
   bindMapEvents();
   customerOlaLocationMap.on?.("error", (event) => {
     const error = event?.error || event;
@@ -10636,7 +10963,9 @@ async function initializeCustomerLocationOlaMap() {
 function initializeCustomerLocationSimpleMap() {
   const mapEl = document.querySelector("#customerLocationMap");
   if (!mapEl) return;
-  initializeCustomerLocationRasterFallbackMap(mapEl);
+  initializeCustomerLocationOlaMap().catch(() => {
+    if (document.body.contains(mapEl)) initializeCustomerLocationRasterFallbackMap(mapEl);
+  });
   return;
   const center = customerLocationMapCenterLocation();
   setCustomerLocationSimpleMapCenter(center.latitude, center.longitude, customerLocationSimpleMap?.zoom || 17);
@@ -11423,7 +11752,7 @@ function renderCart() {
   ensureCustomerBookingTypeAllowed();
   if (!state.cart.length) {
     root.innerHTML = `<section class="mobile-app home-screen customer-flow-screen customer-cart-screen">
-      <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-view="home" aria-label="Back">${customerIcon("back")}</button><h1>Review Booking</h1></header>
+      <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-review-booking-back aria-label="Back">${customerIcon("back")}</button><h1>Review Booking</h1></header>
       <section class="content-section compact-section">
         ${cartRows()}
       </section>
@@ -11436,7 +11765,7 @@ function renderCart() {
   const activeBookingType = customerEffectiveBookingType(state.bookingType);
   const confirmLabel = state.bookingType === "schedule" ? "Schedule & Confirm" : "Confirm Booking";
   root.innerHTML = `<section class="mobile-app home-screen customer-flow-screen customer-cart-screen">
-    <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-view="home" aria-label="Back">${customerIcon("back")}</button><h1>Review Booking</h1></header>
+    <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-review-booking-back aria-label="Back">${customerIcon("back")}</button><h1>Review Booking</h1></header>
     ${customerReviewNotificationsHtml()}
     <section class="content-section compact-section">
       <div class="cart-list">${cartRows()}</div>
@@ -12162,7 +12491,7 @@ function customerBookingServiceImage(booking = {}, serviceItem = null) {
 }
 
 function customerChatComposer(booking = {}) {
-  if (["completed", "cancelled", "canceled", "failed", "rejected"].includes(String(booking.statusCode || "").toLowerCase())) {
+  if (customerTrackCommunicationLocked(booking) || ["completed", "cancelled", "canceled", "failed", "rejected"].includes(String(booking.statusCode || "").toLowerCase())) {
     return `<p class="muted chat-closed-note">This booking is closed.</p>`;
   }
   return `<form class="chat-composer customer-chat-composer" data-task-update-form data-booking-id="${escapeHtml(booking.id || booking.bookingId || "")}" data-assignment-id="${escapeHtml(booking.assignmentId || "")}">
@@ -12471,6 +12800,17 @@ function customerTrackBaseEndAt(booking = {}, baseMinutes = 30) {
   const metadata = booking.metadata || {};
   const assignmentMetadata = booking.assignmentMetadata || metadata.assignmentMetadata || {};
   const timer = metadata.taskTimer || {};
+  // bookingEndAt is updated when an extension is confirmed, so it is authoritative.
+  const persistedEnd = customerTrackDateValue(
+    booking.bookingEndAt,
+    booking.taskEndAt,
+    assignmentMetadata.taskEndAt,
+    metadata.bookingEndAt,
+    metadata.taskEndAt,
+    timer.actualTaskEndAt,
+    timer.taskEndAt
+  );
+  if (persistedEnd) return persistedEnd;
   const start = customerTrackDateValue(
     booking.actualTaskStartedAt,
     booking.assignmentActualStartedAt,
@@ -12554,7 +12894,20 @@ function customerTrackRingInfo(input = {}, now = Date.now()) {
   return { text, tone, progress };
 }
 
-function customerTrackTotalTimeHtml(booking = {}, items = []) {
+function customerTrackClockCountdownText(endAt = null, fallbackMinutes = 0) {
+  const fallbackSeconds = Math.max(0, Math.round(Number(fallbackMinutes || 0) * 60));
+  const seconds = endAt instanceof Date && !Number.isNaN(endAt.getTime())
+    ? Math.max(0, Math.floor((endAt.getTime() - Date.now()) / 1000))
+    : fallbackSeconds;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secondsPart = String(seconds % 60).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${secondsPart}`
+    : `${minutes}:${secondsPart}`;
+}
+
+function customerTrackTotalTimeHtml(booking = {}, items = [], options = {}) {
   const info = customerTrackTotalTimeInfo(booking, items);
   if (["completed", "success", "done", "cancelled", "canceled", "failed", "rejected"].includes(String(info.status || "").toLowerCase())) {
     const normalizedStatus = ["completed", "success", "done"].includes(String(info.status || "").toLowerCase()) ? "completed" : "cancelled";
@@ -12567,6 +12920,7 @@ function customerTrackTotalTimeHtml(booking = {}, items = []) {
       <i aria-hidden="true"></i><b>Confirmed</b>
     </span>`;
   }
+  const showLiveCountdown = Boolean(options.liveCountdown);
   const radius = 23;
   const circumference = 2 * Math.PI * radius;
   const endAt = info.baseEndAt && !info.held ? info.baseEndAt : null;
@@ -12579,13 +12933,54 @@ function customerTrackTotalTimeHtml(booking = {}, items = []) {
     waitMinutes: info.waitMinutes
   });
   const offset = circumference * (1 - ringInfo.progress);
-  return `<span class="customer-track-total-time customer-track-countdown-ring ${escapeHtml(ringInfo.tone)}" data-customer-track-total-time data-customer-track-ring data-booking-id="${escapeHtml(booking.id || booking.bookingId || "")}" data-start-at="${escapeHtml(startAt ? startAt.toISOString() : "")}" data-base-end-at="${escapeHtml(endAt ? endAt.toISOString() : "")}" data-wait-minutes="${escapeHtml(info.waitMinutes)}" data-static-minutes="${escapeHtml(info.fallbackMinutes)}" data-base-minutes="${escapeHtml(info.baseMinutes)}" style="--ring-offset:${offset.toFixed(2)}; --ring-circumference:${circumference.toFixed(2)}">
+  return `<span class="customer-track-total-time customer-track-countdown-ring ${escapeHtml(ringInfo.tone)}" data-customer-track-total-time data-customer-track-ring ${showLiveCountdown ? "data-customer-home-current-booking-countdown" : ""} data-booking-id="${escapeHtml(booking.id || booking.bookingId || "")}" data-start-at="${escapeHtml(startAt ? startAt.toISOString() : "")}" data-base-end-at="${escapeHtml(endAt ? endAt.toISOString() : "")}" data-wait-minutes="${escapeHtml(info.waitMinutes)}" data-static-minutes="${escapeHtml(info.fallbackMinutes)}" data-base-minutes="${escapeHtml(info.baseMinutes)}" style="--ring-offset:${offset.toFixed(2)}; --ring-circumference:${circumference.toFixed(2)}">
     <svg viewBox="0 0 58 58" aria-hidden="true">
       <circle class="ring-track" cx="29" cy="29" r="${radius}"></circle>
       <circle class="ring-value" cx="29" cy="29" r="${radius}"></circle>
     </svg>
-    <b class="countdown-ring-text">${escapeHtml(ringInfo.text)}</b>
+    <b class="countdown-ring-text">${escapeHtml(showLiveCountdown ? customerTrackClockCountdownText(endAt, info.fallbackMinutes) : ringInfo.text)}</b>
   </span>`;
+}
+
+function customerTrackWorkingCountdownHtml(booking = {}, items = []) {
+  if (customerTrackStatus(booking) !== "working") return "";
+  const info = customerTrackTotalTimeInfo(booking, items);
+  const metadata = booking.metadata || {};
+  const timer = metadata.taskTimer || {};
+  const startAt = info.startAt;
+  const endAt = customerTrackDateValue(
+    booking.bookingEndAt,
+    metadata.actualTaskEndAt,
+    metadata.bookingEndAt,
+    metadata.taskEndAt,
+    timer.actualTaskEndAt,
+    timer.taskEndAt,
+    info.baseEndAt
+  );
+  const totalMinutes = startAt && endAt ? Math.max(1, Math.ceil((endAt.getTime() - startAt.getTime()) / 60_000)) : Math.max(1, Number(info.baseMinutes || 30));
+  const ringInfo = customerTrackRingInfo({
+    startAt,
+    endAt,
+    staticMinutes: info.fallbackMinutes,
+    baseMinutes: totalMinutes,
+    waitMinutes: 0
+  });
+  const radius = 84;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference * (1 - ringInfo.progress);
+  const endText = endAt ? customerTrackCompactTimeText(endAt) : "-";
+  return `<section class="customer-track-working-countdown is-${escapeHtml(ringInfo.tone)}" data-track-working-countdown>
+    <div class="customer-track-working-countdown-head">
+      <b><i></i>Service in progress</b>
+      <span>Ends at ${escapeHtml(endText)}</span>
+    </div>
+    <span class="customer-track-working-countdown-ring ${escapeHtml(ringInfo.tone)}" data-customer-track-total-time data-customer-track-ring data-booking-id="${escapeHtml(booking.id || booking.bookingId || "")}" data-start-at="${escapeHtml(startAt ? startAt.toISOString() : "")}" data-base-end-at="${escapeHtml(endAt ? endAt.toISOString() : "")}" data-wait-minutes="0" data-static-minutes="${escapeHtml(info.fallbackMinutes)}" data-base-minutes="${escapeHtml(totalMinutes)}" style="--ring-offset:${offset.toFixed(2)}; --ring-circumference:${circumference.toFixed(2)}">
+      <svg viewBox="0 0 200 200" aria-hidden="true"><circle class="ring-track" cx="100" cy="100" r="${radius}"></circle><circle class="ring-value" cx="100" cy="100" r="${radius}"></circle></svg>
+      <span>Time remaining</span>
+      <b>${escapeHtml(customerTrackClockCountdownText(endAt, info.fallbackMinutes))}</b>
+    </span>
+    ${customerTrackExtendDurationHtml(booking, items, "working")}
+  </section>`;
 }
 
 function customerTrackBookingReference(booking = {}) {
@@ -12774,6 +13169,31 @@ function customerTrackPlannedTimeRangeHtml(booking = {}, items = []) {
     customerTrackPlannedStartDate(booking),
     customerTrackPlannedEndDate(booking, items)
   );
+}
+
+function customerTrackTaskTimeRangeHtml(booking = {}, items = []) {
+  const metadata = booking.metadata || {};
+  const timer = metadata.taskTimer || {};
+  const actualStart = customerTrackDateValue(
+    booking.actualTaskStartedAt,
+    booking.assignmentActualStartedAt,
+    metadata.actualStartedAt,
+    metadata.startedAt,
+    timer.actualStartedAt,
+    timer.startedAt
+  );
+  if (!actualStart) return customerTrackPlannedTimeRangeHtml(booking, items);
+  const durationMinutes = Math.max(1, Number(customerTrackBaseDurationMinutes(booking, items) || 30));
+  const actualEnd = customerTrackDateValue(
+    booking.bookingEndAt,
+    booking.actualTaskEndAt,
+    metadata.actualTaskEndAt,
+    metadata.bookingEndAt,
+    metadata.taskEndAt,
+    timer.actualTaskEndAt,
+    timer.taskEndAt
+  ) || new Date(actualStart.getTime() + durationMinutes * 60_000);
+  return customerBookingTimingRangeText(actualStart, actualEnd);
 }
 
 function customerTrackCompactTimeText(value = "") {
@@ -13025,7 +13445,10 @@ function customerTrackChatNotificationHtml(count = 0) {
 function customerTrackChatHeaderHtml(booking = {}, expanded = false, updates = taskUpdates(booking)) {
   const status = customerTrackStatus(booking);
   const unreadCount = customerTrackUnreadAssistantChatCount(booking, updates);
-  const notification = customerTrackChatNotificationHtml(unreadCount);
+  const chatLocked = customerTrackCommunicationLocked(booking);
+  const notification = chatLocked ? "" : customerTrackChatNotificationHtml(unreadCount);
+  // Closed bookings keep chat history expandable; only communication controls are disabled.
+  const toggle = customerTrackChatToggleHtml(expanded);
   if (status === "confirmed") {
     return `<div class="customer-track-chat-title customer-track-chat-tone-confirmed">
       <div class="customer-track-chat-pending">
@@ -13033,7 +13456,7 @@ function customerTrackChatHeaderHtml(booking = {}, expanded = false, updates = t
         <b>Assistant will assign shortly</b>
       </div>
       ${notification}
-      ${customerTrackChatToggleHtml(expanded)}
+      ${toggle}
     </div>`;
   }
   const assistant = customerTrackAssistantInfo(booking);
@@ -13052,7 +13475,7 @@ function customerTrackChatHeaderHtml(booking = {}, expanded = false, updates = t
     </div>
     ${customerTrackAssistantCallHtml(assistant, `customer-track-chat-call ${status}`, booking)}
     ${notification}
-    ${customerTrackChatToggleHtml(expanded)}
+    ${toggle}
   </div>`;
 }
 
@@ -13614,25 +14037,54 @@ function customerTrackBillSummary(booking = {}, items = []) {
       amount: Math.max(0, amount)
     };
   }).filter((row) => row.amount > 0);
-  if (!taxRows.length && fees > 0) {
-    taxRows.push({ label: "GST & Service Fees", note: "", amount: fees });
-  }
+  if (!taxRows.length && fees > 0) taxRows.push({ label: "GST & Service Fees", note: "", amount: fees });
+  const paidAddOns = normalizeArray(metadata.paidAddOns).filter((item) => item && typeof item === "object" && (item.paidAt || String(item.kind || "").toLowerCase() === "extension"));
+  const baseTaxRows = taxRows.slice();
+  const baseTaxTotal = baseTaxRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const extensionRows = paidAddOns.filter((addOn) => String(addOn.kind || "").toLowerCase() === "extension").map((addOn) => {
+    const addOnPricing = addOn.pricing || {};
+    const extensionTaxRows = normalizeArray(addOnPricing.taxRows).map((row) => {
+      const amount = row?.amountPaise != null ? customerTrackPaiseValue(row.amountPaise) : Math.max(0, Number(row?.amount || 0));
+      return { label: `Extension - ${String(row?.label || "GST & Service Fees")}`, note: String(row?.note || row?.taxNote || ""), amount: Math.max(0, amount) };
+    }).filter((row) => row.amount > 0);
+    const taxAmount = customerTrackPaiseValue(addOn.taxAmountPaise ?? addOnPricing.taxAmountPaise, extensionTaxRows.reduce((sum, row) => sum + row.amount, 0));
+    if (!extensionTaxRows.length && taxAmount > 0) extensionTaxRows.push({ label: "Extension - GST & Service Fees", note: "", amount: taxAmount });
+    const inclusiveTax = customerTrackPaiseValue(addOnPricing.inclusiveTaxAmountPaise);
+    const sellingAmount = customerTrackPaiseValue(addOn.sellingAmountPaise ?? addOnPricing.sellingAmountPaise);
+    const itemAmount = customerTrackPaiseValue(addOnPricing.itemTotalPaise, Math.max(0, sellingAmount - inclusiveTax));
+    const totalAmount = customerTrackPaiseValue(addOn.totalAmountPaise ?? addOnPricing.totalAmountPaise, itemAmount + taxAmount);
+    return { ...addOn, itemAmount, taxAmount, totalAmount, taxRows: extensionTaxRows, label: `Service extension (${customerTrackDurationCapsuleText(addOn.durationMinutes || 0)})` };
+  });
+  const allTaxRows = baseTaxRows.concat(extensionRows.flatMap((row) => row.taxRows));
+  const extensionItemTotal = extensionRows.reduce((sum, row) => sum + row.itemAmount, 0);
+  const extensionTotal = extensionRows.reduce((sum, row) => sum + row.totalAmount, 0);
+  const itemRows = [{ label: "Booking amount", amount: itemTotal }, ...extensionRows.map((row) => ({ label: row.label, amount: row.itemAmount }))].filter((row) => row.amount > 0);
   const discountFromItems = normalizeArray(items).reduce((sum, item) => {
     const base = Number(item.basePrice || 0);
     const selling = Number(item.sellingPrice || 0);
     return sum + Math.max(0, base - selling);
   }, 0);
-  const discount = customerTrackPaiseValue(
-    booking.discountPaise
-    || metadata.discountPaise
-    || pricing.discountAmountPaise,
+  const bookingDiscount = customerTrackPaiseValue(
+    metadata.baseBookingDiscountPaise
+    ?? booking.discountPaise
+    ?? metadata.discountPaise
+    ?? pricing.discountAmountPaise,
     discountFromItems
   ) || discountFromItems;
+  const extensionDiscount = extensionRows.reduce((sum, row) => sum + customerTrackPaiseValue(
+    row.discountAmountPaise
+    ?? row.extensionDiscountPaise
+    ?? row.pricing?.discountAmountPaise
+    ?? row.pricing?.extensionDiscountPaise
+  ), 0);
+  const discount = Math.max(0, bookingDiscount + extensionDiscount);
   return {
-    total: Math.max(Math.max(0, rawTotal - persistedTipAmount), itemTotal + fees + waiting.charges) + tipAmount,
-    itemTotal,
-    fees,
-    taxRows,
+    total: Math.max(0, itemTotal + baseTaxTotal + extensionTotal + waiting.charges + tipAmount),
+    itemTotal: itemTotal + extensionItemTotal,
+    fees: allTaxRows.reduce((sum, row) => sum + Number(row.amount || 0), 0),
+    taxRows: allTaxRows,
+    itemRows,
+    addOns: extensionRows,
     discount,
     tipAmount,
     waitingMinutes: waiting.minutes,
@@ -13658,6 +14110,22 @@ function customerTrackTaxInfoModalHtml(bill = {}) {
   </div>`;
 }
 
+function customerTrackItemInfoModalHtml(bill = {}) {
+  const itemRows = normalizeArray(bill.itemRows);
+  if (!itemRows.length) return "";
+  return `<div class="customer-cart-tax-modal hidden" data-track-item-modal role="dialog" aria-modal="true" aria-labelledby="customerTrackItemTitle">
+    <div class="customer-cart-tax-modal-backdrop" data-track-item-close></div>
+    <section class="customer-cart-tax-modal-card">
+      <h2 id="customerTrackItemTitle">Item total details</h2>
+      <div class="customer-cart-tax-modal-rows">
+        ${itemRows.map((row) => `<div><span>${escapeHtml(row.label)}</span><b>${escapeHtml(customerTrackMoney(row.amount, 2))}</b></div>`).join("")}
+        <div class="customer-cart-tax-modal-total"><strong>Item total</strong><b>${escapeHtml(customerTrackMoney(bill.itemTotal, 2))}</b></div>
+      </div>
+      <button class="customer-cart-tax-modal-ok" type="button" data-track-item-close>Okay</button>
+    </section>
+  </div>`;
+}
+
 function customerTrackBillDetailsHtml(booking = {}, items = []) {
   const bill = customerTrackBillSummary(booking, items);
   const payment = customerBookingPaymentState(booking);
@@ -13677,9 +14145,9 @@ function customerTrackBillDetailsHtml(booking = {}, items = []) {
         <button type="button" data-track-bill-toggle aria-expanded="${expanded ? "true" : "false"}" aria-label="${expanded ? "Collapse" : "Expand"} bill details">${customerTrackIcon(expanded ? "chevronUp" : "chevronDown")}</button>
       </div>
       <div class="customer-track-bill-rows">
-        <div class="customer-track-bill-row"><span>Item total</span><b>${escapeHtml(customerTrackMoney(bill.itemTotal, 2))}</b></div>
-        ${bill.taxRows.map((row) => `<div class="customer-track-bill-row customer-track-tax-row"><span>${escapeHtml(row.label)}<button class="customer-cart-tax-info-btn" type="button" data-track-tax-info aria-label="View tax details">${customerIcon("info")}</button></span><b>${escapeHtml(customerTrackMoney(row.amount, 2))}</b></div>`).join("")}
-        ${bill.tipAmount > 0 ? `<div class="customer-track-bill-row"><span>Tip</span><b>${escapeHtml(customerTrackMoney(bill.tipAmount, 2))}</b></div>` : ""}
+        <div class="customer-track-bill-row"><span>Item total<button class="customer-cart-tax-info-btn" type="button" data-track-item-info aria-label="View item total details">${customerIcon("info")}</button></span><b>${escapeHtml(customerTrackMoney(bill.itemTotal, 2))}</b></div>
+        ${bill.fees > 0 ? `<div class="customer-track-bill-row customer-track-tax-row"><span>GST & Service Fees<button class="customer-cart-tax-info-btn" type="button" data-track-tax-info aria-label="View tax details">${customerIcon("info")}</button></span><b>${escapeHtml(customerTrackMoney(bill.fees, 2))}</b></div>` : ""}
+        ${bill.tipAmount > 0 ? `<div class="customer-track-bill-row"><span>Tip <small>(tax not applicable)</small></span><b>Paid ${escapeHtml(customerTrackMoney(bill.tipAmount, 2))}</b></div>` : ""}
         ${payment.paid && payment.remarks ? `<div class="customer-track-bill-row"><span>Payment Remarks</span><b>${escapeHtml(payment.remarks)}</b></div>` : ""}
         ${payment.paid && normalizeArray(payment.proofMediaUrls).length ? `<div class="customer-track-bill-row"><span>Payment Proof</span><b>${normalizeArray(payment.proofMediaUrls).slice(0, 2).map((url, index) => {
           const viewUrl = assetUrl(url);
@@ -13694,7 +14162,7 @@ function customerTrackBillDetailsHtml(booking = {}, items = []) {
       </div>
     </div>
   </section>
-  ${customerTrackTaxInfoModalHtml(bill)}`;
+  ${customerTrackItemInfoModalHtml(bill)}${customerTrackTaxInfoModalHtml(bill)}`;
 }
 
 function customerTrackCustomTipValue(value = "") {
@@ -13731,7 +14199,8 @@ function customerTrackTipState(booking = customerTrackCurrentBooking()) {
   const bookingKey = customerTrackTipBookingKey(booking);
   if (!bookingKey) return { amount: 0, custom: "", customOpen: false };
   if (!state.customerTrackTipsByBooking[bookingKey]) {
-    const persistedAmount = customerTrackPaiseValue(
+    const paidTip = normalizeArray(booking.metadata?.paidAddOns).find((item) => String(item?.kind || "").toLowerCase() === "tip");
+  const persistedAmount = paidTip ? customerTrackPaiseValue(paidTip.totalAmountPaise || paidTip.sellingAmountPaise, 0) : customerTrackPaiseValue(
       booking.tipAmountPaise
       ?? booking.billingSnapshot?.tipAmountPaise
       ?? booking.paymentDetails?.tipAmountPaise
@@ -13774,8 +14243,10 @@ async function persistCustomerTrackTipAmount(amount, booking = customerTrackCurr
 
 function customerTrackTipCardHtml(booking = {}) {
   const payment = customerBookingPaymentState(booking);
-  if (payment.paid || customerTrackStatus(booking) === "cancelled") return "";
-  const locked = Boolean(payment.pending || customerTrackControlsLocked(booking));
+  const tipAlreadyPaid = normalizeArray(booking.metadata?.paidAddOns).some((item) => String(item?.kind || "").toLowerCase() === "tip");
+  if (tipAlreadyPaid || customerTrackStatus(booking) === "cancelled") return "";
+  // A completed online booking can still receive a separate tip payment.
+  const locked = Boolean(payment.pending || customerTrackStatus(booking) === "cancelled");
   const bookingId = String(booking.id || booking.bookingId || "current").replace(/[^a-zA-Z0-9_-]/g, "");
   const tipState = customerTrackTipState(booking);
   const selected = Number(tipState.amount || 0);
@@ -13844,6 +14315,7 @@ function renderTrackPreservingTipScroll(focusSelector = "") {
   }
   const currentBill = root.querySelector(".customer-track-bill");
   if (currentBill) {
+    root.querySelector("[data-track-item-modal]")?.remove();
     root.querySelector("[data-track-tax-modal]")?.remove();
     const billTemplate = document.createElement("template");
     billTemplate.innerHTML = customerTrackBillDetailsHtml(booking, customerTrackBookingItems(booking)).trim();
@@ -14013,6 +14485,7 @@ function assistantApplyLocalTaskUpdate(input = {}, created = {}) {
 
 function customerTrackChatHtml(booking = {}) {
   const chatEnabled = customerTrackChatEnabled(booking);
+  const chatLocked = customerTrackCommunicationLocked(booking);
   const sourceUpdates = taskUpdates(booking);
   const customerNote = customerTrackCustomerNote(booking);
   const updates = [];
@@ -14034,7 +14507,7 @@ function customerTrackChatHtml(booking = {}) {
   const disabledAttr = chatEnabled ? "" : " disabled";
   const chatExpanded = Boolean(state.customerTrackChatExpanded);
   const status = customerTrackStatus(booking);
-  return `<section class="customer-track-section customer-track-chat-section customer-track-chat-status-${escapeHtml(status)} ${chatExpanded ? "is-expanded" : "is-collapsed"}" data-booking-id="${escapeHtml(booking.id || booking.bookingId || "")}">
+  return `<section class="customer-track-section customer-track-chat-section customer-track-chat-status-${escapeHtml(status)} ${chatLocked ? "customer-track-chat-closed" : ""} ${chatExpanded ? "is-expanded" : "is-collapsed"}" data-booking-id="${escapeHtml(booking.id || booking.bookingId || "")}">
     ${customerTrackChatHeaderHtml(booking, chatExpanded, updates)}
     <div class="customer-track-chat-panel">
       <div class="customer-track-chat-list">
@@ -14045,7 +14518,7 @@ function customerTrackChatHtml(booking = {}) {
     <form class="customer-track-composer ${chatEnabled ? "" : "is-disabled"}" data-task-update-form data-chat-disabled="${chatEnabled ? "false" : "true"}" aria-disabled="${chatEnabled ? "false" : "true"}" data-booking-id="${escapeHtml(booking.id || booking.bookingId || "")}" data-assignment-id="${escapeHtml(booking.assignmentId || "")}">
           <input type="hidden" name="updateType" value="text">
           <label aria-label="Attach file">${customerIcon("paperclip")}<input name="media" type="file" multiple accept="image/*,video/*,audio/*,.pdf,.doc,.docx"${disabledAttr}></label>
-          <textarea name="message" rows="1" placeholder="Type your message"${disabledAttr}></textarea>
+          <textarea name="message" rows="1" placeholder="${chatLocked ? "Chat disabled for closed booking" : "Type your message"}"${disabledAttr}></textarea>
           <button type="submit" data-task-update-action="send" aria-label="Send message"${disabledAttr}>${customerTrackIcon("send")}</button>
         </form>
   </section>`;
@@ -14144,7 +14617,6 @@ function customerTrackReviewHtml(booking = {}) {
     || review?.serviceRating
     || String(review?.reviewText || review?.review || "").trim()
   );
-  if (customerTrackIsPaidCompleted(booking) && !hasSavedReview) return "";
   const locked = Boolean(hasSavedReview);
   const average = customerTrackReviewAverage(booking);
   if (locked) {
@@ -14277,7 +14749,7 @@ function customerTrackLiveRouteMercator(point, zoom) {
 
 function customerTrackLiveRouteTileUrl(x, y, z) {
   const subdomain = ["a", "b", "c"][Math.abs(x + y) % 3];
-  return `https://${subdomain}.tile.openstreetmap.org/${z}/${x}/${y}.png`;
+  return window.ZigoMaps.rasterTileUrl(z, x, y);
 }
 
 function customerTrackLiveRouteTileBounds(zoom) {
@@ -14558,7 +15030,7 @@ function customerTrackPageHtml() {
           ${bookingDateText ? `<span>${escapeHtml(bookingDateText)}</span>` : ""}
           ${booking ? `<span class="customer-track-booking-id-line">Booking ID ${escapeHtml(customerVisibleBookingId(booking))}</span>` : ""}
         </div>
-        ${booking ? customerTrackTotalTimeHtml(booking, trackItems) : ""}
+
       </header>
     </div>
     <main class="content-section customer-track-body">
@@ -14570,6 +15042,8 @@ function customerTrackPageHtml() {
               ${trackItems.map((item, index) => customerTrackServiceRowHtml(item, index, booking, trackItems, trackStatus)).join("")}
             </div>
           </div>
+          ${customerTrackWorkingCountdownHtml(booking, trackItems)}
+          ${trackStatus === "working" ? "" : customerTrackExtendDurationHtml(booking, trackItems, trackStatus)}
         </section>
         ${customerTrackLiveRouteHtml(booking, trackStatus)}
         ${customerTrackTaskPinHtml(booking, trackStatus)}
@@ -14588,6 +15062,7 @@ function customerTrackPageHtml() {
     ${customerTrackPreviewModal()}
     ${customerTrackMapSheetHtml()}
     ${customerTrackRatingThanksModal()}
+    ${customerTrackExtensionSheetHtml()}
   </section>
   ${customerPaymentSheetHtml()}`;
 }
@@ -14597,6 +15072,8 @@ function renderTrack() {
   root.innerHTML = customerTrackPageHtml();
   attachCustomerTrackScrollStability();
   customerTrackScrollChatToLatest();
+  void syncPortalTrackingHub();
+  syncCustomerTrackFallbackRefresh();
 }
 
 function attachCustomerTrackScrollStability() {
@@ -14610,7 +15087,7 @@ function attachCustomerTrackScrollStability() {
       if (Date.now() < customerTrackScrollActiveUntil) return;
       if (!customerTrackPendingRealtimeUpdate || state.customerView !== "track") return;
       customerTrackPendingRealtimeUpdate = false;
-      renderTrackRealtimeUpdate({ force: true });
+      renderTrackRealtimeUpdate();
     }, 300);
   };
   page.addEventListener("scroll", markActive, { passive: true });
@@ -14618,10 +15095,23 @@ function attachCustomerTrackScrollStability() {
   page.addEventListener("wheel", markActive, { passive: true });
 }
 
+function customerTrackOverlayOpen() {
+  return Boolean(root.querySelector(".customer-track-preview-backdrop, .customer-track-map-sheet-backdrop, .customer-payment-mode-backdrop, .customer-cart-tax-modal:not(.hidden), [role='dialog'][aria-modal='true']"));
+}
 function renderTrackRealtimeUpdate(options = {}) {
   const currentPage = root.querySelector(".customer-track-page");
   if (!currentPage) {
     renderTrack();
+    return;
+  }
+  if (!options.force && customerTrackOverlayOpen()) {
+    customerTrackPendingRealtimeUpdate = true;
+    clearTimeout(customerTrackScrollSettledTimer);
+    customerTrackScrollSettledTimer = setTimeout(() => {
+      if (!customerTrackPendingRealtimeUpdate || state.customerView !== "track" || customerTrackOverlayOpen()) return;
+      customerTrackPendingRealtimeUpdate = false;
+      renderTrackRealtimeUpdate();
+    }, 500);
     return;
   }
   if (!options.force && Date.now() < customerTrackScrollActiveUntil) {
@@ -14631,7 +15121,7 @@ function renderTrackRealtimeUpdate(options = {}) {
       if (Date.now() < customerTrackScrollActiveUntil) return;
       if (!customerTrackPendingRealtimeUpdate || state.customerView !== "track") return;
       customerTrackPendingRealtimeUpdate = false;
-      renderTrackRealtimeUpdate({ force: true });
+      renderTrackRealtimeUpdate();
     }, 320);
     return;
   }
@@ -14654,8 +15144,8 @@ function renderTrackRealtimeUpdate(options = {}) {
     const next = nextPage.querySelector(selector);
     if (current && next) current.replaceWith(next);
   });
-  currentPage.querySelectorAll(":scope > .assistant-confirm-backdrop, :scope > .customer-track-modal-backdrop, :scope > .customer-track-preview-backdrop, :scope > .customer-track-map-sheet, :scope > .customer-track-rating-thanks").forEach((node) => node.remove());
-  nextPage.querySelectorAll(":scope > .assistant-confirm-backdrop, :scope > .customer-track-modal-backdrop, :scope > .customer-track-preview-backdrop, :scope > .customer-track-map-sheet, :scope > .customer-track-rating-thanks").forEach((node) => currentPage.appendChild(node));
+  currentPage.querySelectorAll(":scope > .assistant-confirm-backdrop, :scope > .customer-track-modal-backdrop, :scope > .customer-track-preview-backdrop, :scope > .customer-track-map-sheet, :scope > .customer-track-rating-thanks, :scope > .customer-payment-mode-backdrop").forEach((node) => node.remove());
+  nextPage.querySelectorAll(":scope > .assistant-confirm-backdrop, :scope > .customer-track-modal-backdrop, :scope > .customer-track-preview-backdrop, :scope > .customer-track-map-sheet, :scope > .customer-track-rating-thanks, :scope > .customer-payment-mode-backdrop").forEach((node) => currentPage.appendChild(node));
   currentPage.scrollTop = scrollTop;
   root.scrollTop = scrollTop;
   if (state.customerTrackChatExpanded && chatWasAtBottom) customerTrackScrollChatToLatest();
@@ -14663,31 +15153,111 @@ function renderTrackRealtimeUpdate(options = {}) {
 }
 
 function customerTrackExtendDurationHtml(booking = {}, trackItems = [], trackStatus = "") {
-  const normalizedStatus = String(trackStatus || customerTrackStatus(booking) || "").toLowerCase();
-  const isWorking = ["working", "in_progress", "approval_pending"].includes(normalizedStatus)
-    || Boolean(booking.actualTaskStartedAt || booking.assignmentActualStartedAt);
-  if (!isWorking) return "";
-  const primaryItem = normalizeArray(trackItems)[0] || {};
-  const categoryId = String(primaryItem.categoryId || booking.categoryId || booking.metadata?.categoryId || booking.metadata?.selectedCategoryId || "");
-  const bookingId = String(booking.id || booking.bookingId || "");
-  const assignmentId = String(booking.assignmentId || booking.metadata?.assignmentId || "");
-  if (!categoryId || !bookingId) return "";
-  const durations = customerHomeCategoryPriceDurationOptions(categoryId, { availableFor: "extend" });
-  if (!durations.length) return "";
-  return `<div class="customer-track-extend-card">
-    <div class="customer-track-extend-options">
-      ${durations.map((item) => {
-        const durationMinutes = Math.max(1, Math.round(numberValue(item.durationMinutes || item.timeDurationMinutes, 0)));
-        const price = numberValue(item.sellingPrice ?? item.price, 0);
-        const basePrice = numberValue(item.basePrice, 0);
-        const label = String(item.label || "").trim() || personalAssistantDurationLabel({ durationMinutes });
-        return `<button type="button" data-customer-track-extend-duration="${escapeHtml(durationMinutes)}" data-customer-track-extend-booking-id="${escapeHtml(bookingId)}" data-customer-track-extend-assignment-id="${escapeHtml(assignmentId)}">
-          <strong>${escapeHtml(label)}</strong>
-          <span>${price > 0 ? escapeHtml(money(price)) : "Request"}${basePrice > price ? ` <del>${escapeHtml(money(basePrice))}</del>` : ""}</span>
-        </button>`;
-      }).join("")}
-    </div>
+  const status = String(trackStatus || customerTrackStatus(booking) || "").toLowerCase();
+  const isClosed = ["completed", "success", "done", "cancelled", "canceled", "failed", "rejected"].includes(status);
+  const item = normalizeArray(trackItems)[0] || {};
+  const configuredCategoryId = String(item.categoryId || booking.categoryId || booking.metadata?.categoryId || "").trim();
+  const categoryName = String(item.categoryName || booking.categoryName || booking.metadata?.categoryName || "").trim().toLowerCase();
+  const matchedCategory = !configuredCategoryId && categoryName
+    ? normalizeArray(activeCatalog().categories).concat(customerPersonalAssistantCategories()).find((category) => String(category.name || category.categoryName || "").trim().toLowerCase() === categoryName)
+    : null;
+  const categoryId = configuredCategoryId || String(matchedCategory?.id || matchedCategory?.categoryId || "");
+  const clusterId = String(booking.clusterId || booking.metadata?.clusterId || "").trim();
+  // Only expose Extend when the category has an active, scoped extension price rule.
+  const extendOptions = customerHomeCategoryPriceDurationOptions(categoryId, { availableFor: "extend", clusterId });
+  if (isClosed || !categoryId || !(booking.id || booking.bookingId) || !extendOptions.length) return "";
+  return `<button class="customer-track-extend-service" type="button" data-track-open-extension-sheet data-booking-id="${escapeHtml(booking.id || booking.bookingId || "")}" data-assignment-id="${escapeHtml(booking.assignmentId || "")}" data-category-id="${escapeHtml(categoryId)}" data-cluster-id="${escapeHtml(booking.clusterId || booking.metadata?.clusterId || "")}">Extend Service</button>`;
+}
+
+function customerTrackExtensionOptions(context = {}) {
+  const saved = normalizeArray(context.options);
+  if (saved.length) return saved;
+  return customerHomeCategoryPriceDurationOptions(context.categoryId, {
+    availableFor: "extend",
+    clusterId: context.clusterId
+  });
+}
+
+function customerTrackExtensionSelectedOption(context = {}, options = customerTrackExtensionOptions(context)) {
+  const selectedId = String(context.durationId || "");
+  return options.find((item) => String(item.id || item.categoryPriceRuleId || "") === selectedId) || null;
+}
+
+function customerTrackExtensionSheetHtml() {
+  const context = state.customerTrackExtensionSheet;
+  if (!context) return "";
+  const options = customerTrackExtensionOptions(context);
+  const loading = Boolean(context.loading);
+  const loadError = String(context.loadError || "").trim();
+  const selected = customerTrackExtensionSelectedOption(context, options);
+  const base = selected ? Number(selected.basePrice || 0) : 0;
+  const selling = selected ? Number(selected.sellingPrice ?? selected.price ?? base) : 0;
+  const discount = Math.max(0, base - selling);
+  const durationContent = loading
+    ? `<p class="customer-track-extension-loading">Loading durations...</p>`
+    : loadError
+      ? `<p class="customer-track-extension-loading is-error">${escapeHtml(loadError)}</p>`
+      : options.length
+        ? options.map((item) => {
+          const id = String(item.id || item.categoryPriceRuleId || "");
+          const active = Boolean(selected && id === String(selected.id || selected.categoryPriceRuleId || ""));
+          const optionBase = Number(item.basePrice || 0);
+          const optionSelling = Number(item.sellingPrice ?? item.price ?? optionBase);
+          return `<button class="customer-track-extension-duration ${active ? "selected" : ""}" type="button" data-track-extension-duration="${escapeHtml(id)}" aria-pressed="${active ? "true" : "false"}">
+            <b>${escapeHtml(item.label || customerTrackDurationCapsuleText(item.durationMinutes || item.timeDurationMinutes || 0))}</b>
+            <span><strong>${escapeHtml(customerTrackMoney(optionSelling, 2))}</strong>${optionBase > optionSelling ? `<del>${escapeHtml(customerTrackMoney(optionBase, 2))}</del>` : ""}</span>
+          </button>`;
+        }).join("")
+        : `<p class="customer-track-extension-loading">No extend duration is available for this booking.</p>`;
+  return `<div class="customer-payment-mode-backdrop" data-track-extension-backdrop>
+    <section class="customer-payment-mode-sheet customer-track-extension-sheet" role="dialog" aria-modal="true" aria-label="Extend service">
+      <button class="customer-payment-mode-handle" type="button" data-close-track-extension-sheet aria-label="Close"></button>
+      <h2>Select duration</h2>
+      <div class="customer-track-extension-duration-grid">${durationContent}</div>
+      <footer class="customer-track-extension-payment-bar">
+        <div class="customer-track-extension-amount" data-track-extension-amount aria-live="polite">${selected
+          ? `<strong>${escapeHtml(customerTrackMoney(selling, 2))}</strong>${base > selling ? `<del>${escapeHtml(customerTrackMoney(base, 2))}</del>` : ""}${discount ? `<small>Save ${escapeHtml(customerTrackMoney(discount, 2))}</small>` : ""}`
+          : `<span>Select duration</span>`}</div>
+        <button class="customer-track-extension-proceed" type="button" data-track-extension-proceed ${selected && !loading ? "" : "disabled"}>Proceed to Pay</button>
+      </footer>
+    </section>
   </div>`;
+}
+
+function renderCustomerTrackExtensionSheet() {
+  const previous = root.querySelector("[data-track-extension-backdrop]");
+  const template = document.createElement("template");
+  template.innerHTML = customerTrackExtensionSheetHtml().trim();
+  const next = template.content.firstElementChild;
+  if (!next) { previous?.remove(); return; }
+  if (previous) previous.replaceWith(next);
+  else root.appendChild(next);
+}
+function updateCustomerTrackExtensionSheetSelection() {
+  const context = state.customerTrackExtensionSheet;
+  const backdrop = root.querySelector("[data-track-extension-backdrop]");
+  if (!context || !backdrop) return;
+  const options = customerTrackExtensionOptions(context);
+  const selected = customerTrackExtensionSelectedOption(context, options);
+  context.selectedOption = selected;
+  backdrop.querySelectorAll("[data-track-extension-duration]").forEach((button) => {
+    const active = Boolean(selected && String(button.dataset.trackExtensionDuration || "") === String(selected.id || selected.categoryPriceRuleId || ""));
+    button.classList.toggle("selected", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  const amount = backdrop.querySelector("[data-track-extension-amount]");
+  const proceed = backdrop.querySelector("[data-track-extension-proceed]");
+  if (!amount || !proceed) return;
+  if (!selected) {
+    amount.innerHTML = "<span>Select duration</span>";
+    proceed.disabled = true;
+    return;
+  }
+  const base = Number(selected.basePrice || 0);
+  const selling = Number(selected.sellingPrice ?? selected.price ?? base);
+  const discount = Math.max(0, base - selling);
+  amount.innerHTML = `<strong>${escapeHtml(customerTrackMoney(selling, 2))}</strong>${base > selling ? `<del>${escapeHtml(customerTrackMoney(base, 2))}</del>` : ""}${discount ? `<small>Save ${escapeHtml(customerTrackMoney(discount, 2))}</small>` : ""}`;
+  proceed.disabled = false;
 }
 
 function customerTrackServiceRowHtml(item = {}, index = 0, booking = {}, trackItems = [], trackStatus = "") {
@@ -14699,9 +15269,8 @@ function customerTrackServiceRowHtml(item = {}, index = 0, booking = {}, trackIt
   const tone = customerTrackCategoryTone(category);
   const showCategoryPill = Boolean(item.hasStore && category);
   const durationText = customerTrackDurationCapsuleText(item.durationMinutes || 30);
-  const timeframe = customerTrackPlannedTimeRangeHtml(booking, trackItems);
+  const timeframe = customerTrackTaskTimeRangeHtml(booking, trackItems);
   const inlineTiming = [durationText, timeframe].filter(Boolean).join(" . ");
-  const extendHtml = "";
   return `<div class="track-service-row">
     <div class="track-service-image">${customerTrackServiceImageHtml(item, index)}</div>
     <div class="track-service-copy">
@@ -14715,7 +15284,6 @@ function customerTrackServiceRowHtml(item = {}, index = 0, booking = {}, trackIt
       ${basePriceText ? `<del>${escapeHtml(basePriceText)}</del>` : ""}
       <strong>${escapeHtml(priceText)}</strong>
     </div>
-    ${extendHtml}
   </div>`;
 }
 
@@ -15048,6 +15616,16 @@ function renderCustomerBookingConfirmed() {
   </section>`;
 }
 
+function renderCustomerExtensionConfirmed() {
+  root.innerHTML = `<section class="mobile-app customer-flow-screen customer-booking-confirmed-screen">
+    <div class="customer-booking-confirmed-card" role="status" aria-live="polite">
+      <div class="customer-booking-confirmed-check">${customerIcon("check")}</div>
+      <h1>Extend duration confirmed</h1>
+      <p>Your selected duration has been added to this booking.</p>
+    </div>
+  </section>`;
+}
+
 function renderCustomerPaymentResult() {
   const result = state.customerPaymentResult || {};
   const status = customerPaymentResultStatus(result);
@@ -15161,7 +15739,7 @@ function scheduleCustomerSupportErrorAutoHide() {
       node.classList.add("is-hiding");
       setTimeout(() => node.remove(), 180);
     }
-  }, 5000);
+  }, 2500);
 }
 
 function customerSupportMessageAttachmentsHtml(message = {}) {
@@ -15340,6 +15918,10 @@ async function handleCustomerSupportSubmit(event) {
 function renderCustomer() {
   ensureCustomerHistoryEntry();
   stopCustomerHomeCategoryImageSequence();
+  if (state.customerView !== "track") {
+    void syncPortalTrackingHub();
+    syncCustomerTrackFallbackRefresh();
+  }
   if (state.customerView !== "bookings") {
     detachCustomerBookingsScrollLoader();
   }
@@ -15360,6 +15942,7 @@ function renderCustomer() {
   else if (state.customerView === "search") renderCustomerSearch();
   else if (state.customerView === "savedLocations") renderCustomerSavedLocations();
   else if (state.customerView === "bookingConfirmed") renderCustomerBookingConfirmed();
+  else if (state.customerView === "extensionConfirmed") renderCustomerExtensionConfirmed();
   else if (state.customerView === "paymentResult") renderCustomerPaymentResult();
   else renderCustomerHome();
   root.insertAdjacentHTML("beforeend", customerCartReplaceModal());
@@ -15797,6 +16380,18 @@ function assistantTaskActualStartAt(task = {}) {
     timer.actualStartedAt,
     timer.startedAt
   );
+}
+
+function assistantTaskDisplayTimeRange(task = {}) {
+  const actualStart = assistantTaskActualStartAt(task);
+  const startAt = actualStart || assistantTaskStartAt(task);
+  const endAt = actualStart
+    ? (assistantTaskEndAt(task) || assistantTaskDurationEndAt(task))
+    : assistantTaskEndAt(task);
+  if (!startAt || Number.isNaN(startAt.getTime())) return "-";
+  const startText = `${formatPortalDateOnly(startAt)} - ${formatPortalTimeOnly(startAt)}`;
+  if (!endAt || Number.isNaN(endAt.getTime())) return startText;
+  return `${startText} - ${formatPortalTimeOnly(endAt)}`;
 }
 
 function assistantTaskDurationEndAt(task = {}) {
@@ -16472,7 +17067,6 @@ function assistantTrackFooterControls(task = {}) {
 }
 
 function assistantTrackBookingDetailsHtml(task = {}) {
-  const startAt = assistantTaskStartAt(task);
   const createdAt = task.createdAt ? new Date(task.createdAt) : null;
   const locations = Array.isArray(task.locations) ? task.locations : [];
   const payment = customerBookingPaymentState(task);
@@ -16490,7 +17084,7 @@ function assistantTrackBookingDetailsHtml(task = {}) {
       <div class="assistant-track-service-copy">
         <b>${escapeHtml(taskCategoryMasterDisplayName(task, taskCartItems(task)[0] || {}))}</b>
         <span>${escapeHtml(taskBookingTypeLabel(task))} � ${duration} mins</span>
-        <small>Start ${escapeHtml(formatPortalDateOnly(startAt))} - ${escapeHtml(formatPortalTimeOnly(startAt))}</small>
+        <small>Time ${escapeHtml(assistantTaskDisplayTimeRange(task))}</small>
       </div>
       <strong>${money(amount)}</strong>
     </div>
@@ -16692,7 +17286,20 @@ function updateCustomerTrackTotalTimeBadges() {
       const circumference = Number(element.style.getPropertyValue("--ring-circumference") || element.getAttribute("data-ring-circumference") || 0);
       if (circumference) element.style.setProperty("--ring-offset", String((circumference * (1 - info.progress)).toFixed(2)));
       const textTarget = element.querySelector("b");
-      if (textTarget) textTarget.textContent = info.text;
+      const isWorkingCountdown = element.classList.contains("customer-track-working-countdown-ring");
+      const isHomeCurrentCountdown = element.hasAttribute("data-customer-home-current-booking-countdown");
+      if (textTarget) {
+        textTarget.textContent = isWorkingCountdown || isHomeCurrentCountdown
+          ? customerTrackClockCountdownText(endAt, info.staticMinutes)
+          : info.text;
+      }
+      if (isWorkingCountdown) {
+        const workingCard = element.closest("[data-track-working-countdown]");
+        if (workingCard) {
+          workingCard.classList.remove("is-green", "is-yellow", "is-red");
+          workingCard.classList.add(`is-${info.tone}`);
+        }
+      }
       if (endAt && !Number.isNaN(endAt.getTime()) && Date.now() >= endAt.getTime()) {
         const bookingId = element.getAttribute("data-booking-id") || state.confirmedBooking?.id || state.confirmedBooking?.bookingId || "";
         if (bookingId && Date.now() >= customerTrackScrollActiveUntil) void syncPortalBookingStatusNow(bookingId, "customer_track_timer_expired");
@@ -16722,9 +17329,20 @@ function updateCustomerTrackTotalTimeBadges() {
   });
 }
 
+function updateCustomerHomeCurrentBookingTimers() {
+  document.querySelectorAll("[data-customer-home-current-booking-timer]").forEach((element) => {
+    const endAt = element.getAttribute("data-base-end-at") ? new Date(element.getAttribute("data-base-end-at")) : null;
+    if (!endAt || Number.isNaN(endAt.getTime())) return;
+    const staticMinutes = Math.max(0, Number(element.getAttribute("data-static-minutes") || 0));
+    const textTarget = element.querySelector("b");
+    if (textTarget) textTarget.textContent = customerTrackClockCountdownText(endAt, staticMinutes);
+  });
+}
+
 function updateCustomerCountdowns() {
   let needsRender = false;
   updateCustomerTrackTotalTimeBadges();
+  updateCustomerHomeCurrentBookingTimers();
   document.querySelectorAll("[data-customer-cancel-countdown]").forEach((element) => {
     const openAt = element.getAttribute("data-customer-cancel-open") ? new Date(element.getAttribute("data-customer-cancel-open")) : null;
     const autoAt = element.getAttribute("data-customer-cancel-auto") ? new Date(element.getAttribute("data-customer-cancel-auto")) : null;
@@ -16824,7 +17442,6 @@ function assistantTaskRows(tasks = assistantFilteredTasks()) {
   if (state.assistantTaskTab === "working") return assistantWorkingChatRows(tasks);
   if (!tasks.length) return assistantNoRecordState();
   return tasks.map((task) => {
-    const startAt = assistantTaskStartAt(task);
     const createdAt = task.createdAt ? new Date(task.createdAt) : null;
     const locations = Array.isArray(task.locations) ? task.locations : [];
     const isPendingTask = assistantTaskTabFor(task) === "accepted";
@@ -16840,8 +17457,8 @@ function assistantTaskRows(tasks = assistantFilteredTasks()) {
       <div class="task-app-time ${isPendingTask ? "pending-timer" : ""}">
         ${assistantTaskCountdown(task)}
         <div>
-          <span>Start</span>
-          <b>${escapeHtml(formatPortalDateOnly(startAt))} - ${escapeHtml(formatPortalTimeOnly(startAt))}</b>
+          <span>Time</span>
+          <b>${escapeHtml(assistantTaskDisplayTimeRange(task))}</b>
         </div>
       </div>
 
@@ -16895,7 +17512,7 @@ async function loadMe({ forceRefresh = false, preserveCart = false } = {}) {
   try {
     const meUrl = `/portal/${actor}/me`;
     const mePayload = await portalCachedGet(meUrl, { cacheKey: meUrl, forceRefresh });
-    state.user = mePayload.data.user;
+    state.user = { ...(mePayload.data.user || {}), ...(actor === "customer" && mePayload.data.wallet ? { wallet: mePayload.data.wallet } : {}) };
     state.customerId = actor === "customer" ? String(mePayload.data.customerId || state.customerId || "") : "";
     if (actor === "assistant") {
       const availability = mePayload.data.availability || null;
@@ -16908,10 +17525,12 @@ async function loadMe({ forceRefresh = false, preserveCart = false } = {}) {
         const tasks = await portalCachedGet(tasksUrl, { cacheKey: tasksUrl, forceRefresh });
         state.tasks = tasks.data || [];
         rebuildAssistantTaskTabIndex();
+      if (state.assistantIsOnline && assistantHasActiveTrackingTask()) startAssistantLocationPings();
       } catch (taskError) {
         if (Number(taskError.status) === 401) throw taskError;
         state.tasks = [];
         rebuildAssistantTaskTabIndex();
+      if (state.assistantIsOnline && assistantHasActiveTrackingTask()) startAssistantLocationPings();
       }
       startAssistantRealtime();
       writePortalSessionCache();
@@ -17023,9 +17642,20 @@ async function restoreAfterConnection() {
   }
   state.connectionLost = false;
   let restored = true;
-  if (state.token) {
+  if (!state.token && state.refreshToken) {
+    restored = await refreshPortalAccessToken();
+  }
+  if (restored && state.token && tokenIsExpired(state.token)) {
+    restored = await refreshPortalAccessToken();
+  }
+  if (!restored && !shouldPreservePortalSessionAfterRefreshFailure()) {
+    forcePortalSessionLogout("Your session has expired or your account is not active. Please login again.");
+    return;
+  }
+  if (restored && state.token) {
     restored = await loadMe({ forceRefresh: true }).catch(() => false);
-  } else if (actor === "customer") {
+    if (!restored && !state.token) restored = true;
+  } else if (restored && actor === "customer") {
     await loadCustomerLoginCategories({ forceRefresh: true }).catch(() => []);
   }
   if (!restored || state.connectionLost || navigator.onLine === false) {
@@ -17137,16 +17767,24 @@ async function keepCustomerScroll(callback) {
 }
 
 async function initPortal() {
-  if (state.token) {
-    if (tokenIsExpired(state.token)) {
-      clearPortalSession();
-      render();
-      return;
+  if (state.token || state.refreshToken) {
+    if (!state.token || tokenIsExpired(state.token)) {
+      const refreshed = await refreshPortalAccessToken();
+      if (!refreshed) {
+        if (shouldPreservePortalSessionAfterRefreshFailure()) {
+          state.connectionLost = true;
+          renderConnectionLostPage();
+          return;
+        }
+        clearPortalSession();
+        render();
+        return;
+      }
     }
     const hasCachedHome = actor === "assistant" ? true : Boolean(state.user || state.tasks.length || state.bookings.length);
     state.sessionRestoring = !hasCachedHome && actor !== "assistant";
     render();
-    const isValid = await loadMe();
+    const isValid = await loadMe({ forceRefresh: true });
     state.sessionRestoring = false;
     if (!isValid) {
       render();
@@ -17159,8 +17797,27 @@ async function initPortal() {
   render();
 }
 
-window.addEventListener("focus", reconcileCustomerRazorpayOnResume);
-window.addEventListener("pageshow", reconcileCustomerRazorpayOnResume);
+let portalSessionCheckPromise = null;
+function checkPortalSession() {
+  if (portalSessionCheckPromise) return portalSessionCheckPromise;
+  if ((!state.token && !state.refreshToken) || document.visibilityState === 'hidden' || navigator.onLine === false) return Promise.resolve();
+  portalSessionCheckPromise = (async () => {
+    if (!state.token || tokenIsExpired(state.token, 120)) {
+      if (!await refreshPortalAccessToken()) {
+        if (!shouldPreservePortalSessionAfterRefreshFailure()) forcePortalSessionLogout('Unable to sign in. Please contact support.');
+        return;
+      }
+    }
+    await api(`/portal/${actor}/session`);
+  })().catch(() => {}).finally(() => { portalSessionCheckPromise = null; });
+  return portalSessionCheckPromise;
+}
+window.addEventListener('storage', event => {
+  if (event.key === tokenKey && !event.newValue && (state.token || state.refreshToken)) forcePortalSessionLogout();
+});
+window.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void checkPortalSession(); });
+window.addEventListener("focus", () => { void checkPortalSession(); reconcileCustomerRazorpayOnResume(); });
+window.addEventListener("pageshow", () => { void refreshPortalSessionIfDue(); reconcileCustomerRazorpayOnResume(); });
 window.addEventListener("pagehide", writePortalSessionCache);
 window.addEventListener("blur", () => {
   if (activeCustomerRazorpayCheckout) customerRazorpayExternalIntentStarted = true;
@@ -17176,7 +17833,10 @@ window.addEventListener("zigo:native-resume", () => {
     void restoreAfterConnection();
     return;
   }
+  void refreshPortalSessionIfDue();
   startCustomerRealtime(true);
+  syncCustomerTrackFallbackRefresh();
+  void refreshCustomerTrackFallback();
   reconcileCustomerRazorpayOnResume();
 });
 document.addEventListener("visibilitychange", () => {
@@ -17185,8 +17845,26 @@ document.addEventListener("visibilitychange", () => {
     if (activeCustomerRazorpayCheckout) customerRazorpayExternalIntentStarted = true;
     return;
   }
+  void refreshPortalSessionIfDue();
+  startCustomerRealtime(true);
+  syncCustomerTrackFallbackRefresh();
+  void refreshCustomerTrackFallback();
   reconcileCustomerRazorpayOnResume();
 });
+
+function showPortalLoginError(error) {
+  if (![403, 404].includes(Number(error?.status))) { notify(error.message); return; }
+  document.querySelector('[data-login-unavailable-dialog]')?.remove();
+  const dialog = document.createElement('dialog');
+  dialog.dataset.loginUnavailableDialog = '';
+  dialog.className = 'portal-login-unavailable-dialog';
+  dialog.setAttribute('aria-labelledby', 'portalLoginUnavailableTitle');
+  dialog.innerHTML = '<h2 id="portalLoginUnavailableTitle">Unable to sign in</h2><p>We cannot sign you in right now. Please contact support for assistance.</p><button type="button" autofocus>OK</button>';
+  dialog.querySelector('button').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+}
 
 async function handleLoginSubmit(event) {
   event.preventDefault();
@@ -17202,16 +17880,15 @@ async function handleLoginSubmit(event) {
         method: "POST",
         body: JSON.stringify({ identifier: data.identifier, password: data.password })
       });
-      state.token = payload.data.token;
+      applyPortalTokenPair(payload.data || {});
       state.loginBusy = false;
-      localStorage.setItem(tokenKey, state.token);
       await loadMe({ forceRefresh: true });
       notify("Logged in.");
       render();
     } catch (error) {
       state.loginBusy = false;
       renderAssistantLogin();
-      notify(error.message);
+      showPortalLoginError(error);
     }
     return;
   }
@@ -17237,20 +17914,19 @@ async function handleLoginSubmit(event) {
         method: "POST",
         body: JSON.stringify({ email, identifier, code: data.code, password: data.password })
       });
-      state.token = payload.data.token;
+      applyPortalTokenPair(payload.data || {});
       state.assistantResetOpen = false;
       state.assistantResetCodeSent = false;
       state.assistantResetEmail = "";
       state.assistantResetIdentifier = "";
       state.loginBusy = false;
-      localStorage.setItem(tokenKey, state.token);
       await loadMe({ forceRefresh: true });
       notify("Password set. Logged in.");
       render();
     } catch (error) {
       state.loginBusy = false;
       renderAssistantLogin();
-      notify(error.message);
+      showPortalLoginError(error);
     }
     return;
   }
@@ -17287,7 +17963,7 @@ async function handleLoginSubmit(event) {
     if (otpCode.length !== 6) throw new Error("Enter 6 digit verification code.");
     notify("Verifying code...");
     const payload = await api(`/portal/${actor}/code/verify`, { method: "POST", body: JSON.stringify({ phone: phone || data.phone, code: otpCode }) });
-    state.token = payload.data.token;
+    applyPortalTokenPair(payload.data || {});
     state.codeSent = false;
     state.loginPhone = "";
     state.otpResendAvailableAt = 0;
@@ -17299,13 +17975,12 @@ async function handleLoginSubmit(event) {
       state.customerLocationPickerPurpose = "";
       state.locationConfirmReturnStep = "manual";
     }
-    localStorage.setItem(tokenKey, state.token);
     await loadMe({ forceRefresh: true });
     render();
   } catch (error) {
     state.loginBusy = false;
     if (actor === "customer") renderCustomerLogin();
-    notify(error.message);
+    showPortalLoginError(error);
   }
 }
 
@@ -17768,12 +18443,15 @@ async function sendAssistantLocationPing({ silent = true } = {}) {
 }
 
 function startAssistantLocationPings() {
-  if (actor !== "assistant" || assistantLocationPingTimer) return;
+  if (actor !== "assistant") return;
+  // Publish immediately on online/task-start; the interval alone left Track Booking stale.
+  void sendAssistantLocationPing({ silent: true });
+  if (assistantLocationPingTimer) return;
   assistantLocationPingTimer = setInterval(() => {
     if (document.hidden) return;
     if (!assistantHasActiveTrackingTask() && !state.assistantCurrentLocation) return;
     sendAssistantLocationPing({ silent: true });
-  }, 20000);
+  }, 12000);
 }
 
 async function validateAndPickCustomerLocation(candidate = {}, options = {}) {
@@ -18445,6 +19123,8 @@ async function completeCustomerLocationSelection(form) {
     }
     const recorded = await api("/portal/customer/unserviceable-locations", {
       method: "POST",
+      suppressSessionLogout: true,
+      headers: state.token ? { "X-Portal-Authorization": `Bearer ${state.token}` } : {},
       body: JSON.stringify({
         title: locationTitle,
         address: addressText,
@@ -18730,6 +19410,14 @@ async function customerSaveBookingLocationAsRecent(location = {}) {
   });
 }
 
+async function validateCustomerCartLocationRoute(stops) {
+  const clusterIds = [...new Set(stops.map((stop) => String(stop.clusterId || "")).filter(Boolean))];
+  if (!clusterIds.length) throw new Error("Pick a serviceable location before booking.");
+  const locations = stops.map((stop) => ({ address: stop.address || stop.addressText || "", latitude: Number(stop.latitude), longitude: Number(stop.longitude) }));
+  const result = await api("/portal/customer/locations/validate-route", { method: "POST", body: JSON.stringify({ locations }) });
+  if (!result.data?.isServiceable) throw new Error("Booking locations must be open and in the same city or an enabled service region.");
+}
+
 async function confirmCustomerBooking() {
   if (!state.cart.length) throw new Error("Add at least one service.");
   const selectedLocation = state.selectedLocation;
@@ -18738,8 +19426,7 @@ async function confirmCustomerBooking() {
   const locationStops = customerCartLocationStopsForPayload();
   if (!locationStops.length) throw new Error("Add a start point before booking.");
   if (locationStops.length > locationRequirement.maxLocations) throw new Error(`Maximum ${locationRequirement.maxLocations} locations allowed for this service.`);
-  const uniqueClusterIds = [...new Set(locationStops.map((stop) => String(stop.clusterId || "")).filter(Boolean))];
-  if (uniqueClusterIds.length > 1) throw new Error("All booking locations must be in the same active cluster.");
+  await validateCustomerCartLocationRoute(locationStops);
   const primaryLocation = locationStops[0];
   ensureCustomerBookingTypeAllowed();
   const plan = customerCartBookingTypePlan();
@@ -18973,6 +19660,24 @@ async function confirmCustomerBooking() {
   }, 2000);
 }
 
+function showCustomerExtensionConfirmed(bookingId = "") {
+  const id = String(bookingId || state.confirmedBooking?.id || state.confirmedBooking?.bookingId || "").trim();
+  if (!id) return;
+  clearTimeout(customerBookingConfirmedTimer);
+  state.customerPaymentResult = null;
+  state.customerPaymentSheetOpen = false;
+  state.customerPaymentBusy = false;
+  replaceCustomerHistoryView("extensionConfirmed");
+  render();
+  customerBookingConfirmedTimer = setTimeout(async () => {
+    if (state.customerView !== "extensionConfirmed") return;
+    const updated = await loadCustomerTrackedBooking(id, { silent: true });
+    if (updated) state.confirmedBooking = updated;
+    replaceCustomerHistoryView("track");
+    render();
+  }, 2000);
+}
+
 function fileToDataBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -19163,7 +19868,6 @@ async function handleCustomerTrackReviewSubmit(event) {
   try {
     if (!bookingId) throw new Error("Booking not found for review.");
     const booking = customerTrackCurrentBooking(bookingId);
-    if (customerTrackIsPaidCompleted(booking)) throw new Error("Review is closed for paid completed bookings.");
     if (submitter) {
       submitter.disabled = true;
       submitter.textContent = "Saving...";
@@ -20106,6 +20810,10 @@ document.addEventListener("click", async (event) => {
     const tipState = customerTrackTipState();
     const selectedAmount = Number(trackTipAmountButton.dataset.trackTipAmount || 0);
     const shouldClear = Number(tipState.amount || 0) === selectedAmount;
+    if (!shouldClear) {
+      await openCustomerPaymentMethodSheet({ bookingId: customerTrackTipBookingKey(customerTrackCurrentBooking()), amount: selectedAmount, addOn: { kind: "tip" } });
+      return;
+    }
     try {
       await persistCustomerTrackTipAmount(shouldClear ? 0 : selectedAmount);
       tipState.amount = shouldClear ? 0 : selectedAmount;
@@ -20206,6 +20914,22 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const trackItemInfoButton = event.target.closest("[data-track-item-info]");
+  if (trackItemInfoButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    root.querySelector("[data-track-item-modal]")?.classList.remove("hidden");
+    return;
+  }
+
+  const trackItemCloseButton = event.target.closest("[data-track-item-close]");
+  if (trackItemCloseButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    trackItemCloseButton.closest("[data-track-item-modal]")?.classList.add("hidden");
+    return;
+  }
+
   const trackTaxInfoButton = event.target.closest("[data-track-tax-info]");
   if (trackTaxInfoButton) {
     event.preventDefault();
@@ -20256,6 +20980,47 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const openTrackExtensionSheet = event.target.closest("[data-track-open-extension-sheet]");
+  if (openTrackExtensionSheet) {
+    event.preventDefault();
+    const categoryId = String(openTrackExtensionSheet.dataset.categoryId || "").trim();
+    const clusterId = String(openTrackExtensionSheet.dataset.clusterId || "").trim();
+    state.customerTrackExtensionSheet = { bookingId: openTrackExtensionSheet.dataset.bookingId || "", assignmentId: openTrackExtensionSheet.dataset.assignmentId || "", categoryId, clusterId, durationId: "", options: [], selectedOption: null, loading: true, loadError: "" };
+    renderCustomerTrackExtensionSheet();
+    try {
+      const options = await refreshCustomerCategoryDurationData(categoryId, "extend", clusterId);
+      state.customerTrackExtensionSheet.loading = false;
+      state.customerTrackExtensionSheet.options = options;
+      state.customerTrackExtensionSheet.loadError = options.length ? "" : "No extend duration is available for this booking.";
+    } catch {
+      state.customerTrackExtensionSheet.loading = false;
+      state.customerTrackExtensionSheet.loadError = "Unable to load extend durations. Please try again.";
+    }
+    renderCustomerTrackExtensionSheet();
+    return;
+  }  if (event.target.closest("[data-close-track-extension-sheet]") || (event.target.closest("[data-track-extension-backdrop]") === event.target)) {
+    event.preventDefault(); state.customerTrackExtensionSheet = null; root.querySelectorAll("[data-track-extension-backdrop]").forEach((sheet) => sheet.remove()); return;
+  }
+  const extensionDuration = event.target.closest("[data-track-extension-duration]");
+  if (extensionDuration) {
+    event.preventDefault();
+    const context = state.customerTrackExtensionSheet;
+    if (!context) return;
+    context.durationId = extensionDuration.dataset.trackExtensionDuration || "";
+    context.selectedOption = customerTrackExtensionSelectedOption(context);
+    updateCustomerTrackExtensionSheetSelection();
+    return;
+  }
+  const extensionProceed = event.target.closest("[data-track-extension-proceed]");
+  if (extensionProceed) {
+    event.preventDefault();
+    const context = state.customerTrackExtensionSheet || {};
+    if (!context.durationId) return;
+    const option = customerTrackExtensionSelectedOption(context);
+    if (!option) return; state.customerTrackExtensionSheet = null; await openCustomerPaymentMethodSheet({ bookingId: context.bookingId, assignmentId: context.assignmentId, amount: Number(option.sellingPrice ?? option.price ?? 0), addOn: { kind: "extension", durationMinutes: Number(option.durationMinutes || option.timeDurationMinutes || 0) } }); return;
+  }
+  const extensionPaymentMethod = event.target.closest("[data-track-extension-payment-method]");
+  if (extensionPaymentMethod) { event.preventDefault(); const context=state.customerTrackExtensionSheet || {}; const option=customerHomeCategoryPriceDurationOptions(context.categoryId,{availableFor:"extend"}).find((item)=>String(item.id||item.categoryPriceRuleId||"")===String(context.durationId||"")) || customerHomeCategoryPriceDurationOptions(context.categoryId,{availableFor:"extend"})[0]; if(option) { state.customerTrackExtensionSheet=null; await openCustomerPaymentMethodSheet({ bookingId:context.bookingId, assignmentId:context.assignmentId, amount:Number(option.sellingPrice??option.price??0), addOn:{kind:"extension",durationMinutes:Number(option.durationMinutes||option.timeDurationMinutes||0)} }); } return; }
   const trackExtendDuration = event.target.closest("[data-customer-track-extend-duration]");
   if (trackExtendDuration) {
     event.preventDefault();
@@ -20264,6 +21029,9 @@ document.addEventListener("click", async (event) => {
     const bookingId = trackExtendDuration.dataset.customerTrackExtendBookingId || "";
     const assignmentId = trackExtendDuration.dataset.customerTrackExtendAssignmentId || "";
     if (!bookingId || !requestedMinutes) return;
+    const extensionOption = customerHomeCategoryPriceDurationOptions(String(customerTrackBookingItems(customerTrackCurrentBooking(bookingId))[0]?.categoryId || customerTrackCurrentBooking(bookingId).categoryId || ""), { availableFor: "extend" }).find((item) => Math.round(Number(item.durationMinutes || item.timeDurationMinutes || 0)) === requestedMinutes);
+    await openCustomerPaymentMethodSheet({ bookingId, assignmentId, amount: Number(extensionOption?.sellingPrice || 0), addOn: { kind: "extension", durationMinutes: requestedMinutes } });
+    return;
     const originalHtml = trackExtendDuration.innerHTML;
     try {
       trackExtendDuration.disabled = true;
@@ -20429,6 +21197,13 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const useCustomerWallet = event.target.closest("[data-use-customer-wallet]");
+  if (useCustomerWallet) {
+    state.customerUseWallet = Boolean(useCustomerWallet.checked);
+    state.customerRazorpayPayment = null;
+    renderCustomer();
+    return;
+  }
   const reviewPaymentModeButton = event.target.closest("[data-select-review-payment-mode]");
   if (reviewPaymentModeButton) {
     event.preventDefault();
@@ -20444,8 +21219,12 @@ document.addEventListener("click", async (event) => {
           await submitCustomerTrackCashPayment(paymentContext);
           state.customerPaymentBusy = false;
           closeCustomerPaymentMethodSheet();
-          renderTrackRealtimeUpdate();
-          notify("Cash payment request sent to the assistant.");
+          if (String(paymentContext?.addOn?.kind || "").toLowerCase() === "extension") {
+            showCustomerExtensionConfirmed(paymentContext.bookingId);
+          } else {
+            renderTrackRealtimeUpdate();
+            notify("Cash payment request sent to the assistant.");
+          }
         } catch (error) {
           state.customerPaymentBusy = false;
           refreshCustomerPaymentSheetOnly();
@@ -20469,6 +21248,9 @@ document.addEventListener("click", async (event) => {
         state.customerPaymentBusy = true;
         setCustomerPaymentSheetBusyUi(true);
         const payment = await startCustomerRazorpayCheckout(paymentContext);
+        if (paymentContext?.addOn?.kind && payment.addOnId) {
+          await api(`/portal/customer/bookings/${encodeURIComponent(paymentContext.bookingId)}/add-ons/${encodeURIComponent(payment.addOnId)}/complete`, { method: "POST", suppressSessionLogout: true });
+        }
         state.selectedPayment = "razorpay";
         state.customerRazorpayPayment = payment;
         state.customerPaymentSheetOpen = false;
@@ -20477,7 +21259,11 @@ document.addEventListener("click", async (event) => {
           clearPortalResourceCache("/portal/customer/bookings");
           await loadCustomerTrackedBooking(paymentContext.bookingId, { silent: true });
         }
-        showCustomerPaymentResult(payment);
+        if (String(paymentContext?.addOn?.kind || "").toLowerCase() === "extension") {
+          showCustomerExtensionConfirmed(paymentContext.bookingId);
+        } else {
+          showCustomerPaymentResult(payment);
+        }
       } catch (error) {
         const message = error.message || "Payment failed.";
         state.customerPaymentBusy = false;
@@ -20977,8 +21763,7 @@ document.addEventListener("click", async (event) => {
   if (confirmLocationBackButton) {
     event.preventDefault();
     event.stopPropagation();
-    if (customerHistoryHasPrevious()) window.history.back();
-    else backFromCustomerConfirmLocation();
+    backFromCustomerConfirmLocation();
     return;
   }
 
@@ -20988,12 +21773,7 @@ document.addEventListener("click", async (event) => {
     event.stopPropagation();
     const requestedStep = locationStepButton.dataset.locationStep || "permission";
     if (locationStepButton.closest(".location-confirm-screen")) {
-      state.customerView = "home";
-      state.customerLocationPickerSheetOpen = true;
-      state.customerLocationPickerClosing = false;
-      state.locationStep = requestedStep === "manual" ? "manual" : "permission";
-      renderCustomer();
-      if (state.locationStep === "manual") setTimeout(focusLocationSearchInput, 80);
+      backFromCustomerConfirmLocation();
       return;
     }
     state.locationStep = requestedStep === "manual" || requestedStep === "options" || requestedStep === "permission"
@@ -21242,6 +22022,18 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const reviewBookingBackButton = event.target.closest("[data-review-booking-back]");
+  if (reviewBookingBackButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    state.customerLocationPickerSheetOpen = false;
+    state.customerLocationPickerClosing = false;
+    state.customerLocationPickerPurpose = "";
+    customerLocationPickerSuppressUntil = Date.now() + 250;
+    replaceCustomerHistoryView("home");
+    render();
+    return;
+  }
   const viewButton = event.target.closest("[data-view]");
   if (viewButton) {
     event.preventDefault();
@@ -21361,7 +22153,13 @@ document.addEventListener("click", async (event) => {
     event.stopPropagation();
     state.customerHomeCategorySheetId = openHomeCategorySheetButton.dataset.openHomeCategoryDetail || "";
     const sheetCategory = customerHomeCategoryById(state.customerHomeCategorySheetId) || {};
-    state.customerHomeCategorySheetServiceId = customerHomeCategorySheetServiceId(sheetCategory);
+    state.customerHomeCategorySheetServiceId = String(openHomeCategorySheetButton.dataset.homeCategoryServiceId || customerHomeCategorySheetServiceId(sheetCategory));
+    const allSheetCategories = customerHomeCategories({ includeHiddenHome: true });
+    state.customerHomeCategorySheetCategoryIds = allSheetCategories.filter((category) => String(category.serviceMasterId || category.service_master_id || category.config?.categorySettings?.serviceMasterId || categoryServiceId(category) || "") === state.customerHomeCategorySheetServiceId).map((category) => String(category.id || "")).filter(Boolean);
+    const sheetCategories = customerHomeCategorySheetCategories();
+    if (!sheetCategories.some((category) => String(category.id || "") === String(state.customerHomeCategorySheetId || ""))) {
+      state.customerHomeCategorySheetId = String(sheetCategories[0]?.id || "");
+    }
     state.customerHomeCategorySheetExpanded = false;
     state.customerHomeCategorySheetOpen = true;
     invalidateCustomerAvailabilityDecision();
@@ -21552,21 +22350,14 @@ document.addEventListener("click", async (event) => {
   if (closeHomeScheduleSheetButton) {
     event.preventDefault();
     event.stopPropagation();
-    const scheduleCategoryId = state.customerHomeScheduleSheetCategoryId || state.customerHomeCategorySheetId || "";
     state.customerHomeScheduleSheetOpen = false;
-    if (state.customerView === "homeSchedule") {
-      state.customerView = "home";
-      state.customerHomeCategorySheetId = scheduleCategoryId;
-      state.customerHomeScheduleSheetCategoryId = "";
-      state.customerHomeCategorySheetOpen = true;
-      state.customerHomeCategorySheetExpanded = false;
-      state.selectedHomeScheduleDurationId = "";
-      state.selectedHomeScheduleTime = "";
-    } else {
-      state.customerHomeScheduleSheetCategoryId = "";
-    }
+    state.customerHomeScheduleSheetCategoryId = "";
+    state.customerHomeCategorySheetOpen = false;
+    state.customerHomeCategorySheetExpanded = false;
+    state.selectedHomeScheduleDurationId = "";
+    state.selectedHomeScheduleTime = "";
+    replaceCustomerHistoryView("home");
     render();
-    if (state.customerHomeCategorySheetOpen) requestAnimationFrame(customerCenterHomeCategorySheetSelection);
     return;
   }
 
@@ -22348,6 +23139,14 @@ document.addEventListener("click", async (event) => {
       confirmButton.textContent = "Confirming...";
       await confirmCustomerBooking();
     } catch (error) {
+      if (error.code === "checkout_dismissed") {
+        clearPendingCustomerRazorpayOrder(error.razorpayOrderId || "");
+        state.customerRazorpayPayment = null;
+        state.customerPaymentBusy = false;
+        state.customerPaymentSheetOpen = false;
+        renderCart();
+        return;
+      }
       if (error.code === "payment_pending") {
         showCustomerPaymentResult({
           status: "pending",
@@ -22623,5 +23422,6 @@ document.addEventListener("click", async (event) => {
 
 setInterval(updateAssistantCountdowns, 1000);
 setInterval(updateCustomerCountdowns, 1000);
+setInterval(() => { void checkPortalSession(); }, 30_000);
 
 initPortal();

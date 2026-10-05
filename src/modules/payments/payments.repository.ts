@@ -137,12 +137,12 @@ function safeJson(value: unknown) {
 }
 
 async function updateBookingPaymentFromRazorpay(client: Queryable, orderId: string, statusCode: string, details: Record<string, unknown>) {
-  const payment = await client.query<{ bookingId: string | null }>(
-    `select service_request_id as "bookingId" from zigo.razorpay_payments where provider_order_id = $1 limit 1`,
+  const payment = await client.query<{ bookingId: string | null; metadata: Record<string, unknown> | null }>(`select service_request_id as "bookingId", metadata from zigo.razorpay_payments where provider_order_id = $1 limit 1`,
     [orderId]
   );
   const bookingId = payment.rows[0]?.bookingId;
-  if (!bookingId) return null;
+  const paymentMetadata = payment.rows[0]?.metadata && typeof payment.rows[0].metadata === "object" ? payment.rows[0].metadata : {};
+  if ((paymentMetadata as Record<string, unknown>).addOnKind || !bookingId) return null;
   const paymentStatus = bookingPaymentStatus(statusCode);
   const isPaid = paymentStatus === "paid";
   const canonicalPaymentDetails = {
@@ -215,7 +215,10 @@ async function createUniquePaymentBookingReference(input: {
   categoryCode?: string | null;
   categoryName?: string | null;
 }) {
-  const preferred = String(input.bookingReference || input.receipt || "").trim();
+  // An add-on uses a unique provider receipt but retains the original booking reference in notes.
+  const explicitReceipt = String(input.receipt || "").trim();
+  if (explicitReceipt) return explicitReceipt.slice(0, 40);
+  const preferred = String(input.bookingReference || "").trim();
   if (isZigoBookingReference(preferred)) return preferred;
   const serviceTypeCode = zigoServiceTypeCode(input);
   for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -276,6 +279,7 @@ export async function createRazorpayPaymentOrder(input: {
     if (!ownedBooking.rows.length) throw new HttpError(404, "Booking was not found for this customer.");
   }
   const receipt = await createUniquePaymentBookingReference(input);
+  const bookingReference = String(input.bookingReference || input.receipt || receipt).trim() || receipt;
   try {
     const order = await getRazorpayClient().orders.create({
       amount,
@@ -285,7 +289,7 @@ export async function createRazorpayPaymentOrder(input: {
         source: "zigo",
         customerUserId: input.customerUserId || "",
         bookingId: input.bookingId || "",
-        bookingReference: receipt
+        bookingReference
       }
     });
     await pool.query(
@@ -456,7 +460,7 @@ export async function processRazorpayWebhook(rawBody: Buffer, signature = "") {
     );
     if (!inserted.rows.length) {
       await client.query("commit");
-      return { duplicate: true, event: eventName };
+      return { duplicate: true, event: eventName, orderId, paymentId };
     }
     let booking = null;
     if (eventName.startsWith("payment.") && payment) {

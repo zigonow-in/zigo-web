@@ -1,4 +1,6 @@
 import bcrypt from "bcryptjs";
+import { requireAdminAuth } from "../../http/auth.js";
+import { isAccountAccessBlocked } from "./accountAccess.js";
 import { Router, type Request } from "express";
 import { z } from "zod";
 import { HttpError } from "../../http/errors.js";
@@ -7,6 +9,7 @@ import { findUserById, findUsersForLogin, listUserRoles, type LoginUser, type Ro
 import { signAdminAccessToken, signAdminRefreshToken, verifyAdminRefreshToken } from "./token.service.js";
 
 export const authRouter = Router();
+authRouter.get('/session', requireAdminAuth, (_req, res) => { res.status(204).send(); });
 
 const adminRoleCodes = new Set(["admin", "super_admin", "manager", "staff"]);
 
@@ -32,7 +35,7 @@ const loginLimiter = rateLimit({
 });
 
 function isDisabledAccount(user: LoginUser | null): user is null {
-  return !user || ["disabled", "suspended", "blocked", "inactive"].includes(String(user.accountStatus || "").toLowerCase());
+  return !user || isAccountAccessBlocked({ ...user.metadata, accountStatus: user.accountStatus });
 }
 
 function adminRolesOnly(roles: RoleSummary[]) {
@@ -90,7 +93,10 @@ authRouter.post("/login", loginLimiter, async (req, res, next) => {
       throw new HttpError(401, "Invalid login credentials");
     }
 
-    res.json({ data: adminSessionPayload(authenticatedUser, authenticatedRoles) });
+    const liveUser = await findUserById(authenticatedUser.id);
+    if (isDisabledAccount(liveUser)) throw new HttpError(401, "Invalid login credentials");
+    authenticatedRoles = await listUserRoles(liveUser.id);
+    res.json({ data: adminSessionPayload(liveUser, authenticatedRoles) });
   } catch (error) {
     next(error);
   }

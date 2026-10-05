@@ -2,6 +2,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { requirePermission, requireSuperAdmin } from "../../http/auth.js";
 import { HttpError } from "../../http/errors.js";
+import { listMarketTypes, createMarketType, updateMarketType, deleteMarketType } from "./marketTypes.repository.js";
+import { listLocationHierarchy, listZonePolygons, saveLocationHierarchy, deleteLocationHierarchy, type LocationLevel } from "./locationHierarchy.repository.js";
 import {
   createCategory,
   createCategoryServiceMaster,
@@ -576,6 +578,34 @@ mastersRouter.get("/clusters/report", requirePermission("locations.view"), async
 });
 
 crudRoutes("/states", "locations", stateBodySchema, { list: listStates, create: createState, update: updateState, remove: deleteState });
+crudRoutes("/market-types", "locations", z.object({
+  name: z.string().trim().min(2).max(160),
+  code: z.string().trim().min(2).max(100),
+  description: z.string().trim().max(5000).default(""),
+  color: z.string().regex(/^#[0-9a-f]{6}$/i),
+  isActive: z.boolean().default(true)
+}), { list: listMarketTypes, create: createMarketType, update: updateMarketType, remove: deleteMarketType });
+const locationHierarchySchema = z.object({
+  marketTypeId: z.string().uuid().nullable().optional(),
+  marketTypeIds: z.array(z.string().uuid()).max(100).optional(),
+  parentId: z.string().uuid(),
+  name: z.string().trim().min(2).max(160),
+  code: z.string().trim().min(2).max(100),
+  polygonDescription: z.string().trim().min(1).max(100000),
+  isOpen: z.boolean().default(false)
+});
+mastersRouter.get("/location-hierarchy/zones/:id/polygons", requirePermission("locations.view"), async (req, res, next) => {
+  try { res.json({ data: await listZonePolygons(z.string().uuid().parse(req.params.id)) }); }
+  catch (error) { next(error); }
+});
+for (const level of ["zones", "clusters", "micro-markets", "nano-markets"] as LocationLevel[]) {
+  crudRoutes(`/location-hierarchy/${level}`, "locations", locationHierarchySchema, {
+    list: () => listLocationHierarchy(level),
+    create: (body) => saveLocationHierarchy(level, body),
+    update: (id, body) => saveLocationHierarchy(level, body, id),
+    remove: (id, userId) => deleteLocationHierarchy(level, id, userId)
+  }, { superAdminDelete: true });
+}
 crudRoutes("/cities", "locations", cityBodySchema, { list: listCities, create: createCity, update: updateCity, remove: deleteCity });
 crudRoutes("/zones", "locations", zoneBodySchema, { list: listZones, create: createZone, update: updateZone, remove: deleteZone });
 crudRoutes("/clusters", "locations", clusterBodySchema, { list: listClusters, create: createCluster, update: updateCluster, remove: deleteCluster }, { superAdminDelete: true });

@@ -4,6 +4,7 @@ import { pool } from "./db/pool.js";
 import { env } from "./config/env.js";
 import { startBookingOrchestrationWorker, stopBookingOrchestrationWorker } from "./modules/operations/bookingOrchestrator.js";
 import { startBookingInvoiceEmailWorker, stopBookingInvoiceEmailWorker } from "./modules/portal/bookingInvoice.worker.js";
+import { startTrackingOutboxWorker, stopTrackingOutboxWorker } from "./modules/operations/trackingOutbox.js";
 
 const app = createApp();
 const server = createServer(app);
@@ -16,6 +17,7 @@ server.listen(env.PORT, () => {
   console.log(`Zigo backend listening on port ${env.PORT}`);
   startBookingOrchestrationWorker();
   startBookingInvoiceEmailWorker();
+  startTrackingOutboxWorker();
 });
 
 async function shutdown(signal: NodeJS.Signals) {
@@ -24,6 +26,7 @@ async function shutdown(signal: NodeJS.Signals) {
   server.close(async () => {
     stopBookingOrchestrationWorker();
     stopBookingInvoiceEmailWorker();
+    stopTrackingOutboxWorker();
     await pool.end();
     process.exit(0);
   });

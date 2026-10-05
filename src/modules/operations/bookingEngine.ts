@@ -489,24 +489,24 @@ export async function runBookingOrchestrationCycle(client: Queryable = pool, lim
           ta.assistant_id,
           ta.id as assignment_id,
           coalesce(
-            nullif(sr.metadata->'taskTimer'->>'taskEndAt', '')::timestamptz,
-            nullif(sr.metadata->>'actualTaskEndAt', '')::timestamptz,
+            sr.booking_end_at,
             nullif(sr.metadata->>'taskEndAt', '')::timestamptz,
-            sr.booking_end_at
+            nullif(sr.metadata->>'actualTaskEndAt', '')::timestamptz,
+            nullif(sr.metadata->'taskTimer'->>'taskEndAt', '')::timestamptz
           ) as booking_end_at
         from zigo.service_requests sr
         join zigo.task_assignments ta on ta.id = sr.accepted_assignment_id
         where coalesce(
-            nullif(sr.metadata->'taskTimer'->>'taskEndAt', '')::timestamptz,
-            nullif(sr.metadata->>'actualTaskEndAt', '')::timestamptz,
+            sr.booking_end_at,
             nullif(sr.metadata->>'taskEndAt', '')::timestamptz,
-            sr.booking_end_at
+            nullif(sr.metadata->>'actualTaskEndAt', '')::timestamptz,
+            nullif(sr.metadata->'taskTimer'->>'taskEndAt', '')::timestamptz
           ) is not null
           and coalesce(
-            nullif(sr.metadata->'taskTimer'->>'taskEndAt', '')::timestamptz,
-            nullif(sr.metadata->>'actualTaskEndAt', '')::timestamptz,
+            sr.booking_end_at,
             nullif(sr.metadata->>'taskEndAt', '')::timestamptz,
-            sr.booking_end_at
+            nullif(sr.metadata->>'actualTaskEndAt', '')::timestamptz,
+            nullif(sr.metadata->'taskTimer'->>'taskEndAt', '')::timestamptz
           ) <= now()
           and lower(coalesce(sr.status_code, '')) in ('in_progress', 'working')
           and lower(coalesce(ta.status_code, '')) in ('in_progress', 'working')
@@ -918,11 +918,11 @@ export async function getNextBookingOrchestrationDueAt(client: Queryable = pool,
           and sr.actual_task_started_at is null
         union all
         select min(coalesce(
-          nullif(sr.metadata->'taskTimer'->>'taskEndAt', '')::timestamptz,
-          nullif(sr.metadata->>'actualTaskEndAt', '')::timestamptz,
-          nullif(sr.metadata->>'taskEndAt', '')::timestamptz,
-          sr.booking_end_at
-        )) as due_at
+            sr.booking_end_at,
+            nullif(sr.metadata->>'taskEndAt', '')::timestamptz,
+            nullif(sr.metadata->>'actualTaskEndAt', '')::timestamptz,
+            nullif(sr.metadata->'taskTimer'->>'taskEndAt', '')::timestamptz
+          )) as due_at
         from zigo.service_requests sr
         join zigo.task_assignments ta on ta.id = sr.accepted_assignment_id
         where lower(coalesce(sr.status_code, '')) in ('in_progress', 'working')

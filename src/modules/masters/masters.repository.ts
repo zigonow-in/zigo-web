@@ -1,5 +1,6 @@
 import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
+import { deleteLocationHierarchy } from "./locationHierarchy.repository.js";
 
 type BaseMasterInput = {
   code: string;
@@ -964,7 +965,7 @@ export async function updateZone(id: string, input: BaseMasterInput & { cityId?:
 }
 
 export async function deleteZone(id: string, userId: string) {
-  return softDelete("zigo.zones", id, userId);
+  return deleteLocationHierarchy("zones", id, userId);
 }
 
 export async function listClusters() {
@@ -1203,7 +1204,7 @@ export async function updateCluster(
 }
 
 export async function deleteCluster(id: string, userId: string) {
-  return softDelete("zigo.clusters", id, userId);
+  return deleteLocationHierarchy("clusters", id, userId);
 }
 
 export async function listServices() {

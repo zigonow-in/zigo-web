@@ -2,6 +2,8 @@ import { pool } from "../../db/pool.js";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../http/errors.js";
 import { isPointInPolygon, parseWktPolygon } from "../../utils/geofence.js";
+import { locationMarketsAreOpen, locationClustersCanInterserve } from "../masters/locationHierarchy.repository.js";
+import { requestOlaJson } from "../maps/olaMaps.service.js";
 import { generateZigoBookingReference, isZigoBookingReference, zigoServiceTypeCode } from "../../utils/bookingReference.js";
 import { calculateClusterCategoryPricing } from "../pricing/pricing.js";
 import { quotePriceMaster, resolveBookingEngineRuleForContext } from "../masters/masters.repository.js";
@@ -37,8 +39,6 @@ async function ensureCustomerDisputeSchema(client = pool) {
     create index if not exists idx_customer_disputes_customer on zigo.customer_disputes(customer_user_id, created_at desc);
   `);
 }
-const locationProviderTimeoutMs = 3500;
-let olaAccessToken = null;
 const assistantOnlineStatusCodes = new Set(["available", "online", "active", "working"]);
 const notServiceableMessage = "This location is not serviceable yet. Please choose another location within an active cluster.";
 async function ensureCustomerProfilesForSearch(db, term) {
@@ -709,6 +709,8 @@ export async function validateBookingLocation(input) {
         cl.name,
         cl.code,
         cl.polygon_description as "polygonDescription",
+        z.polygon_description as "zonePolygonDescription",
+        z.is_open as "zoneIsOpen",
         cl.metadata,
         cl.priority,
         city.name as "cityName",
@@ -741,6 +743,11 @@ export async function validateBookingLocation(input) {
             : false;
         const hasConfiguredBoundary = polygon.length >= 4 || (Number.isFinite(serviceRangeMeters) && serviceRangeMeters > 0 && rangeCenter);
         if (!hasConfiguredBoundary || (!insidePolygon && !withinRange))
+            continue;
+        const zonePolygon = parseWktPolygon(cluster.zonePolygonDescription);
+        if (cluster.zoneIsOpen === false || (zonePolygon.length >= 4 && !isPointInPolygon(input.latitude, input.longitude, zonePolygon)))
+            continue;
+        if (!await locationMarketsAreOpen(cluster.id, input.latitude, input.longitude))
             continue;
         return {
             isServiceable: true,
@@ -894,66 +901,8 @@ async function requestOlaMaps(path, configure) {
         throw new HttpError(503, "Ola Maps credentials are not configured. Add OLA_MAPS_API_KEY or OAuth client credentials and restart the admin server.");
     }
     const url = new URL(`https://api.olamaps.io/places/v1/${path}`);
-    const token = await getOlaAccessToken().catch(() => null);
-    if (!token && env.OLA_MAPS_API_KEY)
-        url.searchParams.set("api_key", env.OLA_MAPS_API_KEY);
     configure(url);
-    const response = await fetchWithTimeout(url, {
-        headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            Accept: "application/json",
-            Origin: env.CORS_ORIGIN === "*" ? `http://localhost:${env.PORT}` : env.CORS_ORIGIN,
-            Referer: env.CORS_ORIGIN === "*" ? `http://localhost:${env.PORT}/` : `${env.CORS_ORIGIN.replace(/\/$/, "")}/`,
-            "X-Request-Id": `zigo-admin-${Date.now()}-${Math.random().toString(16).slice(2)}`
-        }
-    }).catch(() => null);
-    if (!response)
-        throw new HttpError(504, "Ola Maps did not respond. Please try again.");
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-        if (isOlaDomainRestriction(payload)) {
-            throw new HttpError(502, "Ola Places rejected this domain. Add the admin URL to the Ola Maps credential domain whitelist, then search again.");
-        }
-        throw new HttpError(response.status || 502, locationSearchErrorMessage(payload, "Ola Maps location lookup failed."));
-    }
-    return payload;
-}
-async function getOlaAccessToken() {
-    if (!env.OLA_MAPS_CLIENT_ID || !env.OLA_MAPS_CLIENT_SECRET)
-        return null;
-    if (olaAccessToken && olaAccessToken.expiresAt > Date.now() + 30_000)
-        return olaAccessToken.token;
-    const body = new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: env.OLA_MAPS_CLIENT_ID,
-        client_secret: env.OLA_MAPS_CLIENT_SECRET
-    });
-    const response = await fetchWithTimeout(new URL(env.OLA_MAPS_TOKEN_URL), {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-        body
-    });
-    const payload = (await response.json().catch(() => ({})));
-    if (!response.ok || typeof payload.access_token !== "string") {
-        olaAccessToken = null;
-        throw new HttpError(response.status || 502, locationSearchErrorMessage(payload, "Ola Maps OAuth token request failed."));
-    }
-    const expiresIn = Number(payload.expires_in ?? 300);
-    olaAccessToken = {
-        token: payload.access_token,
-        expiresAt: Date.now() + Math.max(60, expiresIn - 30) * 1000
-    };
-    return olaAccessToken.token;
-}
-async function fetchWithTimeout(url, init = {}) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), locationProviderTimeoutMs);
-    try {
-        return await fetch(url, { ...init, signal: controller.signal });
-    }
-    finally {
-        clearTimeout(timeout);
-    }
+    return requestOlaJson(url.pathname, Object.fromEntries(url.searchParams));
 }
 function directCoordinateCandidate(value) {
     const match = value.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
@@ -1309,6 +1258,31 @@ function scheduleSlotEnd(dateValue, timeValue, durationMinutes) {
         return null;
     return new Date(start.getTime() + Math.max(1, Math.min(1440, Math.round(Number(durationMinutes || 30)))) * 60_000);
 }
+// A scheduled customer slot is fixed. ETA and initiate time reserve the
+// assistant before that slot; wrap-up and travel reserve them afterwards.
+// Keeping this window central prevents slot discovery and booking confirmation
+// from making different capacity decisions.
+function scheduleCapacityWindow(input) {
+    const taskStartAt = scheduleSlotDate(input.scheduledDate, input.scheduledTime);
+    if (!taskStartAt)
+        return null;
+    const preparationMinutes = Math.max(0, Math.round(Number(input.etaMinutes || 0)))
+        + Math.max(0, Math.round(Number(input.initiateMinutes || 0)));
+    const taskMinutes = Math.max(1, Math.round(Number(input.durationMinutes || 30)));
+    const recoveryMinutes = Math.max(0, Math.round(Number(input.wrapUpMinutes || 0)))
+        + Math.max(0, Math.round(Number(input.travelBufferMinutes || 0)));
+    const reservedFrom = new Date(taskStartAt.getTime() - preparationMinutes * 60_000);
+    const taskEndAt = addMinutes(taskStartAt, taskMinutes);
+    const availableAt = addMinutes(taskEndAt, recoveryMinutes);
+    return {
+        taskStartAt,
+        taskEndAt,
+        availableAt,
+        reservedFrom,
+        preparationMinutes,
+        capacityMinutes: Math.max(1, Math.ceil((availableAt.getTime() - reservedFrom.getTime()) / 60_000))
+    };
+}
 function nextOpenCapacityWindow(input) {
     const durationMs = input.durationMinutes
         ? Math.max(1, Number(input.durationMinutes || 30)) * 60_000
@@ -1483,7 +1457,8 @@ async function selectAssistantForCapacityWindow(db, input) {
             sr.booking_available_at,
             case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
             case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
-            sr.created_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
+            sr.created_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval,
+            now() + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
           ) as window_end
           from zigo.task_assignments ta
           join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
@@ -1546,6 +1521,7 @@ async function selectAssistantForCapacityWindow(db, input) {
       select
         ta.assistant_id as "assistantId",
         coalesce(
+          capacity_reservation.reserved_from,
           sr.booking_start_at,
           sr.scheduled_at,
           case
@@ -1556,6 +1532,7 @@ async function selectAssistantForCapacityWindow(db, input) {
           end
         ) as "startAt",
         coalesce(
+          capacity_reservation.reserved_until,
           sr.booking_available_at,
           case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
           case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
@@ -1573,6 +1550,14 @@ async function selectAssistantForCapacityWindow(db, input) {
         coalesce(sr.duration_minutes, 30)::int as "durationMinutes"
       from zigo.task_assignments ta
       join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
+      left join lateral (
+        select acr.reserved_from, acr.reserved_until
+        from zigo.assistant_capacity_reservations acr
+        where acr.assignment_id = ta.id
+          and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
+        order by acr.updated_at desc
+        limit 1
+      ) capacity_reservation on true
       where ta.assistant_id = any($1::uuid[])
         and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
         and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
@@ -1636,8 +1621,8 @@ async function selectAssistantForCapacityWindow(db, input) {
         left.assistantId.localeCompare(right.assistantId))[0] ?? null;
 }
 async function selectScheduleAssistantForSlot(db, input) {
-    const slotStart = scheduleSlotDate(input.scheduledDate, input.scheduledTime);
-    if (!slotStart)
+    const capacityWindow = scheduleCapacityWindow(input);
+    if (!capacityWindow)
         return null;
     const now = new Date();
     const earliestAllowedStart = addMinutes(now, input.etaMinutes ?? 0);
@@ -1645,20 +1630,15 @@ async function selectScheduleAssistantForSlot(db, input) {
     // a small boundary tolerance so a slot shown as available is not rejected
     // merely because the confirmation arrived a few seconds later.
     const scheduleBoundaryToleranceMs = 60_000;
-    if (slotStart.getTime() + scheduleBoundaryToleranceMs < earliestAllowedStart.getTime())
+    if (capacityWindow.taskStartAt.getTime() + scheduleBoundaryToleranceMs < earliestAllowedStart.getTime())
         return null;
-    const initiateMinutes = Math.max(0, Math.round(Number(input.initiateMinutes || 0)));
-    const capacityMinutes = initiateMinutes + Math.max(1, Math.round(Number(input.durationMinutes || 30)))
-        + Math.max(0, Math.round(Number(input.wrapUpMinutes || 0)))
-        + Math.max(0, Math.round(Number(input.travelBufferMinutes || 0)));
-    const slotEnd = addMinutes(slotStart, capacityMinutes);
     return selectAssistantForCapacityWindow(db, {
         clusterId: input.clusterId,
-        slotStart,
-        slotEnd,
+        slotStart: capacityWindow.reservedFrom,
+        slotEnd: capacityWindow.availableAt,
         scheduledDate: input.scheduledDate,
-        latestStartAt: slotStart,
-        durationMinutes: capacityMinutes,
+        latestStartAt: capacityWindow.reservedFrom,
+        durationMinutes: capacityWindow.capacityMinutes,
         // Schedule availability is based on future capacity, not current online
         // presence. An offline assistant can still be selected for a future slot.
         allowedStatusCodes: ["available", "online", "active", "working", "offline"]
@@ -1677,7 +1657,7 @@ export async function getBookingAvailabilityDecision(input) {
     const requiredClusterIds = locationClusterIds.length ? locationClusterIds : [input.clusterId];
     const uniqueRequiredClusterIds = Array.from(new Set(requiredClusterIds));
     const requiredClusterId = uniqueRequiredClusterIds[0] || input.clusterId;
-    const hasClusterMismatch = uniqueRequiredClusterIds.length > 1;
+    const hasClusterMismatch = uniqueRequiredClusterIds.length > 1 && !await locationClustersCanInterserve(uniqueRequiredClusterIds);
     const durationMinutes = Math.max(1, Math.min(1440, Math.round(Number(input.durationMinutes || 30))));
     const now = new Date();
     const resolvedBookingEngineRule = await resolveBookingEngineRuleForContext({
@@ -1715,7 +1695,8 @@ export async function getBookingAvailabilityDecision(input) {
             sr.booking_available_at,
             case when coalesce(sr.metadata->>'bookingAvailableAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'bookingAvailableAt')::timestamptz else null end,
             case when coalesce(sr.metadata->>'expectedFreeAt', '') ~ '^\d{4}-\d{2}-\d{2}' then (sr.metadata->>'expectedFreeAt')::timestamptz else null end,
-            sr.created_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
+            sr.created_at + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval,
+            now() + (coalesce(sr.duration_minutes, 30) || ' minutes')::interval
           ) as window_end
           from zigo.task_assignments ta
           join zigo.service_requests sr on (sr.id = ta.service_request_id or sr.id = ta.request_id)
@@ -1942,7 +1923,6 @@ export async function getBookingAvailabilityDecision(input) {
     const scheduleAvailableSlots = [];
     if (scheduleAssistantPool.length && dates.length && scheduleTimeSlots.length) {
         const requestedDurationMinutes = durationMinutes;
-        const scheduleCapacityDurationMinutes = scheduleInitiateMinutes + requestedDurationMinutes + scheduleWrapUpMinutes + scheduleTravelMinutes;
         const earliestScheduleSlotStartAt = addMinutes(now, scheduleEtaMinutes);
         const blocked = await pool.query(`
         select distinct
@@ -2011,23 +1991,30 @@ export async function getBookingAvailabilityDecision(input) {
         }
         for (const date of dates) {
             for (const time of scheduleTimeSlots) {
-                const slotStart = scheduleSlotDate(date.value, time);
-                if (!slotStart)
+                const capacityWindow = scheduleCapacityWindow({
+                    scheduledDate: date.value,
+                    scheduledTime: time,
+                    durationMinutes: requestedDurationMinutes,
+                    etaMinutes: scheduleEtaMinutes,
+                    initiateMinutes: scheduleInitiateMinutes,
+                    wrapUpMinutes: scheduleWrapUpMinutes,
+                    travelBufferMinutes: scheduleTravelMinutes
+                });
+                if (!capacityWindow)
                     continue;
-                if (slotStart.getTime() < earliestScheduleSlotStartAt.getTime())
+                if (capacityWindow.taskStartAt.getTime() < earliestScheduleSlotStartAt.getTime())
                     continue;
-                const slotEnd = addMinutes(slotStart, scheduleCapacityDurationMinutes);
                 const availableAssistants = scheduleAssistantPool.filter((assistant) => {
                     const scheduled = scheduledByAssistant.get(assistant.assistantId) || [];
                     const predictedReadyAt = assistant.nextAvailableAt.getTime() > now.getTime()
                         ? assistant.nextAvailableAt
                         : now;
                     return Boolean(nextOpenCapacityWindow({
-                        slotStart,
-                        slotEnd,
+                        slotStart: capacityWindow.reservedFrom,
+                        slotEnd: capacityWindow.availableAt,
                         baseAvailableAt: predictedReadyAt,
-                        latestStartAt: slotStart,
-                        durationMinutes: scheduleCapacityDurationMinutes,
+                        latestStartAt: capacityWindow.reservedFrom,
+                        durationMinutes: capacityWindow.capacityMinutes,
                         scheduledWindows: scheduled
                     }));
                 }).length;
@@ -2269,6 +2256,22 @@ function uploadDetailsFromMetadata(metadata) {
     }).filter((item) => Boolean(item.url));
 }
 export async function createBookingByAdmin(input) {
+    const routeStops = bookingLocationStopsFromMetadata(input.metadata, { address: input.address, latitude: input.latitude ?? null, longitude: input.longitude ?? null });
+    const validatedClusterIds = [input.clusterId];
+    for (const [index, stop] of routeStops.entries()) {
+        if (stop.latitude == null || stop.longitude == null)
+            continue;
+        const eligibility = await validateBookingLocation({ customerId: input.customerId, latitude: stop.latitude, longitude: stop.longitude, address: stop.address });
+        if (!eligibility.isServiceable || !eligibility.cluster)
+            throw new HttpError(400, "A booking location is outside an open service market. Choose another location.");
+        if (index === 0 && input.clusterId !== eligibility.cluster.clusterId)
+            throw new HttpError(409, "Start location coverage has changed. Select the booking locations again.");
+        if (stop.clusterId && stop.clusterId !== eligibility.cluster.clusterId)
+            throw new HttpError(409, "Location coverage has changed. Select the booking locations again.");
+        validatedClusterIds.push(eligibility.cluster.clusterId);
+    }
+    if (!await locationClustersCanInterserve(validatedClusterIds))
+        throw new HttpError(400, "All booking locations must be open and within the same city.");
     const client = await pool.connect();
     try {
         await client.query("begin");
@@ -2553,7 +2556,7 @@ export async function createBookingByAdmin(input) {
             throw new HttpError(409, isScheduleBooking ? "Selected schedule slot is no longer available." : "No online assistant capacity is available for instant booking.");
         }
         const assignmentStartAt = isScheduleBooking
-            ? addMinutes(scheduleSlotDate(scheduledDate, scheduledTime), bookingEngineTiming.initiateMinutes)
+            ? scheduleSlotDate(scheduledDate, scheduledTime)
             : selectedAssistant.candidateStartAt;
         if (!assignmentStartAt)
             throw new HttpError(400, "Booking start time is invalid.");
@@ -2764,7 +2767,7 @@ export async function createBookingByAdmin(input) {
         let capacityAssignment = null;
         const capacityStatusCode = assignmentMode === "automate" ? "offered" : "reserved";
         const capacitySource = assignmentMode === "automate" ? "booking_auto_assignment" : "booking_capacity_reservation";
-        const capacitySlotStart = isScheduleBooking ? scheduledSlotStart : instantStartAt;
+        const capacitySlotStart = isScheduleBooking ? selectedAssistant.candidateStartAt : instantStartAt;
         const capacityExpiresAt = expectedFreeAt;
         if (!capacityExpiresAt)
             throw new HttpError(400, "Booking start time is invalid.");
@@ -3001,6 +3004,85 @@ export async function listLiveOperations() {
       order by sr.created_at desc
       limit 200
     `);
+    return result.rows;
+}
+export async function listAssistantAvailabilityBoard(input = {}) {
+    await ensureBookingEngineSchema();
+    const tab = input.tab === "available" ? "available" : "blocked";
+    const search = input.search?.trim() ? `%${input.search.trim()}%` : null;
+    const result = await pool.query(`
+      select
+        a.id as "assistantId", a.assistant_code as "assistantCode",
+        u.display_name as "assistantName", u.email::text as "assistantEmail", u.phone as "assistantPhone",
+        coalesce(profile_doc.preview_url, u.metadata->>'profilePictureUrl') as "assistantProfilePictureUrl",
+        lower(coalesce(av.status_code, 'offline')) as "availabilityStatus",
+        av.next_available_at as "nextAvailableAt",
+        c.id as "clusterId", c.name as "clusterName", z.id as "zoneId", z.name as "zoneName",
+        city.id as "cityId", city.name as "cityName", st.id as "stateId", st.name as "stateName",
+        vehicle.vehicle_name as "vehicleName", vehicle.vehicle_number as "vehicleNumber", vehicle.picture_urls as "vehiclePictureUrls",
+        active_booking."bookingId", active_booking."bookingReference", active_booking."assignmentStatus", active_booking."bookingStatus",
+        active_booking."serviceMasterName", active_booking."categoryName", active_booking."bookingType",
+        active_booking."bookingStartAt", active_booking."bookingEndAt", active_booking."actualStartedAt",
+        active_booking."extendMinutes", active_booking."freeAt", active_booking."paymentMode"
+      from zigo.assistants a
+      join zigo.users u on u.id = a.user_id
+      left join zigo.assistant_availability av on av.assistant_id = a.id
+      left join zigo.clusters c on c.id = a.current_cluster_id
+      left join zigo.zones z on z.id = c.zone_id
+      left join zigo.cities city on city.id = c.city_id
+      left join zigo.states st on st.id = city.state_id
+      left join lateral (
+        select f.object_key as preview_url
+        from zigo.assistant_documents ad
+        left join zigo.document_types dt on dt.id = ad.document_type_id
+        left join zigo.files f on f.id = ad.file_id
+        where ad.assistant_id = a.id and dt.code in ('profile_picture', 'profile_photo')
+        order by ad.created_at desc limit 1
+      ) profile_doc on true
+      left join lateral (
+        select vm.vehicle_name, vm.vehicle_number, vm.picture_urls
+        from zigo.assistant_vehicle_assignments ava
+        join zigo.vehicle_master vm on vm.id = ava.vehicle_master_id
+        where ava.assistant_id = a.id and ava.is_active = true and coalesce(vm.is_deleted, false) = false
+        order by ava.assigned_at desc limit 1
+      ) vehicle on true
+      left join lateral (
+        select
+          sr.id as "bookingId", sr.request_number as "bookingReference", ta.status_code as "assignmentStatus", sr.status_code as "bookingStatus",
+          csm.service_title as "serviceMasterName", cat.name as "categoryName",
+          coalesce(sr.metadata->>'bookingType', case when sr.scheduled_at is not null then 'schedule' else 'instant' end) as "bookingType",
+          sr.booking_start_at as "bookingStartAt", sr.booking_end_at as "bookingEndAt", coalesce(ta.actual_started_at, sr.actual_task_started_at) as "actualStartedAt",
+          coalesce(extension_minutes.total_minutes, 0)::int as "extendMinutes",
+          coalesce(sr.booking_available_at, sr.booking_end_at) as "freeAt",
+          coalesce(sr.payment_type, sr.metadata->>'paymentType', '-') as "paymentMode"
+        from zigo.task_assignments ta
+        join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
+        left join zigo.categories cat on cat.id = sr.category_id
+        left join zigo.category_service_masters csm on csm.id = case
+          when coalesce(cat.config->'categorySettings'->>'serviceMasterId', '') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          then (cat.config->'categorySettings'->>'serviceMasterId')::uuid else null end
+        left join lateral (
+          select coalesce(sum(greatest(0, case when coalesce(item->>'minutes', item->>'durationMinutes', '') ~ '^\d+$' then coalesce(item->>'minutes', item->>'durationMinutes')::int else 0 end)), 0)::int as total_minutes
+          from jsonb_array_elements(coalesce(sr.metadata->'timeExtensions', '[]'::jsonb)) as extension(item)
+        ) extension_minutes on true
+        where ta.assistant_id = a.id
+          and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+          and sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+          and coalesce(sr.booking_available_at, sr.booking_end_at, now() + interval '1 minute') > now()
+        order by case when ta.status_code in ('in_progress', 'accepted') or sr.status_code in ('in_progress', 'approval_pending') then 0 else 1 end,
+          coalesce(sr.booking_available_at, sr.booking_end_at) asc nulls last, ta.assigned_at desc nulls last
+        limit 1
+      ) active_booking on true
+      where u.deleted_at is null and coalesce(u.metadata->>'accountStatus', 'active') = 'active'
+        and ($1::uuid is null or st.id = $1::uuid) and ($2::uuid is null or city.id = $2::uuid)
+        and ($3::uuid is null or z.id = $3::uuid) and ($4::uuid is null or c.id = $4::uuid)
+        and ($5::text is null or u.display_name ilike $5 or u.email::text ilike $5 or u.phone ilike $5 or a.assistant_code ilike $5 or a.id::text ilike $5 or vehicle.vehicle_number ilike $5)
+        and (($6 = 'blocked' and active_booking."bookingId" is not null) or ($6 = 'available' and active_booking."bookingId" is null))
+      order by
+        case when $6 = 'blocked' then active_booking."freeAt" else coalesce(av.next_available_at, av.updated_at, u.created_at) end asc nulls last,
+        u.display_name asc nulls last, a.assistant_code asc nulls last
+      limit 500
+    `, [input.stateId || null, input.cityId || null, input.zoneId || null, input.clusterId || null, search, tab]);
     return result.rows;
 }
 async function ensureAssistantAvailableForBookingAssignment(db, input) {

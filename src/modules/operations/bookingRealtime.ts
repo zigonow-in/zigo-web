@@ -6,6 +6,7 @@ export type BookingRealtimeEvent = {
   id: string;
   type:
     | "booking.created"
+    | "user.session.revoked"
     | "booking.updated"
     | "booking.assigned"
     | "booking.reassigned"

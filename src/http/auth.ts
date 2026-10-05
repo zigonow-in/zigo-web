@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import { pool } from "../db/pool.js";
 import { verifyAdminAccessToken, type AdminAccessTokenPayload } from "../modules/auth/token.service.js";
 import { HttpError } from "./errors.js";
+import { isAccountAccessBlocked } from "../modules/auth/accountAccess.js";
 
 const adminRoleCodes = new Set(["admin", "super_admin", "manager", "staff", "owner"]);
 
@@ -47,9 +48,9 @@ export async function requireAdminAuth(req: Request, _res: Response, next: NextF
 }
 
 async function assertActiveAdminUser(userId: string) {
-  const result = await pool.query<{ id: string; accountStatus: string | null }>(
+  const result = await pool.query<{ id: string; accountStatus: string | null; metadata: Record<string, unknown> | null }>(
     `
-      select id, metadata->>'accountStatus' as "accountStatus"
+      select id, metadata->>'accountStatus' as "accountStatus", metadata
       from zigo.users
       where id = $1
         and deleted_at is null
@@ -59,7 +60,7 @@ async function assertActiveAdminUser(userId: string) {
   );
   const user = result.rows[0];
   if (!user) throw new HttpError(401, "Invalid authorization token");
-  if (["disabled", "suspended", "blocked", "inactive"].includes(String(user.accountStatus || "").toLowerCase())) {
+  if (isAccountAccessBlocked({ ...user.metadata, accountStatus: user.accountStatus })) {
     throw new HttpError(403, "User account is not active.");
   }
 }

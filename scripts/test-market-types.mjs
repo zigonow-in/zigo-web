@@ -1,0 +1,51 @@
+import 'dotenv/config';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import express from 'express';
+import { pool } from '../dist/db/pool.js';
+import { mastersRouter } from '../dist/modules/masters/masters.routes.js';
+import { notFoundHandler } from '../dist/http/errors.js';
+if (!['localhost','127.0.0.1','[::1]'].includes(new URL(process.env.DATABASE_URL).hostname)) throw new Error('Tests require a local database.');
+const client = await pool.connect();
+const originalQuery = pool.query;
+pool.query = client.query.bind(client);
+const app = express(); app.use(express.json());
+app.use((req,res,next)=>{ if (!req.headers['x-no-auth']) req.auth={sub:randomUUID(),roles:['super_admin']}; next(); });
+app.use('/masters',mastersRouter); app.use(notFoundHandler);
+const server = app.listen(0,'127.0.0.1');
+await new Promise(resolve=>server.once('listening',resolve));
+const base = `http://127.0.0.1:${server.address().port}/masters/market-types`;
+const request = async(path='',method='GET',body,headers={})=>{
+  await client.query('savepoint request_test');
+  const response=await fetch(base+path,{method,headers:{'Content-Type':'application/json',...headers},body:body?JSON.stringify(body):undefined});
+  const result = {status:response.status,body:await response.json()};
+  if (response.status >= 400) await client.query('rollback to savepoint request_test');
+  await client.query('release savepoint request_test');
+  return result;
+};
+try {
+  await client.query('begin');
+  assert.equal((await request('','GET',null,{'x-no-auth':'1'})).status,401);
+  const suffix=randomUUID().slice(0,8);
+  const payload={name:`Alpha ${suffix}`,code:`TEST-${suffix}`,description:'Test description',color:'#f97316',isActive:true};
+  assert.equal((await request('','POST',{...payload,color:'orange'})).status,400);
+  assert.equal((await request('','POST',{...payload,name:' '})).status,400);
+  const created=await request('','POST',payload); assert.equal(created.status,201);
+  const id=created.body.data.id;
+  assert.equal((await request('','POST',{...payload,code:payload.code.toLowerCase()})).status,409);
+  const updated=await request(`/${id}`,'PUT',{...payload,name:`Zebra ${suffix}`,color:'#dc2626',isActive:false});
+  assert.equal(updated.status,200);
+  const listed=(await request()).body.data;
+  const row=listed.find(item=>item.id===id);
+  assert.equal(row.name,`Zebra ${suffix}`); assert.equal(row.color,'#dc2626'); assert.equal(row.isActive,false);
+  assert.equal(row.description,payload.description);
+  assert.equal((await request(`/${randomUUID()}`,'PUT',payload)).status,404);
+  assert.equal((await request(`/${id}`,'DELETE')).status,200);
+  assert.equal((await request()).body.data.some(item=>item.id===id),false);
+  assert.equal((await request(`/${id}`,'DELETE')).status,404);
+  assert.equal((await request('','POST',payload)).status,201);
+  console.log('Market Type API: auth, validation, CRUD, duplicate code, soft deletion and code reuse passed. All test writes rolled back.');
+} finally {
+  await client.query('rollback'); pool.query=originalQuery; client.release();
+  await new Promise(resolve=>server.close(resolve)); await pool.end();
+}

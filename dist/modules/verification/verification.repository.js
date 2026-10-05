@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { HttpError } from "../../http/errors.js";
 import { getMediaPathValue, MEDIA_PATH_SETTING_KEYS } from "../settings/settings.repository.js";
 import { setUserActiveState } from "../users/users.repository.js";
+import { emitBookingRealtimeEvent } from "../operations/bookingRealtime.js";
 const addUserAssistantDocumentTypes = [
     { code: "aadhaar_front", name: "Aadhaar Card Front Image", entityType: "assistant", description: "Aadhaar card front side" },
     { code: "aadhaar_back", name: "Aadhaar Card Back Image", entityType: "assistant", description: "Aadhaar card back side" },
@@ -291,9 +292,11 @@ export async function deleteAssistantForVerification(assistantId, actorUserId) {
             updated_at = now()
         from zigo.assistants a
         where a.id = $1 and u.id = a.user_id and u.deleted_at is null
-        returning a.id
+        returning a.id, u.id as "userId"
       `, [assistantId, actorUserId]);
         await client.query("commit");
+        if (result.rows[0]?.userId)
+            await emitBookingRealtimeEvent({ type: 'user.session.revoked', assistantId, payload: { userId: result.rows[0].userId }, message: 'Account access ended.' }).catch(error => console.warn('Account revocation notification failed', error));
         return result.rows[0] ?? null;
     }
     catch (error) {

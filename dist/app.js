@@ -26,9 +26,14 @@ import { storesRouter } from "./modules/stores/stores.routes.js";
 import { settingsRouter } from "./modules/settings/settings.routes.js";
 import { vehiclesRouter } from "./modules/vehicles/vehicles.routes.js";
 import { portalRouter } from "./modules/portal/portal.routes.js";
+import { finalizePaidCustomerPortalBookingAddOnByProviderOrder } from "./modules/portal/portal.repository.js";
+import { emitBookingRealtimeEvent } from "./modules/operations/bookingRealtime.js";
 import { supportRouter } from "./modules/support/support.routes.js";
+import { walletsRouter } from "./modules/wallets/wallet.routes.js";
 import { processRazorpayWebhook } from "./modules/payments/payments.repository.js";
 import { healthRouter } from "./routes/health.js";
+import { mapsRouter } from "./modules/maps/maps.routes.js";
+import { olaBrowserConfig } from "./modules/maps/olaMaps.service.js";
 export function createApp() {
     const app = express();
     const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
@@ -52,7 +57,7 @@ export function createApp() {
                 "script-src": ["'self'", "https://www.unpkg.com", "https://unpkg.com", "https://cdn.jsdelivr.net", "https://checkout.razorpay.com", "https://cdn.razorpay.com"],
                 "img-src": ["'self'", "data:", "blob:", "https://api.qrserver.com", "https://api.olamaps.io", "https://*.olamaps.io", "https://maps.olakrutrim.com", "https://*.olakrutrim.com", "https://a.tile.openstreetmap.org", "https://b.tile.openstreetmap.org", "https://c.tile.openstreetmap.org", "https://*.razorpay.com"],
                 "media-src": ["'self'", "data:", "blob:"],
-                "connect-src": ["'self'", "https://api.olamaps.io", "https://*.olamaps.io", "https://maps.olakrutrim.com", "https://*.olakrutrim.com", "https://a.tile.openstreetmap.org", "https://b.tile.openstreetmap.org", "https://c.tile.openstreetmap.org", "https://api.razorpay.com", "https://checkout.razorpay.com", "https://cdn.razorpay.com", "https://*.razorpay.com"],
+                "connect-src": ["'self'", "https://cdn.jsdelivr.net", "https://api.olamaps.io", "https://*.olamaps.io", "https://maps.olakrutrim.com", "https://*.olakrutrim.com", "https://a.tile.openstreetmap.org", "https://b.tile.openstreetmap.org", "https://c.tile.openstreetmap.org", "https://api.razorpay.com", "https://checkout.razorpay.com", "https://cdn.razorpay.com", "https://*.razorpay.com", "http://localhost:5100"],
                 "worker-src": ["'self'", "blob:"],
                 "child-src": ["'self'", "blob:", "https://api.razorpay.com", "https://checkout.razorpay.com", "https://*.razorpay.com"],
                 "frame-src": ["'self'", "https://api.razorpay.com", "https://checkout.razorpay.com", "https://*.razorpay.com"],
@@ -69,6 +74,9 @@ export function createApp() {
     app.use(express.json({ limit: "15mb", strict: true }));
     app.use(morgan(env.NODE_ENV === "production" ? "combined" : "dev"));
     app.use(metricsMiddleware);
+    app.use(joinBasePath(basePath, "/maps"), mapsRouter);
+    if (basePath)
+        app.use("/maps", mapsRouter);
     app.use(globalLimiter);
     app.use(customerCacheInvalidationMiddleware);
     mountAppRoutes(app, { basePath, publicDir, assetsFontsDir });
@@ -86,6 +94,18 @@ function mountRazorpayWebhookRoutes(app, basePath) {
             const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
             const signature = String(req.header("x-razorpay-signature") || "");
             const result = await processRazorpayWebhook(rawBody, signature);
+            let finalizedExtension = null;
+            if (["payment.captured", "order.paid"].includes(String(result.event || "").toLowerCase()) && result.orderId) {
+                finalizedExtension = await finalizePaidCustomerPortalBookingAddOnByProviderOrder(result.orderId);
+                if (finalizedExtension?.bookingId) {
+                    await emitBookingRealtimeEvent({
+                        type: "booking.updated",
+                        bookingId: String(finalizedExtension.bookingId),
+                        message: "Service extension paid",
+                        payload: { bookingId: String(finalizedExtension.bookingId), addOn: finalizedExtension }
+                    });
+                }
+            }
             console.info("Razorpay webhook processed", {
                 requestId: res.locals.requestId,
                 event: result.event,
@@ -168,10 +188,7 @@ function mountAppRoutes(app, { basePath, publicDir, assetsFontsDir }) {
     app.use(joinBasePath(basePath, "/metrics"), metricsRouter);
     app.get(joinBasePath(basePath, "/config/maps"), requireAdminAuth, (_req, res) => {
         res.json({
-            data: {
-                olaMapsApiKey: env.OLA_MAPS_API_KEY ?? null,
-                olaMapsStyleUrl: env.OLA_MAPS_STYLE_URL
-            }
+            data: olaBrowserConfig()
         });
     });
     app.use(joinBasePath(basePath, "/auth"), authRouter);
@@ -190,4 +207,5 @@ function mountAppRoutes(app, { basePath, publicDir, assetsFontsDir }) {
     app.use(joinBasePath(basePath, "/operations"), requireAdminAuth, operationsRouter);
     app.use(joinBasePath(basePath, "/reports"), requireAdminAuth, reportsRouter);
     app.use(joinBasePath(basePath, "/support"), requireAdminAuth, supportRouter);
+    app.use(joinBasePath(basePath, "/wallets"), requireAdminAuth, walletsRouter);
 }

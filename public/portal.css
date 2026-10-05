@@ -7709,6 +7709,11 @@ body.portal-customer .customer-review-notification-stack > .portal-toast.is-revi
   to { transform: translateY(0); opacity: 1; }
 }
 
+.portal-login-unavailable-dialog { width: 340px; max-width: calc(100vw - 32px); border: 0; border-radius: 8px; padding: 24px; color: #182334; background: #fff; box-shadow: 0 12px 40px #0003; }
+.portal-login-unavailable-dialog::backdrop { background: #0008; }
+.portal-login-unavailable-dialog h2 { margin: 0 0 12px; font-size: 20px; }
+.portal-login-unavailable-dialog p { margin: 0 0 20px; font-size: 14px; line-height: 1.5; color: #59677a; }
+.portal-login-unavailable-dialog button { width: 100%; min-height: 42px; border: 0; border-radius: 6px; background: #005df2; color: #fff; font: inherit; cursor: pointer; }
 .portal-logout-confirm {
   position: fixed;
   inset: 0;
@@ -19428,6 +19433,7 @@ body.portal-customer .customer-review-notification-stack > .portal-toast.is-revi
   height: 38px;
   display: grid;
   place-items: center;
+  grid-column: -2 / -1;
   justify-self: end;
   align-self: center;
   border: 1px solid #d9e2ef;
@@ -20823,13 +20829,18 @@ body.portal-customer:has(.customer-track-page)::-webkit-scrollbar {
   transition: height 220ms ease, box-shadow 220ms ease;
 }
 
+.portal-customer .customer-track-page .customer-track-chat-toggle {
+  -webkit-tap-highlight-color: transparent;
+  transition: none;
+}
+
 .portal-customer .customer-track-page .customer-track-chat-section.is-collapsed {
   height: calc(76px + var(--safe-bottom));
   grid-template-rows: 58px;
   gap: 0;
   padding-top: 9px;
   padding-bottom: max(9px, var(--safe-bottom));
-  box-shadow: 0 -8px 24px rgba(10, 18, 34, 0.08);
+  box-shadow: none;
 }
 
 .portal-customer .customer-track-page .customer-track-chat-section.is-collapsed .customer-track-chat-title {
@@ -24360,4 +24371,896 @@ body.portal-customer {
   white-space: normal;
   overflow: visible;
   text-overflow: clip;
+}
+.portal-customer .customer-track-chat-closed-note {
+  margin: 2px 0 0;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: #f3f6fb;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 750;
+}
+
+.portal-customer .customer-track-chat-section.customer-track-chat-closed .customer-track-composer.is-disabled {
+  opacity: 0.58;
+}
+
+.portal-customer .customer-track-chat-section.customer-track-chat-closed .customer-track-composer.is-disabled textarea,
+.portal-customer .customer-track-chat-section.customer-track-chat-closed .customer-track-composer.is-disabled button,
+.portal-customer .customer-track-chat-section.customer-track-chat-closed .customer-track-composer.is-disabled label {
+  cursor: not-allowed;
+}
+/* Customer sheet viewport sizing and login gallery alignment. */
+body.portal-customer .customer-location-picker-overlay,
+body.portal-customer .customer-schedule-sheet-backdrop,
+body.portal-customer .customer-category-sheet-backdrop,
+body.portal-customer .customer-home-category-sheet-backdrop,
+body.portal-customer .customer-home-duration-sheet-backdrop,
+body.portal-customer .customer-home-schedule-sheet-backdrop,
+body.portal-customer .customer-track-map-sheet-backdrop,
+body.portal-customer .booking-bottom-sheet,
+body.portal-customer .customer-native-schedule-sheet {
+  left: 0;
+  right: 0;
+  width: 100vw;
+  max-width: none;
+  transform: none;
+}
+
+body.portal-customer .customer-location-picker-panel,
+body.portal-customer .customer-location-picker-sheet,
+body.portal-customer .customer-category-sheet,
+body.portal-customer .customer-home-category-sheet,
+body.portal-customer .customer-home-duration-sheet,
+body.portal-customer .customer-home-schedule-sheet,
+body.portal-customer .customer-track-map-sheet,
+body.portal-customer .booking-bottom-sheet-card {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}
+
+body.portal-customer .customer-login-gallery {
+  display: grid;
+  grid-template-rows: clamp(128px, 22vh, 174px) clamp(142px, 24vh, 190px);
+  align-content: start;
+  row-gap: 0;
+  min-height: 0;
+}
+
+body.portal-customer .customer-login-gallery-track,
+body.portal-customer .customer-login-gallery-track.reverse {
+  position: relative;
+  top: auto;
+  bottom: auto;
+}
+/* Track Booking: one clear service-extension action inside the category card. */
+.portal-customer .customer-track-extend-service {
+  width: min(100%, 320px);
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 12px auto 2px;
+  padding: 11px 20px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--zigo-blue, #075eea);
+  color: #ffffff;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.2;
+  box-shadow: 0 6px 14px rgba(7, 94, 234, 0.2);
+}
+
+.portal-customer .customer-track-extend-service:active {
+  transform: translateY(1px);
+}
+/* Track Booking extension duration selector and fixed payment action. */
+body.portal-customer .customer-track-extension-sheet {
+  display: flex;
+  flex-direction: column;
+  max-height: min(82dvh, 680px);
+  padding-bottom: 0;
+}
+
+body.portal-customer .customer-track-extension-sheet > h2 {
+  margin-bottom: 18px;
+}
+
+body.portal-customer .customer-track-extension-duration-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 22px 20px;
+  margin: 0 -22px;
+  overscroll-behavior: contain;
+}
+
+body.portal-customer .customer-track-extension-duration {
+  min-height: 101px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 10px;
+  border: 1px solid #dfe4ec;
+  border-radius: 18px;
+  background: #ffffff;
+  color: #1f2937;
+  text-align: left;
+  font: inherit;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.03);
+}
+
+body.portal-customer .customer-track-extension-duration.selected {
+  border: 2px solid var(--zigo-blue, #075eea);
+  padding: 11px 9px;
+  background: #f7fbff;
+}
+
+body.portal-customer .customer-track-extension-duration > b {
+  font-size: 15px;
+  line-height: 1.15;
+  font-weight: 800;
+}
+
+body.portal-customer .customer-track-extension-duration > span {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+body.portal-customer .customer-track-extension-duration strong {
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 700;
+}
+
+body.portal-customer .customer-track-extension-duration del {
+  color: #98a2b3;
+  font-size: 11px;
+  line-height: 1;
+}
+
+body.portal-customer .customer-track-extension-payment-bar {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 7fr);
+  align-items: center;
+  gap: 10px;
+  margin: auto -22px 0;
+  padding: 14px 22px calc(14px + var(--safe-bottom));
+  border-top: 1px solid #e8edf5;
+  background: #ffffff;
+  box-shadow: 0 -8px 22px rgba(15, 23, 42, 0.08);
+}
+
+body.portal-customer .customer-track-extension-amount {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+body.portal-customer .customer-track-extension-amount > strong {
+  color: #07112b;
+  font-size: 28px;
+  line-height: 0.95;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-track-extension-amount del {
+  color: #98a2b3;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+body.portal-customer .customer-track-extension-amount small {
+  width: fit-content;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #e7f8ee;
+  color: #16834b;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-track-extension-amount > span {
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+body.portal-customer .customer-track-extension-proceed {
+  width: 100%;
+  min-height: 52px;
+  border: 0;
+  border-radius: 15px;
+  background: var(--zigo-blue, #075eea);
+  color: #ffffff;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+body.portal-customer .customer-track-extension-proceed:disabled {
+  background: #cbd5e1;
+  color: #ffffff;
+  cursor: not-allowed;
+}
+
+@media (max-width: 359px) {
+  body.portal-customer .customer-track-extension-duration-grid { gap: 9px; }
+  body.portal-customer .customer-track-extension-duration { min-height: 92px; padding: 10px 8px; }
+  body.portal-customer .customer-track-extension-duration > b { font-size: 13px; }
+  body.portal-customer .customer-track-extension-payment-bar { gap: 7px; padding-left: 16px; padding-right: 16px; }
+  body.portal-customer .customer-track-extension-amount > strong { font-size: 23px; }
+  body.portal-customer .customer-track-extension-proceed { font-size: 14px; }
+}
+body.portal-customer .customer-track-extension-loading {
+  grid-column: 1 / -1;
+  margin: 8px 0;
+  color: #64748b;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+}
+
+body.portal-customer .customer-track-extension-loading.is-error {
+  color: #b42318;
+}
+/* Track Booking: active service countdown, driven by the persisted task window. */
+.portal-customer .customer-track-working-countdown {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  margin: 14px 0 4px;
+  padding: 18px 16px 16px;
+  border: 1px solid #d7e5fb;
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+.portal-customer .customer-track-working-countdown-head {
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+  color: #17233c;
+  text-align: center;
+}
+
+.portal-customer .customer-track-working-countdown-head b {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #075eea;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.portal-customer .customer-track-working-countdown-head b i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #0b6fe8;
+}
+
+.portal-customer .customer-track-working-countdown-head span {
+  color: #52627a;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.portal-customer .customer-track-working-countdown-ring {
+  width: 182px;
+  height: 182px;
+  display: grid;
+  place-items: center;
+  position: relative;
+  color: #0b6fe8 !important;
+}
+
+.portal-customer .customer-track-working-countdown-ring svg {
+  position: absolute;
+  inset: 0;
+  width: 182px;
+  height: 182px;
+  transform: rotate(-90deg);
+}
+
+.portal-customer .customer-track-working-countdown-ring circle {
+  fill: none;
+  stroke-width: 14;
+}
+
+.portal-customer .customer-track-working-countdown-ring .ring-track {
+  stroke: #e8f0fc;
+}
+
+.portal-customer .customer-track-working-countdown-ring .ring-value {
+  stroke: #0b6fe8;
+  stroke-linecap: round;
+  stroke-dasharray: var(--ring-circumference);
+  stroke-dashoffset: var(--ring-offset);
+  transition: stroke-dashoffset 0.35s linear;
+}
+
+.portal-customer .customer-track-working-countdown-ring > span,
+.portal-customer .customer-track-working-countdown-ring > b {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+}
+
+.portal-customer .customer-track-working-countdown-ring > span {
+  position: absolute;
+  top: 62px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.portal-customer .customer-track-working-countdown-ring > b {
+  position: absolute;
+  top: 88px;
+  color: #075eea;
+  font-size: 29px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.portal-customer .customer-track-working-countdown-ring.green,
+.portal-customer .customer-track-working-countdown-ring.green .ring-value,
+.portal-customer .customer-track-working-countdown-ring.green > b {
+  color: #159957 !important;
+  stroke: #159957;
+}
+
+.portal-customer .customer-track-working-countdown-ring.yellow,
+.portal-customer .customer-track-working-countdown-ring.yellow .ring-value,
+.portal-customer .customer-track-working-countdown-ring.yellow > b {
+  color: #d99a00 !important;
+  stroke: #d99a00;
+}
+
+.portal-customer .customer-track-working-countdown-ring.red,
+.portal-customer .customer-track-working-countdown-ring.red .ring-value,
+.portal-customer .customer-track-working-countdown-ring.red > b,
+.portal-customer .customer-track-working-countdown-ring.danger,
+.portal-customer .customer-track-working-countdown-ring.danger .ring-value,
+.portal-customer .customer-track-working-countdown-ring.danger > b {
+  color: #d92d20 !important;
+  stroke: #d92d20;
+}
+.portal-customer .customer-track-working-countdown.is-green .customer-track-working-countdown-head b { color: #159957; }
+.portal-customer .customer-track-working-countdown.is-green .customer-track-working-countdown-head b i { background: #159957; }
+.portal-customer .customer-track-working-countdown.is-yellow .customer-track-working-countdown-head b { color: #d99a00; }
+.portal-customer .customer-track-working-countdown.is-yellow .customer-track-working-countdown-head b i { background: #d99a00; }
+.portal-customer .customer-track-working-countdown.is-red .customer-track-working-countdown-head b { color: #d92d20; }
+.portal-customer .customer-track-working-countdown.is-red .customer-track-working-countdown-head b i { background: #d92d20; }
+/* Restored working-countdown layout rules. */
+.portal-customer .customer-track-working-countdown-ring.green,
+.portal-customer .customer-track-working-countdown-ring.yellow,
+.portal-customer .customer-track-working-countdown-ring.red,
+.portal-customer .customer-track-working-countdown-ring.danger {
+  background: transparent;
+}
+
+@media (max-width: 360px) {
+  .portal-customer .customer-track-working-countdown-ring,
+  .portal-customer .customer-track-working-countdown-ring svg {
+    width: 166px;
+    height: 166px;
+  }
+}
+
+.portal-customer .customer-track-working-countdown .customer-track-extend-service {
+  width: 100%;
+  min-height: 44px;
+  margin: 2px 0 0;
+  border-radius: 10px;
+  background: #075eea;
+  box-shadow: none;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.portal-customer .customer-track-booking-card {
+  gap: 10px;
+}
+
+.portal-customer .customer-track-working-countdown {
+  gap: 10px;
+  margin: 10px 0 2px;
+  padding: 16px 14px 14px;
+  border-radius: 12px;
+}
+
+.portal-customer .customer-track-working-countdown-ring > span,
+.portal-customer .customer-track-working-countdown-ring > b {
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+/* Current working booking details in the Home footer. */
+.customer-cart-bar .customer-ongoing-task-card.has-live-task {
+  min-height: 78px;
+}
+
+.customer-ongoing-task-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  margin-top: 1px;
+}
+
+.customer-ongoing-task-live-timer,
+.customer-ongoing-task-finish-pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 18px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #eef6ff;
+  color: #075eea;
+  font-size: 11px;
+  line-height: 1;
+  font-style: normal;
+}
+
+.customer-ongoing-task-live-timer i {
+  display: inline-flex;
+}
+
+.customer-ongoing-task-live-timer .customer-track-svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.5;
+}
+
+.customer-ongoing-task-live-timer b,
+.customer-ongoing-task-finish-pin b {
+  color: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.customer-ongoing-task-finish-pin {
+  gap: 5px;
+  background: #f7f9fc;
+  color: #172b4d;
+}
+
+.customer-ongoing-task-finish-pin small {
+  color: #667085;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* Keep the active Home booking countdown on the service-detail row. */
+.customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy {
+  padding-right: 106px;
+}
+
+.customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring {
+  top: auto;
+  bottom: 12px;
+  transform: none;
+  width: auto;
+  min-width: 92px;
+}
+
+.customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring b {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Dark current-booking treatment for the Customer Home footer. */
+body.portal-customer .customer-cart-bar.customer-ongoing-task-bar {
+  background: linear-gradient(120deg, #0a1b3d 0%, #050a14 100%);
+  box-shadow: 0 12px 28px rgba(2, 8, 23, 0.32);
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card {
+  color: #ffffff;
+}
+
+body.portal-customer .customer-ongoing-task-icon {
+  background: rgba(255, 255, 255, 0.13);
+  color: #ffffff;
+}
+
+body.portal-customer .customer-ongoing-task-copy small,
+body.portal-customer .customer-ongoing-task-copy small .customer-track-svg {
+  color: #82b7ff;
+}
+
+body.portal-customer .customer-ongoing-task-copy b,
+body.portal-customer .customer-ongoing-task-copy b > span {
+  color: #ffffff;
+}
+
+body.portal-customer .customer-ongoing-task-copy em {
+  color: #d6e7ff;
+}
+
+body.portal-customer .customer-ongoing-task-finish-pin {
+  background: #000000;
+  color: #ffffff;
+}
+
+body.portal-customer .customer-ongoing-task-finish-pin small,
+body.portal-customer .customer-ongoing-task-finish-pin b {
+  color: #ffffff;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy {
+  padding-right: 182px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring {
+  right: 8px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring b {
+  color: #ffffff;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring .ring-track {
+  stroke: rgba(255, 255, 255, 0.2);
+}
+
+body.portal-customer .customer-ongoing-task-extend {
+  position: absolute;
+  right: 100px;
+  bottom: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 7px;
+  background: #075eea;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+body.portal-customer .customer-ongoing-task-extend .customer-track-svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.8;
+}
+
+body.portal-customer .customer-ongoing-task-dots button {
+  background: rgba(255, 255, 255, 0.38);
+}
+
+body.portal-customer .customer-ongoing-task-dots button.active {
+  background: #ffffff;
+}
+
+/* Home working-booking layout: keep service details, PIN and controls readable. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task {
+  min-height: 110px;
+  padding: 8px 8px 42px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-icon {
+  grid-row: 1 / 3;
+  align-self: start;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy {
+  grid-row: 1 / 3;
+  align-self: start;
+  padding: 3px 0 0 !important;
+  gap: 5px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy b {
+  gap: 6px;
+  font-size: 14px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy b > span {
+  flex: 0 1 auto;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy em {
+  font-size: 12px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-live {
+  position: absolute;
+  left: 60px;
+  bottom: 43px;
+  margin: 0;
+}
+
+body.portal-customer .customer-ongoing-task-finish-pin {
+  min-height: 25px;
+  padding: 0;
+  gap: 6px;
+  background: transparent;
+}
+
+body.portal-customer .customer-ongoing-task-finish-pin small {
+  color: #d6e7ff;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+body.portal-customer .customer-ongoing-task-finish-pin b {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+body.portal-customer .customer-ongoing-task-finish-pin b i {
+  width: 21px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: #000000;
+  color: #ffffff;
+  font-size: 17px;
+  font-style: normal;
+  font-weight: 900;
+  line-height: 1;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-extend {
+  right: 100px;
+  bottom: 9px;
+  min-height: 29px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring {
+  right: 8px;
+  bottom: 8px;
+  min-width: 86px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring b {
+  font-size: 13px;
+}
+/* Three clear rows for an active Home booking: detail, PIN, then actions. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task {
+  height: 126px;
+  min-height: 126px;
+  padding: 0 8px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-icon {
+  position: absolute;
+  left: 8px;
+  top: 10px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy {
+  position: absolute;
+  top: 10px;
+  left: 60px;
+  right: 8px;
+  display: block;
+  padding: 0 !important;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy small {
+  display: flex;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy b {
+  margin-top: 4px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-live {
+  top: 51px;
+  bottom: auto;
+  left: 60px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-extend {
+  right: auto;
+  left: 60px;
+  bottom: 10px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring {
+  right: 8px;
+  bottom: 9px;
+}
+/* Keep the active booking Finish PIN aligned to the right edge. */
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-live {
+  left: auto;
+  right: 9px;
+}
+/* Keep active booking details anchored beside the category image. */
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy {
+  left: 60px;
+  right: auto;
+  width: calc(100% - 68px);
+  text-align: left;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy small,
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy b {
+  justify-content: flex-start;
+  text-align: left;
+}
+/* Final mobile anchors for the active Home booking card. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy {
+  left: 60px !important;
+  right: auto !important;
+  width: calc(100% - 68px) !important;
+  margin-left: 0 !important;
+  transform: none !important;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy small,
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-copy b {
+  margin-left: 0 !important;
+  justify-content: flex-start !important;
+  align-self: flex-start;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-extend {
+  left: auto !important;
+  right: 100px !important;
+  bottom: 10px;
+}
+/* Dedicated left column for the active Home booking service detail. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-details {
+  position: absolute !important;
+  top: 10px !important;
+  left: 60px !important;
+  right: auto !important;
+  width: 150px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-details small,
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-details b {
+  width: 100% !important;
+  display: flex !important;
+  justify-content: flex-start !important;
+  align-items: center !important;
+  text-align: left !important;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-details b > span {
+  max-width: 82px;
+}
+/* Tight left alignment beside the category image. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-details {
+  left: 52px !important;
+}
+/* Lock each active-booking detail line directly beside the image. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-details {
+  left: 52px !important;
+  height: 38px;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-details > small {
+  position: absolute !important;
+  top: 0;
+  left: 0 !important;
+  width: 150px !important;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-details > b {
+  position: absolute !important;
+  top: 20px;
+  left: 0 !important;
+  width: 170px !important;
+}
+/* Base Home current-booking detail alignment, including assigned and confirmed states. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card:not(.has-live-task) {
+  grid-template-columns: 42px minmax(0, 1fr) !important;
+  grid-template-rows: 22px 20px !important;
+  padding: 8px !important;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card:not(.has-live-task) .customer-ongoing-task-icon {
+  grid-column: 1 !important;
+  grid-row: 1 / 3 !important;
+  justify-self: start !important;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card:not(.has-live-task) .customer-ongoing-task-copy {
+  grid-column: 2 !important;
+  grid-row: 1 / 3 !important;
+  justify-self: start !important;
+  align-self: center !important;
+  width: 100% !important;
+  padding: 0 !important;
+  text-align: left !important;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card:not(.has-live-task) .customer-ongoing-task-copy small,
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card:not(.has-live-task) .customer-ongoing-task-copy b {
+  width: 100% !important;
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+/* Compact active Home booking card without collapsing its three rows. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task {
+  height: 108px;
+  min-height: 108px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-live {
+  top: 42px;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-extend {
+  bottom: 7px !important;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring {
+  bottom: 6px;
+}
+/* Give confirmed/assigned booking details a clear gap after the category image. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card:not(.has-live-task) {
+  grid-template-columns: 52px minmax(0, 1fr) !important;
+  column-gap: 12px;
+}
+/* Crisp, lighter typography for the Home current-booking card. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-copy small {
+  font-weight: 650;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-copy b {
+  font-weight: 650;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-copy em {
+  font-weight: 600;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card:not(.has-live-task) {
+  grid-template-columns: 54px minmax(0, 1fr) !important;
+  column-gap: 14px;
+}
+/* Compact working current-booking card. */
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task {
+  height: 96px;
+  min-height: 96px;
+}
+
+body.portal-customer .customer-ongoing-task-card.has-live-task .customer-ongoing-task-live {
+  top: 34px;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-ongoing-task-extend {
+  bottom: 5px !important;
+}
+
+body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-task .customer-track-countdown-ring {
+  bottom: 4px;
 }

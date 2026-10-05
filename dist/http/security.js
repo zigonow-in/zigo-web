@@ -28,7 +28,7 @@ export const attachRequestId = (req, res, next) => {
 };
 export const applySecurityHeaders = (_req, res, next) => {
     res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
-    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), payment=*, usb=(), geolocation=(self)");
     res.setHeader("Cache-Control", "no-store");
     next();

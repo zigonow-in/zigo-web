@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requirePermission } from "../../http/auth.js";
 import { emitBookingRealtimeEvent } from "../operations/bookingRealtime.js";
-import { assignAssistantCluster, assignAssistantVehicle, createVehicleDamageReport, getAssistantRealtimeSnapshot, listAssistantMasterLogs, listAssistantMasters, removeAssistantCluster, removeAssistantVehicle, updateAssistantAvailability, updateAssistantLoginStatus, updateAssistantWork } from "./assistantMaster.repository.js";
+import { assignAssistantCluster, saveAssistantAreas, assignAssistantVehicle, createVehicleDamageReport, getAssistantRealtimeSnapshot, listAssistantMasterLogs, listAssistantMasters, removeAssistantCluster, removeAssistantVehicle, updateAssistantAvailability, updateAssistantLoginStatus, updateAssistantWork } from "./assistantMaster.repository.js";
 export const assistantMasterRouter = Router();
 const assistantParamsSchema = z.object({
     assistantId: z.string().uuid()
@@ -19,6 +19,29 @@ const workBodySchema = z.object({
 });
 const clusterBodySchema = z.object({
     clusterId: z.string().uuid()
+});
+const areaSelectionSchema = z.object({
+    stateId: z.string().uuid(),
+    cityId: z.string().uuid(),
+    zoneId: z.string().uuid().nullable(),
+    clusters: z.array(z.string().uuid()).max(10000),
+    microMarkets: z.array(z.string().uuid()).max(10000),
+    nanoMarkets: z.array(z.string().uuid()).max(10000),
+    allClusters: z.boolean(),
+    allMicroMarkets: z.boolean(),
+    allNanoMarkets: z.boolean()
+});
+assistantMasterRouter.post("/:assistantId/areas", requirePermission("verification.edit"), async (req, res, next) => {
+    try {
+        const { assistantId } = assistantParamsSchema.parse(req.params);
+        const body = z.object({ working: areaSelectionSchema, assign: areaSelectionSchema }).parse(req.body);
+        await saveAssistantAreas(assistantId, body, req.auth.sub);
+        await emitAssistantRealtimeChange({ type: "assistant.cluster.changed", assistantId, message: "Assistant areas changed" });
+        res.status(204).send();
+    }
+    catch (error) {
+        next(error);
+    }
 });
 const vehicleBodySchema = z.object({
     vehicleMasterId: z.string().uuid()

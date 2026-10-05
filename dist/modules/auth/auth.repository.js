@@ -12,7 +12,7 @@ export async function findUserById(userId) {
         password_hash as "passwordHash",
         display_name as "displayName",
         metadata->>'profilePictureUrl' as "profilePictureUrl",
-        metadata->>'accountStatus' as "accountStatus"
+        metadata->>'accountStatus' as "accountStatus", metadata
       from zigo.users
       where id = $1
         and deleted_at is null
@@ -29,7 +29,7 @@ export async function findUsersForLogin(identifier) {
         password_hash as "passwordHash",
         display_name as "displayName",
         metadata->>'profilePictureUrl' as "profilePictureUrl",
-        metadata->>'accountStatus' as "accountStatus"
+        metadata->>'accountStatus' as "accountStatus", metadata
       from zigo.users
       where deleted_at is null
         and (lower(email::text) = lower($1) or phone = $1)

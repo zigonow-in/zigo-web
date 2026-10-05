@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { isAccountAccessBlocked } from "../auth/accountAccess.js";
 import crypto from "node:crypto";
 import jwt from "jsonwebtoken";
 import { env } from "../../config/env.js";
@@ -8,10 +9,12 @@ import { updateAssistantAvailability } from "../assistant-master/assistantMaster
 import { createAdminCustomerAddress, createAdminCustomerPreviousUsedLocation, deleteAdminCustomerAddress, listAdminCustomerAddresses, listAdminCustomerPreviousUsedLocations, saveAdminCustomerPreviousUsedLocationAsAddress, setAdminCustomerAddressDefault, updateAdminCustomerAddress } from "../customers/customers.repository.js";
 import { ensureCategoryServiceMasterSchema, getBookingCatalog, listBookingEngineQuickRepliesForBooking, listPaymentModeRules, listTaxMasterRules, resolveBookingEngineInstantEtaMinutes } from "../masters/masters.repository.js";
 import { ensureBookingEngineSchema, releaseCapacityReservations } from "../operations/bookingEngine.js";
-import { goAssistantOffline, goAssistantOnline, recordAssistantHeartbeat, stopAssistantCalendarBlocksForBooking } from "../operations/assistantDispatchEngine.js";
+import { goAssistantOffline, goAssistantOnline, recordAssistantHeartbeat, recalculateAssistantAvailability, stopAssistantCalendarBlocksForBooking } from "../operations/assistantDispatchEngine.js";
 import { createBookingByAdmin, getBookingAvailabilityDecision, listBookingLocationServiceBoundaries, reverseBookingLocation, searchBookingLocations, validateBookingLocation } from "../operations/operations.repository.js";
-import { findCustomerPaidRazorpayPaymentByReference, getCustomerRazorpayOrderStatus, linkRazorpayPaymentToBooking } from "../payments/payments.repository.js";
+import { olaBrowserConfig, requestOlaJson } from "../maps/olaMaps.service.js";
+import { createRazorpayPaymentOrder, findCustomerPaidRazorpayPaymentByReference, getCustomerRazorpayOrderStatus, linkRazorpayPaymentToBooking } from "../payments/payments.repository.js";
 import { getBookingEngineSetting } from "../settings/settings.repository.js";
+import { getCustomerWallet, getCustomerWalletTransaction, listCustomerWalletTransactions } from "../wallets/wallet.repository.js";
 import { getUserById, sendEmailOtp, sendUserOtpChallenge, verifyUserOtpChallenge } from "../users/users.repository.js";
 import { enqueueCustomerBookingInvoice } from "./bookingInvoice.service.js";
 function normalizeCustomerPaymentType(value) {
@@ -27,7 +30,7 @@ function normalizeCustomerPaymentType(value) {
         return "razorpay";
     return normalized;
 }
-let portalOlaAccessToken = null;
+let portalSchemaReady = null;
 function normalizePhone(phone) {
     const digits = String(phone || "").replace(/\D/g, "");
     if (!digits)
@@ -122,8 +125,10 @@ function normalizePortalFavorites(input = {}) {
         stores: normalizePortalFavoriteIds(input.stores)
     };
 }
-async function ensurePortalSchema(client = pool) {
-    await client.query(`
+function ensurePortalSchema(_client = pool) {
+    if (portalSchemaReady)
+        return portalSchemaReady;
+    portalSchemaReady = pool.query(`
     create table if not exists zigo.booking_task_updates (
       id uuid primary key default gen_random_uuid(),
       service_request_id uuid not null references zigo.service_requests(id) on delete cascade,
@@ -210,13 +215,39 @@ async function ensurePortalSchema(client = pool) {
     );
     create index if not exists idx_booking_reviews_customer on zigo.booking_reviews(customer_user_id, updated_at desc);
     create index if not exists idx_booking_reviews_assistant on zigo.booking_reviews(assistant_id, updated_at desc);
-  `);
+
+    create table if not exists zigo.booking_add_on_payments (
+      id uuid primary key default gen_random_uuid(),
+      service_request_id uuid not null references zigo.service_requests(id) on delete cascade,
+      customer_user_id uuid not null references zigo.users(id) on delete cascade,
+      kind text not null check (kind in ('extension', 'tip')),
+      duration_minutes integer,
+      base_amount_paise integer not null default 0,
+      discount_amount_paise integer not null default 0,
+      selling_amount_paise integer not null default 0,
+      tax_amount_paise integer not null default 0,
+      total_amount_paise integer not null default 0,
+      provider_order_id text unique,
+      provider_payment_id text,
+      status_code text not null default 'pending',
+      pricing jsonb not null default '{}'::jsonb,
+      metadata jsonb not null default '{}'::jsonb,
+      paid_at timestamptz,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists idx_booking_add_on_payments_booking on zigo.booking_add_on_payments(service_request_id, created_at desc);
+  `).then(() => undefined).catch((error) => {
+        portalSchemaReady = null;
+        throw error;
+    });
+    return portalSchemaReady;
 }
 async function setAssistantAvailabilityForPortalTask(client, assistantId, status) {
     const activeWork = await client.query(`
       select ta.id
       from zigo.task_assignments ta
-      join zigo.service_requests sr on sr.id = ta.service_request_id or sr.id = ta.request_id
+      join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id) or sr.id = ta.request_id
       where ta.assistant_id = $1
         and ta.status_code in ('in_progress', 'approval_pending')
         and sr.status_code in ('in_progress', 'approval_pending')
@@ -832,13 +863,12 @@ async function findPortalUserByPhone(client, actor, phone) {
 async function findAnyUserByPhone(client, phone) {
     const digits = phoneDigits(phone);
     const result = await client.query(`
-      select u.id as "userId", c.id as "customerId", a.id as "assistantId"
+      select u.id as "userId", c.id as "customerId", a.id as "assistantId", u.deleted_at as "deletedAt", u.metadata
       from zigo.users u
       left join zigo.customers c on c.user_id = u.id
       left join zigo.assistants a on a.user_id = u.id
-      where u.deleted_at is null
-        and regexp_replace(coalesce(u.phone, ''), '\\D', '', 'g') = $1
-      order by u.created_at desc
+      where regexp_replace(coalesce(u.phone, ''), '\\D', '', 'g') = $1
+      order by (u.deleted_at is null) desc, u.created_at desc
       limit 1
     `, [digits]);
     return result.rows[0] ?? null;
@@ -865,20 +895,13 @@ function passwordLoginAllowed(metadata, hasPassword) {
         return metadataFlag(metadata, "loginWithPassword");
     return hasPassword;
 }
-function accountIsAdminDeactivated(metadata) {
-    return metadataFlag(metadata, "isAdminDeactivated")
-        || String(metadata?.deactivationSource || "").toLowerCase() === "admin";
-}
 function accountCanUsePortal(metadata) {
-    if (accountIsAdminDeactivated(metadata))
-        return false;
-    const status = String(metadata?.accountStatus || metadata?.verificationStatus || "active").toLowerCase();
-    return !["inactive", "deactive", "deactivated", "deleted", "blocked"].includes(status);
+    return !isAccountAccessBlocked(metadata);
 }
 function isPendingPortalOtp(user) {
     if (!user)
         return false;
-    if (accountIsAdminDeactivated(user.metadata))
+    if (isAccountAccessBlocked({ ...user.metadata, accountStatus: user.accountStatus, otpVerificationStatus: user.otpVerificationStatus }, true))
         return false;
     return String(user.accountStatus || "").toLowerCase() === "inactive"
         && String(user.otpVerificationStatus || "").toLowerCase() === "pending";
@@ -888,7 +911,7 @@ function assertPortalUserCanLogin(user, actor, options = {}) {
         throw new HttpError(404, "Account not found.");
     if (accountCanUsePortal(user.metadata))
         return;
-    if (actor === "customer" && options.allowNewCustomerRegistration && !accountIsAdminDeactivated(user.metadata))
+    if (actor === "customer" && options.allowNewCustomerRegistration && isPendingPortalOtp(user))
         return;
     if (options.allowPendingPortalOtp && isPendingPortalOtp(user))
         return;
@@ -959,6 +982,7 @@ async function createCustomerPortalUser(client, input) {
       insert into zigo.users (phone, display_name, metadata)
       values ($1, $2, jsonb_build_object(
         'accountStatus', 'inactive',
+        'otpVerificationStatus', 'pending',
         'isLoginWithOtp', true,
         'isLoginWithPassword', false,
         'createdFrom', 'customer_portal'
@@ -978,6 +1002,8 @@ async function ensureCustomerPortalIdentity(client, input) {
     const existing = await findAnyUserByPhone(client, input.phone);
     if (!existing)
         return createCustomerPortalUser(client, input);
+    if (existing.deletedAt || isAccountAccessBlocked(existing.metadata, true))
+        throw new HttpError(403, "Customer account is deactive or deleted. Contact admin.");
     await assertNoCustomerPortalBlockedRole(client, existing.userId);
     const roleId = await roleIdByCode(client, "customer");
     if (!roleId)
@@ -1010,14 +1036,44 @@ async function ensureCustomerPortalIdentity(client, input) {
     return { ...existing, customerId: customer.rows[0].id };
 }
 function portalToken(input) {
-    return jwt.sign({ sub: input.userId, app: `${input.actor}_portal`, roles: [input.actor] }, env.JWT_SECRET, { expiresIn: "7d" });
+    return jwt.sign({ sub: input.userId, app: `${input.actor}_portal`, roles: [input.actor], tokenType: "access" }, env.JWT_SECRET, { expiresIn: "15m" });
+}
+function portalRefreshToken(input) {
+    return jwt.sign({ sub: input.userId, app: `${input.actor}_portal`, roles: [input.actor], tokenType: "refresh" }, env.JWT_SECRET, { expiresIn: "30d" });
+}
+function portalTokenPair(input) {
+    return { token: portalToken(input), refreshToken: portalRefreshToken(input) };
+}
+function verifyPortalJwt(token) {
+    let payload;
+    try {
+        payload = jwt.verify(token, env.JWT_SECRET, { algorithms: ['HS256'] });
+    }
+    catch {
+        throw new HttpError(401, 'Portal token is invalid or expired. Please login again.');
+    }
+    if (typeof payload !== 'object' || !payload || typeof payload.sub !== 'string'
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.sub)) {
+        throw new HttpError(401, 'Invalid portal token. Please login again.');
+    }
+    return payload;
 }
 export function verifyPortalToken(token, actor) {
-    const payload = jwt.verify(token, env.JWT_SECRET);
+    const payload = verifyPortalJwt(token);
+    if (payload.tokenType === "refresh")
+        throw new HttpError(401, "Portal access token required.");
     const tokenActor = payload.app === "customer_portal" ? "customer" : payload.app === "assistant_portal" ? "assistant" : null;
     if (!tokenActor || (actor && tokenActor !== actor))
         throw new HttpError(403, "Portal token required.");
     return { userId: payload.sub, actor: tokenActor };
+}
+export async function refreshPortalSession(input) {
+    const payload = verifyPortalJwt(input.refreshToken);
+    const tokenActor = payload.app === "customer_portal" ? "customer" : payload.app === "assistant_portal" ? "assistant" : null;
+    if (!tokenActor || tokenActor !== input.actor || payload.tokenType !== "refresh")
+        throw new HttpError(401, "Invalid portal refresh token.");
+    await assertActivePortalSession(payload.sub, tokenActor);
+    return { ...portalTokenPair({ userId: payload.sub, actor: tokenActor }), actor: tokenActor };
 }
 export async function getPortalConfig() {
     const [settings, taxRules, paymentModes] = await Promise.all([
@@ -1032,10 +1088,7 @@ export async function getPortalConfig() {
             customerAssistantDelayCancelOpenMinutes: settings.customerAssistantDelayCancelOpenMinutes,
             customerAssistantDelayAutoCancelMinutes: settings.customerAssistantDelayAutoCancelMinutes
         },
-        maps: {
-            olaMapsApiKey: env.OLA_MAPS_API_KEY ?? null,
-            olaMapsStyleUrl: env.OLA_MAPS_STYLE_URL
-        },
+        maps: olaBrowserConfig(),
         customerPortal: settings.customerPortal,
         assistantPortal: settings.assistantPortal,
         adminOverride: settings.adminOverride,
@@ -1100,8 +1153,10 @@ export async function verifyPortalCode(input) {
     assertPortalUserCanLogin(existingUser, input.actor, { allowPendingPortalOtp: true });
     await verifyUserOtpChallenge({ userId: identity.userId, otps: { mobile: input.code }, actorUserId: identity.userId });
     const user = await getUserById(identity.userId);
+    assertPortalUserCanLogin(user, input.actor);
+    await assertActivePortalSession(identity.userId, input.actor);
     return {
-        token: portalToken({ userId: identity.userId, actor: input.actor }),
+        ...portalTokenPair({ userId: identity.userId, actor: input.actor }),
         actor: input.actor,
         user,
         customerId: identity.customerId,
@@ -1128,8 +1183,10 @@ export async function loginAssistantPortalWithPassword(input) {
         throw new HttpError(401, "Invalid assistant login details.");
     await pool.query("update zigo.users set last_login_at = now(), updated_at = now() where id = $1 and deleted_at is null", [identity.userId]);
     const user = await getUserById(identity.userId);
+    assertPortalUserCanLogin(user, 'assistant');
+    await assertActivePortalSession(identity.userId, 'assistant');
     return {
-        token: portalToken({ userId: identity.userId, actor: "assistant" }),
+        ...portalTokenPair({ userId: identity.userId, actor: "assistant" }),
         actor: "assistant",
         user,
         assistantId: identity.assistantId
@@ -1208,7 +1265,7 @@ export async function verifyAssistantPasswordResetCode(input) {
     if (!matched)
         throw new HttpError(400, "Invalid password reset verification code.");
     const passwordHash = await bcrypt.hash(input.password, 12);
-    await pool.query(`
+    const reset = await pool.query(`
       update zigo.users
       set password_hash = $2,
           last_login_at = now(),
@@ -1222,15 +1279,30 @@ export async function verifyAssistantPasswordResetCode(input) {
             ),
           updated_by = $1,
           updated_at = now()
-      where id = $1 and deleted_at is null
-    `, [identity.userId, passwordHash]);
+      where id = $1 and deleted_at is null and coalesce(metadata, '{}'::jsonb) = $3::jsonb
+      returning id
+    `, [identity.userId, passwordHash, JSON.stringify(identity.metadata || {})]);
+    if (!reset.rows.length)
+        throw new HttpError(409, "Account changed during password verification. Please request a new code.");
     const user = await getUserById(identity.userId);
+    assertPortalUserCanLogin(user, 'assistant');
+    await assertActivePortalSession(identity.userId, 'assistant');
     return {
-        token: portalToken({ userId: identity.userId, actor: "assistant" }),
+        ...portalTokenPair({ userId: identity.userId, actor: "assistant" }),
         actor: "assistant",
         user,
         assistantId: identity.assistantId
     };
+}
+export async function assertActivePortalSession(userId, actor) {
+    const result = await pool.query(`
+    select u.metadata from zigo.users u where u.id=$1 and u.deleted_at is null
+      and exists (select 1 from zigo.user_roles ur join zigo.roles r on r.id=ur.role_id
+        where ur.user_id=u.id and r.code=$2 and coalesce(ur.is_active,true)=true
+          and coalesce(ur.is_deleted,false)=false and coalesce(r.is_active,true)=true and coalesce(r.is_deleted,false)=false)
+    limit 1`, [userId, actor]);
+    if (!result.rows[0] || isAccountAccessBlocked(result.rows[0].metadata))
+        throw new HttpError(401, 'Account is not active. Please contact admin.');
 }
 export async function getPortalMe(input) {
     await ensurePortalSchema();
@@ -1244,6 +1316,7 @@ export async function getPortalMe(input) {
       where u.id = $1 and u.deleted_at is null
       limit 1
     `, [input.userId]);
+    const wallet = input.actor === "customer" ? await getCustomerWallet(input.userId) : null;
     const cart = input.actor === "customer" && identity.rows[0]?.customerId
         ? await getCustomerPortalCart(input.userId)
         : [];
@@ -1267,6 +1340,7 @@ export async function getPortalMe(input) {
         customerId: identity.rows[0]?.customerId ?? null,
         assistantId: identity.rows[0]?.assistantId ?? null,
         availability,
+        wallet,
         cart,
         favorites
     };
@@ -3527,7 +3601,7 @@ export async function listAssistantPortalTasks(userId) {
           coalesce(json_agg(jsonb_build_object('address', rl.address, 'latitude', rl.latitude, 'longitude', rl.longitude) order by rl.sequence) filter (where rl.id is not null), '[]'::json) as locations
         from zigo.assistants a
         join zigo.task_assignments ta on ta.assistant_id = a.id
-        join zigo.service_requests sr on sr.id = ta.service_request_id
+        join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
         left join zigo.customers cu on cu.id = sr.customer_id
         left join zigo.users u on u.id = cu.user_id
         left join zigo.services s on s.id = sr.service_id
@@ -3727,45 +3801,6 @@ function dedupePortalRouteCoordinates(points) {
     }
     return unique;
 }
-async function getPortalOlaAccessToken() {
-    if (!env.OLA_MAPS_CLIENT_ID || !env.OLA_MAPS_CLIENT_SECRET)
-        return null;
-    if (portalOlaAccessToken && portalOlaAccessToken.expiresAt > Date.now() + 30_000)
-        return portalOlaAccessToken.token;
-    const body = new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: env.OLA_MAPS_CLIENT_ID,
-        client_secret: env.OLA_MAPS_CLIENT_SECRET
-    });
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3500);
-    try {
-        const response = await fetch(env.OLA_MAPS_TOKEN_URL, {
-            method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-            body,
-            signal: controller.signal
-        });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || typeof payload.access_token !== "string") {
-            portalOlaAccessToken = null;
-            return null;
-        }
-        const expiresIn = Number(payload.expires_in ?? 300);
-        portalOlaAccessToken = {
-            token: payload.access_token,
-            expiresAt: Date.now() + Math.max(60, expiresIn - 30) * 1000
-        };
-        return portalOlaAccessToken.token;
-    }
-    catch {
-        portalOlaAccessToken = null;
-        return null;
-    }
-    finally {
-        clearTimeout(timeout);
-    }
-}
 async function ensureAssistantLocationTrackingSchema(client = pool) {
     await client.query(`
     alter table if exists zigo.assistant_availability
@@ -3811,7 +3846,6 @@ async function fetchPortalOlaRoute(origin, destination, waypoints = []) {
     const timeout = setTimeout(() => controller.abort(), 3500);
     try {
         const url = new URL("https://api.olamaps.io/routing/v1/directions/basic");
-        const token = await getPortalOlaAccessToken();
         url.searchParams.set("origin", `${origin.latitude},${origin.longitude}`);
         url.searchParams.set("destination", `${destination.latitude},${destination.longitude}`);
         url.searchParams.set("mode", "driving");
@@ -3820,22 +3854,7 @@ async function fetchPortalOlaRoute(origin, destination, waypoints = []) {
         url.searchParams.set("overview", "full");
         if (waypoints.length)
             url.searchParams.set("waypoints", waypoints.map((point) => `${point.latitude},${point.longitude}`).join("|"));
-        if (!token && env.OLA_MAPS_API_KEY)
-            url.searchParams.set("api_key", env.OLA_MAPS_API_KEY);
-        const response = await fetch(url, {
-            method: "POST",
-            headers: {
-                Accept: "application/json",
-                ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                Origin: env.CORS_ORIGIN === "*" ? `http://localhost:${env.PORT}` : env.CORS_ORIGIN,
-                Referer: env.CORS_ORIGIN === "*" ? `http://localhost:${env.PORT}/` : `${env.CORS_ORIGIN.replace(/\/$/, "")}/`,
-                "X-Request-Id": `zigo-route-${Date.now()}-${Math.random().toString(16).slice(2)}`
-            },
-            signal: controller.signal
-        }).catch(() => null);
-        if (!response?.ok)
-            return null;
-        const payload = await response.json().catch(() => null);
+        const payload = await requestOlaJson(url.pathname, Object.fromEntries(url.searchParams), { method: "POST", timeoutMs: 3500 });
         const route = payload?.routes?.[0] || payload?.data?.routes?.[0] || payload?.route || payload?.data?.route || null;
         if (!route)
             return null;
@@ -3999,7 +4018,7 @@ export async function recordAssistantPortalLocationPing(userId, input) {
     const active = await pool.query(`
       select sr.id as "bookingId", ta.id as "assignmentId"
       from zigo.task_assignments ta
-      join zigo.service_requests sr on sr.id = ta.service_request_id
+      join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
       where ta.assistant_id = $1
         and lower(coalesce(ta.status_code, '')) in ('assigned', 'accepted', 'in_progress', 'working', 'approval_pending')
         and lower(coalesce(sr.status_code, '')) not in ('completed', 'success', 'done', 'cancelled', 'canceled', 'failed', 'rejected', 'expired')
@@ -4078,7 +4097,7 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
           ta.responded_at as "assignmentRespondedAt"
         from zigo.task_assignments ta
         join zigo.assistants a on a.id = ta.assistant_id
-        join zigo.service_requests sr on sr.id = ta.service_request_id
+        join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
         left join zigo.customers cu on cu.id = sr.customer_id
         where ta.id = $1 and a.user_id = $2
         limit 1
@@ -4316,7 +4335,7 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
                 plannedEndAt: currentTaskEndAt.toISOString(),
                 actualTaskEndAt: extendedTaskEndAt.toISOString(),
                 taskEndAt: extendedTaskEndAt.toISOString(),
-                bookingEndAt: currentTaskEndAt.toISOString(),
+                bookingEndAt: extendedTaskEndAt.toISOString(),
                 bookingAvailableAt: extendedAvailableAt.toISOString(),
                 expectedFreeAt: extendedAvailableAt.toISOString(),
                 durationMinutes,
@@ -4535,7 +4554,7 @@ export async function createPortalTaskUpdate(input) {
         select cu.user_id as "customerUserId", a.id as "assistantId"
         from zigo.assistants a
         join zigo.task_assignments ta on ta.assistant_id = a.id
-        join zigo.service_requests sr on sr.id = ta.service_request_id
+        join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
         left join zigo.customers cu on cu.id = sr.customer_id
         where a.user_id = $1 and sr.id = $2
           and ($3::uuid is null or ta.id = $3::uuid)
@@ -4800,19 +4819,6 @@ export async function approvePortalTimeExtension(userId, updateId) {
         const updatedBooking = await client.query(`
         update zigo.service_requests
         set duration_minutes = coalesce(duration_minutes, 0) + $2::int,
-            booking_amount_paise = coalesce(booking_amount_paise, estimated_amount_paise, 0) + $3::bigint,
-            payment_details = case when $3::bigint > 0 then
-              coalesce(payment_details, '{}'::jsonb) || jsonb_build_object(
-                'paidAmountPaise', greatest(
-                  coalesce(nullif(payment_details->>'paidAmountPaise', '')::bigint, 0),
-                  case when coalesce(is_paid, false) then coalesce(booking_amount_paise, estimated_amount_paise, 0) else 0 end
-                ),
-                'extensionBalanceAddedPaise', $3::bigint,
-                'extensionBalanceAddedAt', $6::text
-              )
-              else coalesce(payment_details, '{}'::jsonb) end,
-            payment_status = case when $3::bigint > 0 then 'due' else payment_status end,
-            is_paid = case when $3::bigint > 0 then false else is_paid end,
             booking_end_at = case when booking_end_at is null then null else booking_end_at + ($2::int * interval '1 minute') end,
             booking_available_at = case when booking_available_at is null then null else booking_available_at + ($2::int * interval '1 minute') end,
             metadata = (coalesce(metadata, '{}'::jsonb) || $4::jsonb)
@@ -4899,4 +4905,299 @@ export async function approvePortalTimeExtension(userId, updateId) {
     finally {
         client.release();
     }
+}
+export async function createCustomerPortalBookingAddOnOrder(userId, input) {
+    await ensurePortalSchema();
+    const booking = await pool.query(`
+    select sr.id as "bookingId", sr.category_id as "categoryId", sr.cluster_id as "clusterId", sr.status_code as "statusCode", sr.request_number as "requestNumber", sr.accepted_assignment_id as "assignmentId", sr.booking_end_at as "bookingEndAt", sr.booking_available_at as "bookingAvailableAt"
+    from zigo.service_requests sr join zigo.customers c on c.id = sr.customer_id
+    where sr.id = $1::uuid and c.user_id = $2::uuid limit 1`, [input.bookingId, userId]);
+    const row = booking.rows[0];
+    if (!row)
+        throw new HttpError(404, "Booking not found.");
+    if (isBookingFinalStatus(row.statusCode))
+        throw new HttpError(409, "This booking is already closed.");
+    const kind = input.kind;
+    const minutes = Math.max(0, Math.min(240, Math.round(Number(input.durationMinutes || 0))));
+    let pricing;
+    if (kind === "tip") {
+        throw new HttpError(400, "Use the tip amount endpoint to start a tip payment.");
+    }
+    if (!row.categoryId || !row.clusterId || !minutes)
+        throw new HttpError(400, "A valid extension duration is required.");
+    const quote = await resolveCustomerPortalCategoryPrice({ clusterId: row.clusterId, categoryId: row.categoryId, durationMinutes: minutes });
+    const rule = await pool.query(`select coalesce(available_for_extend, false) as "available" from zigo.category_price_rules where id = $1::uuid`, [quote.id]);
+    if (!rule.rows[0]?.available)
+        throw new HttpError(409, "This duration cannot be used to extend the service.");
+    pricing = { ...(await resolveCustomerPortalTaxPricing(quote.basePrice, quote.sellingPrice)), durationMinutes: minutes, categoryPriceRuleId: quote.id, label: quote.label || "Service extension" };
+    const currentEndAt = validDateFromUnknown(row.bookingEndAt) ?? new Date();
+    const currentAvailableAt = validDateFromUnknown(row.bookingAvailableAt) ?? currentEndAt;
+    const bufferMinutes = Math.max(0, Math.ceil((currentAvailableAt.getTime() - currentEndAt.getTime()) / 60_000));
+    await assertAssistantCanAbsorbExtension(pool, {
+        bookingId: row.bookingId,
+        assignmentId: row.assignmentId,
+        currentAvailableAt,
+        extendedAvailableAt: addMinutes(addMinutes(currentEndAt, minutes), bufferMinutes)
+    });
+    const bookingReference = String(row.requestNumber || row.bookingId).trim();
+    // Keep the booking ID in Razorpay notes while giving each extension order its own receipt.
+    const receipt = `${bookingReference.slice(0, 24)}-EXT-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 40);
+    const order = await createRazorpayPaymentOrder({ amountPaise: pricing.totalAmountPaise, customerUserId: userId, bookingId: row.bookingId, bookingReference, receipt, metadata: { addOnKind: kind, durationMinutes: minutes } });
+    const saved = await pool.query(`insert into zigo.booking_add_on_payments (service_request_id, customer_user_id, kind, duration_minutes, base_amount_paise, discount_amount_paise, selling_amount_paise, tax_amount_paise, total_amount_paise, provider_order_id, pricing, metadata)
+    values ($1::uuid,$2::uuid,'extension',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,jsonb_build_object('source','customer_portal')) returning id`, [row.bookingId, userId, minutes, pricing.baseAmountPaise, pricing.discountAmountPaise, pricing.sellingAmountPaise, pricing.taxAmountPaise, pricing.totalAmountPaise, order.orderId, JSON.stringify(pricing)]);
+    return { ...order, addOnId: saved.rows[0].id, kind, pricing };
+}
+export async function createCustomerPortalTipOrder(userId, input) {
+    await ensurePortalSchema();
+    const amountPaise = Math.max(2000, Math.min(100000, Math.round(Number(input.amountPaise || 0))));
+    const booking = await pool.query(`select sr.id as "bookingId", sr.status_code as "statusCode", sr.request_number as "requestNumber" from zigo.service_requests sr join zigo.customers c on c.id=sr.customer_id where sr.id=$1::uuid and c.user_id=$2::uuid limit 1`, [input.bookingId, userId]);
+    const row = booking.rows[0];
+    if (!row)
+        throw new HttpError(404, "Booking not found.");
+    if (isBookingFinalStatus(row.statusCode) && String(row.statusCode).toLowerCase() !== "completed")
+        throw new HttpError(409, "Tip is unavailable for this booking.");
+    const paid = await pool.query(`select 1 from zigo.booking_add_on_payments where service_request_id=$1::uuid and kind='tip' and status_code='paid' limit 1`, [row.bookingId]);
+    if (paid.rows.length)
+        throw new HttpError(409, "A tip has already been paid for this booking.");
+    const order = await createRazorpayPaymentOrder({ amountPaise, customerUserId: userId, bookingId: row.bookingId, bookingReference: `${String(row.requestNumber || row.bookingId).slice(0, 28)}-TIP`, metadata: { addOnKind: 'tip' } });
+    const saved = await pool.query(`insert into zigo.booking_add_on_payments (service_request_id,customer_user_id,kind,selling_amount_paise,total_amount_paise,provider_order_id,pricing,metadata) values ($1::uuid,$2::uuid,'tip',$3,$3,$4,jsonb_build_object('taxAmountPaise',0),jsonb_build_object('source','customer_portal','taxApplicable',false)) returning id`, [row.bookingId, userId, amountPaise, order.orderId]);
+    return { ...order, addOnId: saved.rows[0].id, kind: 'tip', pricing: { sellingAmountPaise: amountPaise, taxAmountPaise: 0, totalAmountPaise: amountPaise } };
+}
+async function assertAssistantCanAbsorbExtension(client, input) {
+    if (!input.assignmentId) {
+        throw new HttpError(409, "Service extension is available only after an assistant is assigned.");
+    }
+    const conflict = await client.query(`
+    select future_sr.request_number as "requestNumber", future_acr.reserved_from as "reservedFrom", future_acr.reserved_until as "reservedUntil"
+    from zigo.task_assignments current_ta
+    join zigo.assistant_capacity_reservations future_acr
+      on future_acr.assistant_id = current_ta.assistant_id
+    left join zigo.service_requests future_sr on future_sr.id = future_acr.service_request_id
+    where current_ta.id = $1::uuid
+      and future_acr.service_request_id <> $2::uuid
+      and future_acr.status_code in ('held','pending','reserved','offered','confirmed','assigned','active','in_progress')
+      and (
+        future_sr.id is null
+        or lower(coalesce(future_sr.status_code, '')) not in ('completed','success','done','cancelled','canceled','failed','rejected','expired')
+      )
+      and future_acr.reserved_from < $3::timestamptz
+      and future_acr.reserved_until > $4::timestamptz
+    order by future_acr.reserved_from asc
+    limit 1
+    for update of future_acr
+  `, [input.assignmentId, input.bookingId, input.extendedAvailableAt.toISOString(), input.currentAvailableAt.toISOString()]);
+    const row = conflict.rows[0];
+    if (row)
+        throw new HttpError(409, "Assistant is booked for the next booking. Create a new booking.");
+    const calendarConflict = await client.query(`
+    select future_block.id
+    from zigo.task_assignments current_ta
+    join zigo.assistant_calendar_blocks future_block
+      on future_block.assistant_id = current_ta.assistant_id
+    where current_ta.id = $1::uuid
+      and future_block.status_code = 'active'
+      and future_block.block_type in ('BOOKING', 'TEMPORARY_HOLD', 'TRAVEL', 'WRAP_UP', 'BREAK', 'TIME_OFF', 'ADMIN_BLOCK')
+      and (future_block.source_id is null or future_block.source_id <> $2::uuid)
+      and future_block.start_at < $3::timestamptz
+      and future_block.end_at > $4::timestamptz
+    order by future_block.start_at asc
+    limit 1
+    for update of future_block
+  `, [input.assignmentId, input.bookingId, input.extendedAvailableAt.toISOString(), input.currentAvailableAt.toISOString()]);
+    if (calendarConflict.rows[0])
+        throw new HttpError(409, "Assistant is booked for the next booking. Create a new booking.");
+}
+async function applyCustomerPortalExtension(client, input) {
+    const durationMinutes = Math.max(1, Math.min(240, Math.round(Number(input.durationMinutes || 0))));
+    const previousEndAt = validDateFromUnknown(input.bookingEndAt) ?? new Date();
+    const previousAvailableAt = validDateFromUnknown(input.bookingAvailableAt) ?? previousEndAt;
+    const bufferMinutes = Math.max(0, Math.ceil((previousAvailableAt.getTime() - previousEndAt.getTime()) / 60_000));
+    const bookingEndAt = addMinutes(previousEndAt, durationMinutes);
+    const bookingAvailableAt = addMinutes(bookingEndAt, bufferMinutes);
+    const totalAmountPaise = Math.max(0, Math.round(Number(input.record.totalAmountPaise || input.record.sellingAmountPaise || 0)));
+    const baseAmountPaise = Math.max(0, Math.round(Number(input.record.baseAmountPaise || 0)));
+    const discountAmountPaise = Math.max(0, Math.round(Number(input.record.discountAmountPaise || 0)));
+    const taxAmountPaise = Math.max(0, Math.round(Number(input.record.taxAmountPaise || 0)));
+    const record = { ...input.record, durationMinutes, requestedMinutes: durationMinutes, previousEndAt: previousEndAt.toISOString(), extendedEndAt: bookingEndAt.toISOString(), extendedAvailableAt: bookingAvailableAt.toISOString(), bufferMinutes };
+    const history = { ...record, extensionBasePricePaise: baseAmountPaise, extensionDiscountPaise: discountAmountPaise, extensionTaxAmountPaise: taxAmountPaise, extensionAmountPaise: totalAmountPaise, approvedAt: input.record['paidAt'] || new Date().toISOString() };
+    await assertAssistantCanAbsorbExtension(client, {
+        bookingId: input.bookingId,
+        assignmentId: input.assignmentId,
+        currentAvailableAt: previousAvailableAt,
+        extendedAvailableAt: bookingAvailableAt
+    });
+    const updated = await client.query(`
+    update zigo.service_requests
+    set duration_minutes = coalesce(duration_minutes, 0) + $2::int,
+        booking_end_at = $3::timestamptz,
+        booking_available_at = $4::timestamptz,
+        metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+          'paidAddOns', coalesce(metadata->'paidAddOns', '[]'::jsonb) || $5::jsonb,
+          'timeExtensions', coalesce(metadata->'timeExtensions', '[]'::jsonb) || $6::jsonb,
+          'extensionChargesPaise', coalesce(nullif(metadata->>'extensionChargesPaise', '')::bigint, 0) + $7::bigint,
+          'extensionBasePricePaise', coalesce(nullif(metadata->>'extensionBasePricePaise', '')::bigint, 0) + $8::bigint,
+          'extensionDiscountPaise', coalesce(nullif(metadata->>'extensionDiscountPaise', '')::bigint, 0) + $9::bigint,
+          'extensionTaxAmountPaise', coalesce(nullif(metadata->>'extensionTaxAmountPaise', '')::bigint, 0) + $10::bigint,
+          'effectiveDurationMinutes', coalesce(duration_minutes, 0) + $2::int,
+          'taskEndAt', $3::timestamptz,
+          'taskTimer', coalesce(metadata->'taskTimer', '{}'::jsonb) || jsonb_build_object(
+            'taskEndAt', $3::timestamptz,
+            'actualTaskEndAt', $3::timestamptz,
+            'expectedFreeAt', $4::timestamptz
+          ),
+          'expectedFreeAt', $4::timestamptz,
+          'lastTimeExtensionMinutes', $2::int,
+          'lastTimeExtensionEndAt', $3::timestamptz
+        ), updated_at = now()
+    where id = $1::uuid
+    returning duration_minutes as "durationMinutes"
+  `, [input.bookingId, durationMinutes, bookingEndAt.toISOString(), bookingAvailableAt.toISOString(), JSON.stringify([record]), JSON.stringify([history]), totalAmountPaise, baseAmountPaise, discountAmountPaise, taxAmountPaise]);
+    const totalDurationMinutes = Math.max(1, Number(updated.rows[0]?.durationMinutes || durationMinutes));
+    if (input.assignmentId)
+        await client.query(`
+    update zigo.task_assignments
+    set expires_at = $2::timestamptz,
+        metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('taskEndAt', $3::timestamptz, 'bookingAvailableAt', $2::timestamptz, 'expectedFreeAt', $2::timestamptz, 'durationMinutes', $4::int, 'lastTimeExtensionMinutes', $5::int)
+    where id = $1::uuid
+  `, [input.assignmentId, bookingAvailableAt.toISOString(), bookingEndAt.toISOString(), totalDurationMinutes, durationMinutes]);
+    await client.query(`
+    update zigo.assistant_capacity_reservations
+    set reserved_until = $2::timestamptz,
+        sla_deadline_at = greatest(coalesce(sla_deadline_at, $2::timestamptz), $2::timestamptz),
+        updated_at = now(),
+        metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('taskEndAt', $3::timestamptz, 'bookingAvailableAt', $2::timestamptz, 'durationMinutes', $4::int, 'extendedByCustomer', true, 'lastTimeExtensionMinutes', $5::int)
+    where service_request_id = $1::uuid and status_code in ('held','pending','reserved','offered','confirmed','assigned','active','in_progress') and ($6::uuid is null or assignment_id = $6::uuid)
+  `, [input.bookingId, bookingAvailableAt.toISOString(), bookingEndAt.toISOString(), totalDurationMinutes, durationMinutes, input.assignmentId || null]);
+    await client.query(`
+    update zigo.assistant_calendar_blocks
+    set end_at = $2::timestamptz,
+        metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+          'taskEndAt', $3::timestamptz,
+          'bookingAvailableAt', $2::timestamptz,
+          'durationMinutes', $4::int,
+          'extendedByCustomer', true,
+          'lastTimeExtensionMinutes', $5::int
+        ),
+        updated_at = now()
+    where source_type = 'service_request'
+      and source_id = $1::uuid
+      and status_code = 'active'
+      and ($6::uuid is null or assistant_id = (select assistant_id from zigo.task_assignments where id = $6::uuid))
+  `, [input.bookingId, bookingAvailableAt.toISOString(), bookingEndAt.toISOString(), totalDurationMinutes, durationMinutes, input.assignmentId || null]);
+    return { record, bookingEndAt, bookingAvailableAt, durationMinutes: totalDurationMinutes };
+}
+export async function completeCustomerPortalBookingAddOn(userId, input) {
+    await ensurePortalSchema();
+    const client = await pool.connect();
+    try {
+        await client.query('begin');
+        const result = await client.query(`select ap.*,rp.status_code as "paymentStatus",rp.provider_payment_id as "providerPaymentId",sr.status_code as "bookingStatus",sr.booking_end_at as "bookingEndAt",sr.booking_available_at as "bookingAvailableAt",sr.accepted_assignment_id as "assignmentId" from zigo.booking_add_on_payments ap join zigo.service_requests sr on sr.id=ap.service_request_id left join zigo.razorpay_payments rp on rp.provider_order_id=ap.provider_order_id where ap.id=$1::uuid and ap.service_request_id=$2::uuid and ap.customer_user_id=$3::uuid for update of ap,sr`, [input.addOnId, input.bookingId, userId]);
+        const addOn = result.rows[0];
+        if (!addOn)
+            throw new HttpError(404, 'Payment record not found.');
+        if (addOn.status_code === 'paid') {
+            await client.query('commit');
+            return addOn;
+        }
+        if (String(addOn.bookingStatus).toLowerCase() !== 'completed' && isBookingFinalStatus(addOn.bookingStatus))
+            throw new HttpError(409, 'This booking is closed.');
+        if (addOn.paymentStatus !== 'paid')
+            throw new HttpError(409, 'Payment has not been verified yet.');
+        const paidAt = new Date();
+        const record = { id: addOn.id, kind: addOn.kind, durationMinutes: addOn.duration_minutes, baseAmountPaise: addOn.base_amount_paise, discountAmountPaise: addOn.discount_amount_paise, sellingAmountPaise: addOn.selling_amount_paise, taxAmountPaise: addOn.tax_amount_paise, totalAmountPaise: addOn.total_amount_paise, pricing: addOn.pricing, paymentMode: 'online', paidAt: paidAt.toISOString() };
+        const timing = addOn.kind === 'extension' ? await applyCustomerPortalExtension(client, { bookingId: input.bookingId, assignmentId: addOn.assignmentId, durationMinutes: Number(addOn.duration_minutes || 0), bookingEndAt: addOn.bookingEndAt, bookingAvailableAt: addOn.bookingAvailableAt, record }) : null;
+        if (!timing)
+            await client.query(`update zigo.service_requests set metadata=coalesce(metadata,'{}'::jsonb)||jsonb_build_object('paidAddOns',coalesce(metadata->'paidAddOns','[]'::jsonb)||$2::jsonb),updated_at=now() where id=$1::uuid`, [input.bookingId, JSON.stringify([record])]);
+        await client.query(`update zigo.booking_add_on_payments set status_code='paid',provider_payment_id=$2,paid_at=now(),updated_at=now() where id=$1::uuid`, [addOn.id, addOn.providerPaymentId]);
+        await client.query('commit');
+        if (timing)
+            await recalculateAssistantAvailability({ bookingId: input.bookingId }).catch((error) => console.error('Unable to refresh assistant availability after service extension.', error));
+        return timing ? { ...record, durationMinutes: timing.durationMinutes, bookingEndAt: timing.bookingEndAt.toISOString(), bookingAvailableAt: timing.bookingAvailableAt.toISOString() } : record;
+    }
+    catch (error) {
+        await client.query('rollback');
+        throw error;
+    }
+    finally {
+        client.release();
+    }
+}
+export async function finalizePaidCustomerPortalBookingAddOnByProviderOrder(providerOrderId) {
+    const orderId = String(providerOrderId || "").trim();
+    if (!orderId)
+        return null;
+    const addOn = await pool.query(`
+    select service_request_id as "bookingId", customer_user_id as "customerUserId"
+    from zigo.booking_add_on_payments
+    where provider_order_id = $1
+      and kind = 'extension'
+      and coalesce(status_code, 'created') <> 'paid'
+    order by created_at desc
+    limit 1
+  `, [orderId]);
+    const row = addOn.rows[0];
+    if (!row)
+        return null;
+    const payment = await pool.query(`
+    select lower(coalesce(status_code, '')) in ('paid', 'captured', 'success', 'completed') as paid
+    from zigo.razorpay_payments
+    where provider_order_id = $1
+    limit 1
+  `, [orderId]);
+    if (!payment.rows[0]?.paid)
+        return null;
+    const pendingAddOn = await pool.query(`
+    select id from zigo.booking_add_on_payments
+    where provider_order_id = $1 and service_request_id = $2::uuid and customer_user_id = $3::uuid
+    order by created_at desc limit 1
+  `, [orderId, row.bookingId, row.customerUserId]);
+    if (!pendingAddOn.rows[0]?.id)
+        return null;
+    return completeCustomerPortalBookingAddOn(row.customerUserId, { bookingId: row.bookingId, addOnId: pendingAddOn.rows[0].id });
+}
+export async function createCustomerPortalCashExtension(userId, input) {
+    await ensurePortalSchema();
+    const client = await pool.connect();
+    try {
+        await client.query('begin');
+        const booking = await client.query(`select sr.id as "bookingId",sr.category_id as "categoryId",sr.cluster_id as "clusterId",sr.status_code as "bookingStatus",sr.booking_end_at as "bookingEndAt",sr.booking_available_at as "bookingAvailableAt",sr.accepted_assignment_id as "assignmentId" from zigo.service_requests sr join zigo.customers c on c.id=sr.customer_id where sr.id=$1::uuid and c.user_id=$2::uuid for update of sr`, [input.bookingId, userId]);
+        const row = booking.rows[0];
+        if (!row)
+            throw new HttpError(404, 'Booking not found.');
+        if (isBookingFinalStatus(row.bookingStatus))
+            throw new HttpError(409, 'This booking is closed.');
+        const minutes = Math.max(1, Math.min(240, Math.round(Number(input.durationMinutes || 0))));
+        if (!row.categoryId || !row.clusterId || !minutes)
+            throw new HttpError(400, 'A valid extension duration is required.');
+        const quote = await resolveCustomerPortalCategoryPrice({ clusterId: row.clusterId, categoryId: row.categoryId, durationMinutes: minutes });
+        const rule = await client.query(`select coalesce(available_for_extend,false) as available from zigo.category_price_rules where id=$1::uuid`, [quote.id]);
+        if (!rule.rows[0]?.available)
+            throw new HttpError(409, 'This duration cannot be used to extend the service.');
+        const pricing = { ...(await resolveCustomerPortalTaxPricing(quote.basePrice, quote.sellingPrice)), durationMinutes: minutes, categoryPriceRuleId: quote.id, label: quote.label || 'Service extension' };
+        const saved = await client.query(`insert into zigo.booking_add_on_payments(service_request_id,customer_user_id,kind,duration_minutes,base_amount_paise,discount_amount_paise,selling_amount_paise,tax_amount_paise,total_amount_paise,status_code,pricing,metadata) values($1::uuid,$2::uuid,'extension',$3,$4,$5,$6,$7,$8,'due',$9::jsonb,$10::jsonb) returning id`, [input.bookingId, userId, minutes, pricing.baseAmountPaise, pricing.discountAmountPaise, pricing.sellingAmountPaise, pricing.taxAmountPaise, pricing.totalAmountPaise, JSON.stringify(pricing), JSON.stringify({ source: 'customer_portal', paymentMode: 'cash', status: 'due' })]);
+        const record = { id: saved.rows[0].id, kind: 'extension', durationMinutes: minutes, baseAmountPaise: pricing.baseAmountPaise, discountAmountPaise: pricing.discountAmountPaise, sellingAmountPaise: pricing.sellingAmountPaise, taxAmountPaise: pricing.taxAmountPaise, totalAmountPaise: pricing.totalAmountPaise, pricing, paymentMode: 'cash', paymentStatus: 'due', appliedAt: new Date().toISOString() };
+        const timing = await applyCustomerPortalExtension(client, { bookingId: input.bookingId, assignmentId: row.assignmentId, durationMinutes: minutes, bookingEndAt: row.bookingEndAt, bookingAvailableAt: row.bookingAvailableAt, record });
+        await client.query('commit');
+        await recalculateAssistantAvailability({ bookingId: input.bookingId }).catch((error) => console.error('Unable to refresh assistant availability after cash service extension.', error));
+        return { ...record, durationMinutes: timing.durationMinutes, bookingEndAt: timing.bookingEndAt.toISOString(), bookingAvailableAt: timing.bookingAvailableAt.toISOString() };
+    }
+    catch (error) {
+        await client.query('rollback');
+        throw error;
+    }
+    finally {
+        client.release();
+    }
+}
+export async function getCustomerPortalWallet(userId) {
+    await requireCustomerPortalCustomerId(userId);
+    return getCustomerWallet(userId);
+}
+export async function listCustomerPortalWalletTransactions(userId, input) {
+    await requireCustomerPortalCustomerId(userId);
+    return listCustomerWalletTransactions(userId, input);
+}
+export async function getCustomerPortalWalletTransaction(userId, transactionId) {
+    await requireCustomerPortalCustomerId(userId);
+    return getCustomerWalletTransaction(userId, transactionId);
 }

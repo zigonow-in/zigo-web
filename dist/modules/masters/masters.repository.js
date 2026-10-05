@@ -1,5 +1,6 @@
 import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
+import { deleteLocationHierarchy } from "./locationHierarchy.repository.js";
 let clusterServiceSchemaReady = null;
 let surgeRuleSchemaReady = null;
 let priceMasterSchemaReady = null;
@@ -796,7 +797,7 @@ export async function updateZone(id, input) {
     return result.rows[0] ?? null;
 }
 export async function deleteZone(id, userId) {
-    return softDelete("zigo.zones", id, userId);
+    return deleteLocationHierarchy("zones", id, userId);
 }
 export async function listClusters() {
     const result = await pool.query(`
@@ -984,7 +985,7 @@ export async function updateCluster(id, input) {
     return result.rows[0] ?? null;
 }
 export async function deleteCluster(id, userId) {
-    return softDelete("zigo.clusters", id, userId);
+    return deleteLocationHierarchy("clusters", id, userId);
 }
 export async function listServices() {
     const result = await pool.query(`

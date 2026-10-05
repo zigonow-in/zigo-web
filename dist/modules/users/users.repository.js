@@ -1,4 +1,6 @@
 import bcrypt from "bcryptjs";
+import { isAccountAccessBlocked } from "../auth/accountAccess.js";
+import { emitBookingRealtimeEvent } from "../operations/bookingRealtime.js";
 import crypto from "node:crypto";
 import tls from "node:tls";
 import { pool } from "../../db/pool.js";
@@ -120,6 +122,12 @@ function valueAtPath(root, pathValue) {
     if (!path)
         return undefined;
     return path.split(".").reduce((value, key) => (value && typeof value === "object" ? value[key] : undefined), root);
+}
+function providerSuccessMatches(value) {
+    if (value === true || value === 1)
+        return true;
+    const text = String(value ?? "").trim().toLowerCase();
+    return ["true", "1", "success", "sent", "ok", "queued", "accepted"].includes(text);
 }
 function otpDeliveryFailure(error) {
     return {
@@ -310,9 +318,9 @@ async function sendSmsOtp(phone, otp) {
         body: ["GET", "HEAD"].includes(String(provider.method || "POST").toUpperCase()) ? undefined : JSON.stringify(body)
     });
     const payload = await response.json().catch(() => ({}));
-    const successPath = provider.successPath || "success";
-    const mappedSuccess = valueAtPath(payload, successPath);
-    if (!response.ok || mappedSuccess === false)
+    const successPath = String(provider.successPath || "").trim();
+    const mappedSuccess = successPath ? valueAtPath(payload, successPath) : undefined;
+    if (!response.ok || (successPath && !providerSuccessMatches(mappedSuccess)))
         throw new HttpError(502, `Failed to send mobile verification code. Provider response: ${JSON.stringify(payload)}`);
     return {
         providerId: provider.id,
@@ -343,9 +351,9 @@ async function sendSmsPassword(phone, password) {
         body: ["GET", "HEAD"].includes(String(provider.method || "POST").toUpperCase()) ? undefined : JSON.stringify(body)
     });
     const payload = await response.json().catch(() => ({}));
-    const successPath = provider.successPath || "success";
-    const mappedSuccess = valueAtPath(payload, successPath);
-    if (!response.ok || mappedSuccess === false)
+    const successPath = String(provider.successPath || "").trim();
+    const mappedSuccess = successPath ? valueAtPath(payload, successPath) : undefined;
+    if (!response.ok || (successPath && !providerSuccessMatches(mappedSuccess)))
         throw new HttpError(502, `Failed to send mobile password. Provider response: ${JSON.stringify(payload)}`);
     return {
         providerId: provider.id,
@@ -703,6 +711,7 @@ export async function setUserActiveState(id, isActive, actorUserId) {
       returning id
     `, [id, isActive, actorUserId]);
     if (result.rows[0] && !isActive) {
+        await emitBookingRealtimeEvent({ type: 'user.session.revoked', payload: { userId: id }, message: 'Account access ended.' }).catch(error => console.warn('Account revocation notification failed', error));
         const assistant = await pool.query("select id as \"assistantId\" from zigo.assistants where user_id = $1 limit 1", [id]);
         if (!assistant.rows[0])
             return getUserById(id);
@@ -774,6 +783,8 @@ export async function sendUserOtpChallenge(input) {
     const user = await getUserById(input.userId);
     if (!user)
         throw new HttpError(404, "User not found");
+    if (isAccountAccessBlocked({ ...user.metadata, accountStatus: user.accountStatus, otpVerificationStatus: user.otpVerificationStatus }, true))
+        throw new HttpError(403, "User account is deactive. Contact admin.");
     const requestedEmail = input.email?.trim().toLowerCase();
     const emailForVerification = requestedEmail || user.email;
     if (channels.includes("email") && !emailForVerification)
@@ -839,7 +850,7 @@ export async function sendUserOtpChallenge(input) {
             deliveries.email = otpDeliveryFailure(error);
         }
     }
-    await pool.query(`
+    const savedChallenge = await pool.query(`
       update zigo.users
       set metadata = coalesce(metadata, '{}'::jsonb)
             || jsonb_build_object(
@@ -854,8 +865,11 @@ export async function sendUserOtpChallenge(input) {
             ),
           updated_by = $6::uuid,
           updated_at = now()
-      where id = $1 and deleted_at is null
-    `, [input.userId, JSON.stringify(allChannels), JSON.stringify(channelStatus), JSON.stringify(challenges), JSON.stringify(deliveries), input.actorUserId]);
+      where id = $1 and deleted_at is null and coalesce(metadata, '{}'::jsonb) = $7::jsonb
+      returning id
+    `, [input.userId, JSON.stringify(allChannels), JSON.stringify(channelStatus), JSON.stringify(challenges), JSON.stringify(deliveries), input.actorUserId, JSON.stringify(user.metadata || {})]);
+    if (!savedChallenge.rows.length)
+        throw new HttpError(409, "Account changed while sending verification code. Please retry.");
     return {
         userId: input.userId,
         channels: allChannels,
@@ -874,6 +888,8 @@ export async function verifyUserOtpChallenge(input) {
     const user = await getUserById(input.userId);
     if (!user)
         throw new HttpError(404, "User not found");
+    if (isAccountAccessBlocked({ ...user.metadata, accountStatus: user.accountStatus, otpVerificationStatus: user.otpVerificationStatus }, true))
+        throw new HttpError(403, "User account is deactive. Contact admin.");
     const channels = normalizeOtpChannels(user.metadata?.otpVerifyChannels);
     const challenge = (user.metadata?.otpChallenge || {});
     const existingStatus = { ...(user.otpChannelStatus || user.metadata?.otpChannelStatus || {}) };
@@ -903,7 +919,7 @@ export async function verifyUserOtpChallenge(input) {
     }
     const otpVerificationStatus = overallOtpStatus(existingStatus, channels);
     const accountStatus = otpVerificationStatus === "verified" ? "active" : "inactive";
-    await pool.query(`
+    const verified = await pool.query(`
       update zigo.users
       set metadata = coalesce(metadata, '{}'::jsonb)
             || jsonb_build_object(
@@ -916,8 +932,11 @@ export async function verifyUserOtpChallenge(input) {
             ),
           updated_by = $6::uuid,
           updated_at = now()
-      where id = $1 and deleted_at is null
-    `, [input.userId, accountStatus, otpVerificationStatus, JSON.stringify(existingStatus), JSON.stringify(remainingChallenge), input.actorUserId]);
+      where id = $1 and deleted_at is null and coalesce(metadata, '{}'::jsonb) = $7::jsonb
+      returning id
+    `, [input.userId, accountStatus, otpVerificationStatus, JSON.stringify(existingStatus), JSON.stringify(remainingChallenge), input.actorUserId, JSON.stringify(user.metadata || {})]);
+    if (!verified.rows.length)
+        throw new HttpError(409, "Account changed during verification. Please request a new code.");
     return getUserById(input.userId);
 }
 export async function softDeleteUser(id, actorUserId) {
@@ -936,6 +955,8 @@ export async function softDeleteUser(id, actorUserId) {
           updated_at = now()
       where id = $1 and deleted_at is null
     `, [id, actorUserId]);
+    if (result.rowCount)
+        await emitBookingRealtimeEvent({ type: 'user.session.revoked', payload: { userId: id }, message: 'Account access ended.' }).catch(error => console.warn('Account revocation notification failed', error));
     return (result.rowCount ?? 0) > 0;
 }
 export async function createUser(input) {

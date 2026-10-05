@@ -1,4 +1,6 @@
 import bcrypt from "bcryptjs";
+import { isAccountAccessBlocked } from "../auth/accountAccess.js";
+import { emitBookingRealtimeEvent } from "../operations/bookingRealtime.js";
 import crypto from "node:crypto";
 import tls from "node:tls";
 import { pool } from "../../db/pool.js";
@@ -167,6 +169,12 @@ function valueAtPath(root: unknown, pathValue?: unknown) {
   const path = String(pathValue || "").trim();
   if (!path) return undefined;
   return path.split(".").reduce<unknown>((value, key) => (value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined), root);
+}
+
+function providerSuccessMatches(value: unknown) {
+  if (value === true || value === 1) return true;
+  const text = String(value ?? "").trim().toLowerCase();
+  return ["true", "1", "success", "sent", "ok", "queued", "accepted"].includes(text);
 }
 
 function otpDeliveryFailure(error: unknown) {
@@ -364,9 +372,9 @@ async function sendSmsOtp(phone: string, otp: string) {
     body: ["GET", "HEAD"].includes(String(provider.method || "POST").toUpperCase()) ? undefined : JSON.stringify(body)
   });
   const payload = await response.json().catch(() => ({}));
-  const successPath = provider.successPath || "success";
-  const mappedSuccess = valueAtPath(payload, successPath);
-  if (!response.ok || mappedSuccess === false) throw new HttpError(502, `Failed to send mobile verification code. Provider response: ${JSON.stringify(payload)}`);
+  const successPath = String(provider.successPath || "").trim();
+  const mappedSuccess = successPath ? valueAtPath(payload, successPath) : undefined;
+  if (!response.ok || (successPath && !providerSuccessMatches(mappedSuccess))) throw new HttpError(502, `Failed to send mobile verification code. Provider response: ${JSON.stringify(payload)}`);
   return {
     providerId: provider.id,
     providerName: provider.name,
@@ -395,9 +403,9 @@ async function sendSmsPassword(phone: string, password: string) {
     body: ["GET", "HEAD"].includes(String(provider.method || "POST").toUpperCase()) ? undefined : JSON.stringify(body)
   });
   const payload = await response.json().catch(() => ({}));
-  const successPath = provider.successPath || "success";
-  const mappedSuccess = valueAtPath(payload, successPath);
-  if (!response.ok || mappedSuccess === false) throw new HttpError(502, `Failed to send mobile password. Provider response: ${JSON.stringify(payload)}`);
+  const successPath = String(provider.successPath || "").trim();
+  const mappedSuccess = successPath ? valueAtPath(payload, successPath) : undefined;
+  if (!response.ok || (successPath && !providerSuccessMatches(mappedSuccess))) throw new HttpError(502, `Failed to send mobile password. Provider response: ${JSON.stringify(payload)}`);
   return {
     providerId: provider.id,
     providerName: provider.name,
@@ -799,6 +807,7 @@ export async function setUserActiveState(id: string, isActive: boolean, actorUse
     [id, isActive, actorUserId]
   );
   if (result.rows[0] && !isActive) {
+    await emitBookingRealtimeEvent({ type: 'user.session.revoked', payload: { userId: id }, message: 'Account access ended.' }).catch(error => console.warn('Account revocation notification failed', error));
     const assistant = await pool.query<{ assistantId: string }>(
       "select id as \"assistantId\" from zigo.assistants where user_id = $1 limit 1",
       [id]
@@ -886,6 +895,7 @@ export async function sendUserOtpChallenge(input: { userId: string; channels: Ot
   if (!channels.length) throw new HttpError(400, "Select Email or Mobile Number for verification code.");
   const user = await getUserById(input.userId);
   if (!user) throw new HttpError(404, "User not found");
+  if (isAccountAccessBlocked({ ...user.metadata, accountStatus: user.accountStatus, otpVerificationStatus: user.otpVerificationStatus }, true)) throw new HttpError(403, "User account is deactive. Contact admin.");
   const requestedEmail = input.email?.trim().toLowerCase();
   const emailForVerification = requestedEmail || user.email;
   if (channels.includes("email") && !emailForVerification) throw new HttpError(400, "Email is required to send email verification code.");
@@ -953,7 +963,7 @@ export async function sendUserOtpChallenge(input: { userId: string; channels: Ot
     }
   }
 
-  await pool.query(
+  const savedChallenge = await pool.query(
     `
       update zigo.users
       set metadata = coalesce(metadata, '{}'::jsonb)
@@ -969,10 +979,12 @@ export async function sendUserOtpChallenge(input: { userId: string; channels: Ot
             ),
           updated_by = $6::uuid,
           updated_at = now()
-      where id = $1 and deleted_at is null
+      where id = $1 and deleted_at is null and coalesce(metadata, '{}'::jsonb) = $7::jsonb
+      returning id
     `,
-    [input.userId, JSON.stringify(allChannels), JSON.stringify(channelStatus), JSON.stringify(challenges), JSON.stringify(deliveries), input.actorUserId]
+    [input.userId, JSON.stringify(allChannels), JSON.stringify(channelStatus), JSON.stringify(challenges), JSON.stringify(deliveries), input.actorUserId, JSON.stringify(user.metadata || {})]
   );
+  if (!savedChallenge.rows.length) throw new HttpError(409, "Account changed while sending verification code. Please retry.");
 
   return {
     userId: input.userId,
@@ -992,6 +1004,7 @@ export async function sendUserOtpChallenge(input: { userId: string; channels: Ot
 export async function verifyUserOtpChallenge(input: { userId: string; otp?: string; otps?: Partial<Record<OtpChannel, string>>; actorUserId: string }) {
   const user = await getUserById(input.userId);
   if (!user) throw new HttpError(404, "User not found");
+  if (isAccountAccessBlocked({ ...user.metadata, accountStatus: user.accountStatus, otpVerificationStatus: user.otpVerificationStatus }, true)) throw new HttpError(403, "User account is deactive. Contact admin.");
   const channels = normalizeOtpChannels(user.metadata?.otpVerifyChannels as string[] | undefined);
   const challenge = (user.metadata?.otpChallenge || {}) as Record<string, { codeHash?: string; expiresAt?: string }>;
   const existingStatus = { ...((user.otpChannelStatus || user.metadata?.otpChannelStatus || {}) as Record<string, string>) };
@@ -1018,7 +1031,7 @@ export async function verifyUserOtpChallenge(input: { userId: string; otp?: stri
   const otpVerificationStatus = overallOtpStatus(existingStatus, channels);
   const accountStatus = otpVerificationStatus === "verified" ? "active" : "inactive";
 
-  await pool.query(
+  const verified = await pool.query(
     `
       update zigo.users
       set metadata = coalesce(metadata, '{}'::jsonb)
@@ -1032,10 +1045,12 @@ export async function verifyUserOtpChallenge(input: { userId: string; otp?: stri
             ),
           updated_by = $6::uuid,
           updated_at = now()
-      where id = $1 and deleted_at is null
+      where id = $1 and deleted_at is null and coalesce(metadata, '{}'::jsonb) = $7::jsonb
+      returning id
     `,
-    [input.userId, accountStatus, otpVerificationStatus, JSON.stringify(existingStatus), JSON.stringify(remainingChallenge), input.actorUserId]
+    [input.userId, accountStatus, otpVerificationStatus, JSON.stringify(existingStatus), JSON.stringify(remainingChallenge), input.actorUserId, JSON.stringify(user.metadata || {})]
   );
+  if (!verified.rows.length) throw new HttpError(409, "Account changed during verification. Please request a new code.");
   return getUserById(input.userId);
 }
 
@@ -1058,6 +1073,7 @@ export async function softDeleteUser(id: string, actorUserId: string) {
     `,
     [id, actorUserId]
   );
+  if (result.rowCount) await emitBookingRealtimeEvent({ type: 'user.session.revoked', payload: { userId: id }, message: 'Account access ended.' }).catch(error => console.warn('Account revocation notification failed', error));
   return (result.rowCount ?? 0) > 0;
 }
 

@@ -277,6 +277,7 @@ export async function listAssistantMasters() {
       coalesce(a.metadata->>'workingType', 'full_time') as "workingType",
       a.metadata->>'workingTimeSlot' as "workingTimeSlot",
       a.metadata->'workingSchedule' as "workingSchedule",
+      a.metadata->'areaAssignments' as "areaAssignments",
       coalesce(a.metadata->>'payType', 'per_task') as "payType",
       coalesce(a.metadata->>'verificationStatus', u.metadata->>'accountStatus', 'verifying') as "status",
       case
@@ -728,6 +729,61 @@ export async function updateAssistantWork(assistantId, input) {
     }
     return result.rows[0] ?? null;
 }
+export async function saveAssistantAreas(assistantId, areas, actorUserId) {
+    await ensureAssistantMasterSchema();
+    const client = await pool.connect();
+    try {
+        await client.query("begin");
+        const assistant = await client.query("select id from zigo.assistants where id=$1 for update", [assistantId]);
+        if (!assistant.rows.length)
+            throw new HttpError(404, "Assistant not found.");
+        const cities = await client.query(`select id, state_id from zigo.cities where id=any($1::uuid[]) and coalesce(is_deleted,false)=false and is_active=true`, [[areas.working.cityId, areas.assign.cityId]]);
+        for (const area of [areas.working, areas.assign]) {
+            if (!cities.rows.some(city => city.id === area.cityId && city.state_id === area.stateId))
+                throw new HttpError(400, "Select a valid State and City.");
+            if (area.zoneId) {
+                const zone = await client.query("select id from zigo.zones where id=$1 and city_id=$2 and coalesce(is_deleted,false)=false", [area.zoneId, area.cityId]);
+                if (!zone.rows.length)
+                    throw new HttpError(400, "Select a Zone in the selected City.");
+            }
+        }
+        const clusters = await client.query(`select id, city_id, zone_id from zigo.clusters where coalesce(is_deleted,false)=false and coalesce(is_booking_enabled,true)=true and city_id=$1`, [areas.working.cityId]);
+        const micros = await client.query(`select m.id,m.cluster_id from zigo.micro_markets m join zigo.clusters c on c.id=m.cluster_id where m.is_deleted=false and m.is_active=true and c.city_id=$1`, [areas.working.cityId]);
+        const nanos = await client.query(`select n.id,n.micro_market_id from zigo.nano_markets n join zigo.micro_markets m on m.id=n.micro_market_id join zigo.clusters c on c.id=m.cluster_id where n.is_deleted=false and n.is_active=true and c.city_id=$1`, [areas.working.cityId]);
+        const resolve = (area, allowed) => {
+            const choose = (ids, all, candidates) => {
+                if (!all && ids.some(id => !candidates.includes(id)))
+                    throw new HttpError(400, "Area selection is outside its allowed Working Area or parent location.");
+                return all ? candidates : [...new Set(ids)];
+            };
+            const clusterIds = choose(area.clusters, area.allClusters, clusters.rows.filter(row => row.city_id === area.cityId && (!area.zoneId || row.zone_id === area.zoneId) && (!allowed || allowed.clusters.includes(row.id))).map(row => row.id));
+            if (!clusterIds.length)
+                throw new HttpError(400, "Select at least one Cluster.");
+            const microIds = choose(area.microMarkets, area.allMicroMarkets, micros.rows.filter(row => clusterIds.includes(row.cluster_id) && (!allowed || allowed.microMarkets.includes(row.id))).map(row => row.id));
+            const nanoIds = choose(area.nanoMarkets, area.allNanoMarkets, nanos.rows.filter(row => microIds.includes(row.micro_market_id) && (!allowed || allowed.nanoMarkets.includes(row.id))).map(row => row.id));
+            return { ...area, clusters: clusterIds, microMarkets: microIds, nanoMarkets: nanoIds };
+        };
+        const working = resolve(areas.working);
+        const assign = resolve(areas.assign, working);
+        await client.query("update zigo.assistant_cluster_map set is_primary=false,is_active=false where assistant_id=$1", [assistantId]);
+        const waitingClusterId = assign.clusters[0];
+        await client.query(`update zigo.assistant_cluster_map set is_active=true,is_primary=(cluster_id=$3::uuid)
+      where assistant_id=$1 and cluster_id=any($2::uuid[])`, [assistantId, working.clusters, waitingClusterId]);
+        await client.query(`insert into zigo.assistant_cluster_map (assistant_id,cluster_id,is_primary,is_active)
+      select $1, cluster_id, cluster_id=$3::uuid, true from unnest($2::uuid[]) as selected(cluster_id)
+      where not exists (select 1 from zigo.assistant_cluster_map existing where existing.assistant_id=$1 and existing.cluster_id=selected.cluster_id)`, [assistantId, working.clusters, waitingClusterId]);
+        await client.query(`update zigo.assistants set current_cluster_id=$2, metadata=jsonb_set(coalesce(metadata,'{}'::jsonb),'{areaAssignments}',$3::jsonb,true),updated_at=now() where id=$1`, [assistantId, waitingClusterId, JSON.stringify({ working, assign })]);
+        await logAssistantMasterEvent({ assistantId, action: "areas_assigned", entityType: "assistant_cluster", details: { working, assign }, actorUserId }, client);
+        await client.query("commit");
+    }
+    catch (error) {
+        await client.query("rollback");
+        throw error;
+    }
+    finally {
+        client.release();
+    }
+}
 export async function assignAssistantCluster(input) {
     await ensureAssistantMasterSchema();
     await assertAssistantExists(input.assistantId);
@@ -752,7 +808,7 @@ export async function assignAssistantCluster(input) {
           values ($1, $2, true, true)
         `, [input.assistantId, input.clusterId]);
         }
-        await client.query("update zigo.assistants set current_cluster_id = $2, updated_at = now() where id = $1", [
+        await client.query("update zigo.assistants set current_cluster_id = $2, metadata=coalesce(metadata,'{}'::jsonb)-'areaAssignments', updated_at = now() where id = $1", [
             input.assistantId,
             input.clusterId
         ]);
@@ -783,7 +839,7 @@ export async function removeAssistantCluster(assistantId, actorUserId) {
     await pool.query(`
       update zigo.assistants
       set current_cluster_id = null,
-          metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), '{lastClusterRemovedBy}', to_jsonb($2::text), true),
+          metadata = jsonb_set(coalesce(metadata, '{}'::jsonb) - 'areaAssignments', '{lastClusterRemovedBy}', to_jsonb($2::text), true),
           updated_at = now()
       where id = $1
     `, [assistantId, actorUserId]);

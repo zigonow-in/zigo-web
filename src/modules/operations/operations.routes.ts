@@ -51,7 +51,8 @@ const bookingParamsSchema = z.object({ id: z.string().uuid() });
 const assignmentBodySchema = z.object({
   assistantId: z.string().uuid(),
   reason: z.string().min(3).max(1000),
-  forceMultiTaskAssignment: z.coerce.boolean().optional().default(false)
+  forceMultiTaskAssignment: z.coerce.boolean().optional().default(false),
+  mode: z.enum(['confirm','offer']).default('confirm')
 });
 const reasonBodySchema = z.object({ reason: z.string().min(3).max(1000) });
 const adminPaymentConfirmationBodySchema = z.object({
@@ -409,7 +410,7 @@ operationsRouter.get("/bookings/events", requirePermission("service_requests.vie
     };
     unsubscribe = onBookingRealtimeEvent((event) => {
       if (res.writableEnded || res.destroyed) return;
-      res.write(`id: ${event.id}\n`);
+      if (!event.id.startsWith('volatile-')) res.write(`id: ${event.id}\n`);
       res.write(`event: booking_changed\n`);
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     });
@@ -636,20 +637,24 @@ operationsRouter.post("/bookings/:id/assign", requirePermission("tasks.assign"),
       assistantId: body.assistantId,
       reason: body.reason,
       forceMultiTaskAssignment: body.forceMultiTaskAssignment,
+      mode: body.mode,
       actorUserId: req.auth!.sub
     });
     try {
       const audience = await bookingRealtimeAudience(id);
       await emitBookingRealtimeEvent({
-        type: "booking.assigned",
+        type: body.mode === 'offer' ? 'booking.offered' : 'booking.assigned',
         bookingId: id,
         assistantId: body.assistantId,
         clusterId: audience.clusterId ?? undefined,
         tab: "assigned",
-        message: "Booking assigned",
+        message: body.mode === 'offer' ? 'Booking offer sent' : 'Booking confirmed',
         payload: {
           bookingId: id,
           assignmentId: assignment.id,
+          assignmentStatus: assignment.status,
+          expiresAt: assignment.expiresAt,
+          broadcastTimeSeconds: assignment.broadcastTimeSeconds,
           assistantId: body.assistantId,
           customerUserId: audience.customerUserId,
           assistant: {

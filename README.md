@@ -38,6 +38,8 @@ npm.cmd run migrate:mvp-live-flow
 
 This creates the booking/task/payment lifecycle tables used by the customer, assistant, and admin live-operation APIs.
 
+For production backup, guarded release migration, deployment checks, and rollback, follow [PRODUCTION_RELEASE.md](PRODUCTION_RELEASE.md).
+
 ## Live Operations APIs
 
 - Live operations: `GET /operations/live`

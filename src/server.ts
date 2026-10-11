@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { startAdminAssignmentOfferWorker, stopAdminAssignmentOfferWorker } from './modules/operations/adminAssignmentOffers.js';
 import { createApp } from "./app.js";
 import { pool } from "./db/pool.js";
 import { env } from "./config/env.js";
@@ -16,6 +17,7 @@ server.setTimeout(0);
 server.listen(env.PORT, () => {
   console.log(`Zigo backend listening on port ${env.PORT}`);
   startBookingOrchestrationWorker();
+  startAdminAssignmentOfferWorker();
   startBookingInvoiceEmailWorker();
   startTrackingOutboxWorker();
 });
@@ -25,6 +27,7 @@ async function shutdown(signal: NodeJS.Signals) {
 
   server.close(async () => {
     stopBookingOrchestrationWorker();
+    stopAdminAssignmentOfferWorker();
     stopBookingInvoiceEmailWorker();
     stopTrackingOutboxWorker();
     await pool.end();

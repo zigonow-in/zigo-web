@@ -2,6 +2,7 @@ import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_ASSISTANT_MASTER_SETTINGS, normalizeAssistantMasterSettings } from "./assistantMasterSettings.js";
 export const MEDIA_PATH_SETTING_KEYS = {
     image: "media.image_save_path",
     document: "media.document_save_path"
@@ -11,6 +12,8 @@ export const BOOKING_TYPE_AUTOMATION_SETTING_KEY = "booking.type_automation";
 export const BOOKING_LIVE_SYNC_SETTING_KEY = "booking.live_sync";
 export const BOOKING_ENGINE_SETTING_KEY = "booking.engine";
 export const OTP_PROVIDER_SETTING_KEY = "otp.providers";
+export const ASSISTANT_MASTER_SETTING_KEY = "assistant.master_values";
+let assistantMasterSettingCache = null;
 const DEFAULT_MEDIA_PATHS = {
     [MEDIA_PATH_SETTING_KEYS.image]: "/uploads/images",
     [MEDIA_PATH_SETTING_KEYS.document]: "/uploads/documents"
@@ -615,6 +618,67 @@ export async function updateBookingEngineSetting(input) {
       where "key" = $1
     `, [BOOKING_ENGINE_SETTING_KEY, JSON.stringify(value), input.actorUserId]);
     return getBookingEngineSetting();
+}
+export async function getAssistantMasterSetting(client = pool) {
+    const canUseCache = client === pool;
+    if (canUseCache && assistantMasterSettingCache && assistantMasterSettingCache.expiresAt > Date.now()) {
+        return {
+            ...assistantMasterSettingCache.data,
+            travelCostSlabs: assistantMasterSettingCache.data.travelCostSlabs.map((slab) => ({ ...slab })),
+            assistantTravelPayoutSlabs: assistantMasterSettingCache.data.assistantTravelPayoutSlabs.map((slab) => ({ ...slab }))
+        };
+    }
+    try {
+        const result = await client.query(`
+        select value, updated_at as "updatedAt"
+        from zigo.app_settings
+        where "key" = $1
+          and coalesce(is_deleted, false) = false
+          and is_active = true
+        limit 1
+      `, [ASSISTANT_MASTER_SETTING_KEY]);
+        let parsed = {};
+        try {
+            parsed = JSON.parse(result.rows[0]?.value || "{}");
+        }
+        catch {
+            parsed = {};
+        }
+        const data = {
+            ...normalizeAssistantMasterSettings(parsed),
+            updatedAt: result.rows[0]?.updatedAt ?? null
+        };
+        if (canUseCache)
+            assistantMasterSettingCache = { data, expiresAt: Date.now() + 5000 };
+        return {
+            ...data,
+            travelCostSlabs: data.travelCostSlabs.map((slab) => ({ ...slab })),
+            assistantTravelPayoutSlabs: data.assistantTravelPayoutSlabs.map((slab) => ({ ...slab }))
+        };
+    }
+    catch (error) {
+        if (isUndefinedTableError(error))
+            return { ...normalizeAssistantMasterSettings(DEFAULT_ASSISTANT_MASTER_SETTINGS), updatedAt: null };
+        throw error;
+    }
+}
+export async function updateAssistantMasterSetting(input) {
+    const value = normalizeAssistantMasterSettings(input);
+    await pool.query(`
+      insert into zigo.app_settings ("key", value, description, is_active, created_by, updated_by)
+      values ($1, $2, 'Assistant broadcast, arrival radius, dry run, travel cost, and travel payout master values', true, $3, $3)
+      on conflict ("key") do update
+        set value = excluded.value,
+            description = excluded.description,
+            is_active = true,
+            is_deleted = false,
+            deleted_by = null,
+            deleted_at = null,
+            updated_by = excluded.updated_by,
+            updated_at = now()
+    `, [ASSISTANT_MASTER_SETTING_KEY, JSON.stringify(value), input.actorUserId]);
+    assistantMasterSettingCache = null;
+    return getAssistantMasterSetting();
 }
 export async function getOtpProviderSettings(client = pool) {
     try {

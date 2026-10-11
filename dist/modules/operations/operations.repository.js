@@ -7,7 +7,7 @@ import { requestOlaJson } from "../maps/olaMaps.service.js";
 import { generateZigoBookingReference, isZigoBookingReference, zigoServiceTypeCode } from "../../utils/bookingReference.js";
 import { calculateClusterCategoryPricing } from "../pricing/pricing.js";
 import { quotePriceMaster, resolveBookingEngineRuleForContext } from "../masters/masters.repository.js";
-import { getBookingEngineSetting, getBookingTypeAutomationSetting } from "../settings/settings.repository.js";
+import { getAssistantMasterSetting, getBookingEngineSetting, getBookingTypeAutomationSetting } from "../settings/settings.repository.js";
 import { ensurePaymentsSchema } from "../payments/payments.repository.js";
 import { ensureBookingEngineSchema, releaseCapacityReservations, upsertBookingOrchestrationState, upsertCapacityReservation } from "./bookingEngine.js";
 import { stopAssistantCalendarBlocksForBooking } from "./assistantDispatchEngine.js";
@@ -731,9 +731,14 @@ export async function validateBookingLocation(input) {
       order by coalesce((cl.metadata->>'isPinned')::boolean, false) desc,
                coalesce((cl.metadata->>'pinPriority')::int, 0),
                cl.priority,
-               cl.name
+               cl.name,
+               cl.id
     `);
-    for (const cluster of clusters.rows) {
+    // Keep a selected overlapping cluster only when it still passes every coverage check.
+    const candidates = input.preferredClusterId
+        ? [...clusters.rows.filter(cluster => cluster.id === input.preferredClusterId), ...clusters.rows.filter(cluster => cluster.id !== input.preferredClusterId)]
+        : clusters.rows;
+    for (const cluster of candidates) {
         const polygon = parseWktPolygon(cluster.polygonDescription);
         const serviceRangeMeters = Number(cluster.metadata?.serviceRangeMeters);
         const rangeCenter = clusterRangeCenter(cluster, polygon);
@@ -2261,7 +2266,8 @@ export async function createBookingByAdmin(input) {
     for (const [index, stop] of routeStops.entries()) {
         if (stop.latitude == null || stop.longitude == null)
             continue;
-        const eligibility = await validateBookingLocation({ customerId: input.customerId, latitude: stop.latitude, longitude: stop.longitude, address: stop.address });
+        const eligibility = await validateBookingLocation({ customerId: input.customerId, latitude: stop.latitude, longitude: stop.longitude, address: stop.address,
+            preferredClusterId: index === 0 ? input.clusterId : stop.clusterId || null });
         if (!eligibility.isServiceable || !eligibility.cluster)
             throw new HttpError(400, "A booking location is outside an open service market. Choose another location.");
         if (index === 0 && input.clusterId !== eligibility.cluster.clusterId)
@@ -3280,6 +3286,7 @@ export async function listAssignableAssistantsForBooking(serviceRequestId) {
     };
 }
 export async function assignBooking(input) {
+    const assistantMasterSettings = await getAssistantMasterSetting();
     const client = await pool.connect();
     try {
         await client.query("begin");
@@ -3300,6 +3307,11 @@ export async function assignBooking(input) {
         }
         const slaDeadlineAt = new Date(availability.slotStart.getTime() + Math.max(0, engineSettings.slaGraceMinutes ?? 10) * 60_000);
         const nextCheckAt = new Date(Math.max(Date.now(), availability.slotStart.getTime() - Math.max(1, engineSettings.riskLookaheadMinutes || 15) * 60_000));
+        const offered = input.mode === 'offer';
+        const broadcastTimeSeconds = assistantMasterSettings.broadcastTimeSeconds;
+        const assignmentExpiry = offered ? new Date(Date.now() + broadcastTimeSeconds * 1000) : availability.slotEnd;
+        const assignmentStatus = offered ? 'offered' : 'accepted';
+        const assignmentMetadata = JSON.stringify({ source: 'admin_panel', autoAcceptedByAdminAssignment: !offered, adminOffer: offered, offerExpiresAt: offered ? assignmentExpiry.toISOString() : null, broadcastTimeSeconds });
         await client.query(`
       update zigo.task_assignments
       set status_code = 'reassigned',
@@ -3311,25 +3323,26 @@ export async function assignBooking(input) {
       `, [input.serviceRequestId, input.assistantId, "Admin assignment selected another assistant."]);
         let assignment = await client.query(`
         update zigo.task_assignments
-        set status_code = 'accepted',
+        set status_code = $6::text,
             expires_at = $5::timestamptz,
-            responded_at = coalesce(responded_at, now()),
+            responded_at = case when $6::text = 'offered' then null else coalesce(responded_at, now()) end,
+            offered_at = case when $6::text = 'offered' then now() else offered_at end,
             admin_reason = $3::text,
             assigned_by_user_id = $4::uuid,
             created_by_user_id = coalesce(created_by_user_id, $4::uuid),
-            metadata = coalesce(metadata, '{}'::jsonb) || '{"source": "admin_panel_reserved_assignment", "autoAcceptedByAdminAssignment": true}'::jsonb
+            metadata = coalesce(metadata, '{}'::jsonb) || $7::jsonb
         where service_request_id = $1::uuid
           and assistant_id = $2::uuid
           and status_code in ('reserved', 'offered', 'accepted')
         returning id
-      `, [input.serviceRequestId, input.assistantId, input.reason, input.actorUserId, availability.slotEnd]);
+      `, [input.serviceRequestId, input.assistantId, input.reason, input.actorUserId, assignmentExpiry, assignmentStatus, assignmentMetadata]);
         if (!assignment.rows[0]) {
             assignment = await client.query(`
         insert into zigo.task_assignments
-            (request_id, service_request_id, assistant_id, status_code, expires_at, responded_at, admin_reason, created_by_user_id, assigned_by_user_id, metadata)
-          values ($1::uuid, $1::uuid, $2::uuid, 'accepted', $5::timestamptz, now(), $3::text, $4::uuid, $4::uuid, '{"source": "admin_panel", "autoAcceptedByAdminAssignment": true}'::jsonb)
+            (request_id, service_request_id, assistant_id, status_code, expires_at, responded_at, offered_at, admin_reason, created_by_user_id, assigned_by_user_id, metadata)
+          values ($1::uuid, $1::uuid, $2::uuid, $6::text, $5::timestamptz, case when $6::text = 'offered' then null else now() end, now(), $3::text, $4::uuid, $4::uuid, $7::jsonb)
           returning id
-        `, [input.serviceRequestId, input.assistantId, input.reason, input.actorUserId, availability.slotEnd]);
+        `, [input.serviceRequestId, input.assistantId, input.reason, input.actorUserId, assignmentExpiry, assignmentStatus, assignmentMetadata]);
         }
         const assignmentId = assignment.rows[0]?.id;
         if (!assignmentId) {
@@ -3342,7 +3355,7 @@ export async function assignBooking(input) {
         where id = $1::uuid
         `, [
             assignmentId,
-            availability.slotEnd,
+            assignmentExpiry,
             JSON.stringify({
                 startsAt: availability.slotStart.toISOString(),
                 taskEndAt: availability.taskEndAt.toISOString(),
@@ -3368,7 +3381,7 @@ export async function assignBooking(input) {
             clusterId: availability.clusterId,
             bookingType: availability.bookingType,
             assignType: "manual",
-            statusCode: "assigned",
+            statusCode: offered ? 'held' : 'assigned',
             reservedFrom: availability.slotStart,
             reservedUntil: availability.slotEnd,
             promisedStartAt: availability.slotStart,
@@ -3398,8 +3411,8 @@ export async function assignBooking(input) {
         });
         const serviceRequestUpdate = await client.query(`
         update zigo.service_requests
-        set status_code = 'accepted',
-            accepted_assignment_id = $2::uuid,
+        set status_code = $9::text,
+            accepted_assignment_id = case when $9::text = 'accepted' then $2::uuid else null end,
             booking_start_at = $7::timestamptz,
             booking_end_at = $8::timestamptz,
             booking_available_at = $3::timestamptz,
@@ -3419,7 +3432,7 @@ export async function assignBooking(input) {
               ),
               '{slaDeadlineAt}', to_jsonb($5::text), true
             )
-            || jsonb_build_object('capacityReservationId', $6::text, 'taskEndAt', $8::text)
+            || jsonb_build_object('capacityReservationId', $6::text, 'taskEndAt', $8::text, 'pendingAssignmentId', case when $9::text = 'assigned' then $2::text else null end)
         where id = $1::uuid and status_code in ('payment_pending', 'queued', 'paid', 'assigned', 'accepted', 'hold', 'on_hold')
       `, [
             input.serviceRequestId,
@@ -3429,7 +3442,8 @@ export async function assignBooking(input) {
             slaDeadlineAt.toISOString(),
             reservation.id,
             availability.slotStart,
-            availability.taskEndAt
+            availability.taskEndAt,
+            offered ? 'assigned' : 'accepted'
         ]);
         if (serviceRequestUpdate.rowCount === 0) {
             throw new HttpError(409, "Booking is not in a state that can be assigned.");
@@ -3437,9 +3451,9 @@ export async function assignBooking(input) {
         await upsertBookingOrchestrationState(client, {
             serviceRequestId: input.serviceRequestId,
             clusterId: availability.clusterId,
-            demandStatus: "accepted",
+            demandStatus: offered ? 'assigned' : 'accepted',
             riskStatus: "on_time",
-            supplyStatus: "accepted",
+            supplyStatus: offered ? 'offered' : 'accepted',
             bookingType: availability.bookingType,
             assignType: "manual",
             requestedStartAt: availability.slotStart,
@@ -3447,7 +3461,7 @@ export async function assignBooking(input) {
             slaDeadlineAt,
             assistantId: input.assistantId,
             reservationId: reservation.id,
-            nextCheckAt,
+            nextCheckAt: offered ? assignmentExpiry : nextCheckAt,
             lastEventType: "booking.assigned",
             metadata: {
                 assignmentId,
@@ -3465,7 +3479,7 @@ export async function assignBooking(input) {
             overlappingAssignments: availability.overlappingAssignments
         });
         await client.query("commit");
-        return { ...assignment.rows[0], id: assignmentId };
+        return { ...assignment.rows[0], id: assignmentId, status: assignmentStatus, expiresAt: assignmentExpiry.toISOString(), broadcastTimeSeconds };
     }
     catch (error) {
         await client.query("rollback");

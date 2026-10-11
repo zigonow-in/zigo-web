@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { assistantStartEligibility } from './assistantArrival.js';
 import { isAccountAccessBlocked } from "../auth/accountAccess.js";
 import crypto from "node:crypto";
 import jwt from "jsonwebtoken";
@@ -22,7 +23,7 @@ import { goAssistantOffline, goAssistantOnline, recordAssistantHeartbeat, recalc
 import { createBookingByAdmin, getBookingAvailabilityDecision, listBookingLocationServiceBoundaries, reverseBookingLocation, searchBookingLocations, validateBookingLocation } from "../operations/operations.repository.js";
 import { olaBrowserConfig, requestOlaJson } from "../maps/olaMaps.service.js";
 import { createRazorpayPaymentOrder, findCustomerPaidRazorpayPaymentByReference, getCustomerRazorpayOrderStatus, linkRazorpayPaymentToBooking } from "../payments/payments.repository.js";
-import { getBookingEngineSetting } from "../settings/settings.repository.js";
+import { getAssistantMasterSetting, getBookingEngineSetting } from "../settings/settings.repository.js";
 import { getCustomerWallet, getCustomerWalletTransaction, listCustomerWalletTransactions } from "../wallets/wallet.repository.js";
 import { getUserById, sendEmailOtp, sendUserOtpChallenge, verifyUserOtpChallenge, type UserSummary } from "../users/users.repository.js";
 import { enqueueCustomerBookingInvoice } from "./bookingInvoice.service.js";
@@ -204,6 +205,9 @@ function ensurePortalSchema(_client: Queryable = pool) {
       primary key (update_id, user_id)
     );
     create index if not exists idx_booking_task_update_reads_user on zigo.booking_task_update_reads(user_id, read_at desc);
+    alter table zigo.booking_task_update_reads alter column read_at drop not null;
+    alter table zigo.booking_task_update_reads alter column read_at drop default;
+    alter table zigo.booking_task_update_reads add column if not exists delivered_at timestamptz;
 
     create table if not exists zigo.customer_disputes (
       id uuid primary key default gen_random_uuid(),
@@ -338,20 +342,37 @@ async function setAssistantAvailabilityForPortalTask(client: Queryable, assistan
 
 async function taskUpdatesByBookingIds(client: Queryable, bookingIds: string[], viewer?: { userId: string; actor: PortalActor }) {
   if (!bookingIds.length) return new Map<string, unknown[]>();
+  if (viewer) {
+    await client.query(`
+      insert into zigo.booking_task_update_reads (update_id, user_id, actor_type, delivered_at)
+      select id, $2::uuid, $3::text, now() from (
+        select id, actor_type, row_number() over (partition by service_request_id order by created_at desc) as position
+        from zigo.booking_task_updates where service_request_id = any($1::uuid[])
+      ) recent where position <= 30 and actor_type = $4
+      on conflict (update_id, user_id) do nothing
+    `, [bookingIds, viewer.userId, viewer.actor, viewer.actor === 'assistant' ? 'customer' : 'assistant']);
+  }
   const result = await client.query(
     `
       select btu.service_request_id as "bookingId", btu.id, btu.actor_type as "actorType",
         btu.update_type as "updateType", btu.message, btu.media_urls as "mediaUrls",
         coalesce(btu.metadata, '{}'::jsonb) as metadata, btu.created_at as "createdAt",
-        btr.read_at as "viewerReadAt",
-        case when $3::text = 'customer' then btr.read_at else null end as "customerReadAt",
-        case when $3::text = 'assistant' then btr.read_at else null end as "assistantReadAt",
+        case when $3::text in ('customer', 'assistant') then btr.read_at end as "viewerReadAt",
+        receipts.customer_read_at as "customerReadAt",
+        receipts.assistant_read_at as "assistantReadAt",
+        receipts.recipient_delivered_at as "recipientDeliveredAt",
         u.display_name as "actorName"
       from zigo.booking_task_updates btu
       left join zigo.users u on u.id = btu.actor_user_id
       left join zigo.booking_task_update_reads btr
         on btr.update_id = btu.id
        and btr.user_id = $2::uuid
+      left join lateral (
+        select max(read_at) filter (where actor_type = 'customer') as customer_read_at,
+          max(read_at) filter (where actor_type = 'assistant') as assistant_read_at,
+          max(coalesce(delivered_at, read_at)) filter (where actor_type <> btu.actor_type) as recipient_delivered_at
+        from zigo.booking_task_update_reads where update_id = btu.id
+      ) receipts on true
       where btu.service_request_id = any($1::uuid[])
       order by btu.service_request_id, btu.created_at desc
     `,
@@ -1575,12 +1596,14 @@ export async function getPortalMe(input: { userId: string; actor: PortalActor })
       [identity.rows[0].assistantId]
     )).rows[0] || null
     : null;
+  const assistantMasterSettings = input.actor === "assistant" ? await getAssistantMasterSetting() : null;
   return {
     actor: input.actor,
     user,
     customerId: identity.rows[0]?.customerId ?? null,
     assistantId: identity.rows[0]?.assistantId ?? null,
     availability,
+    assistantMasterSettings,
     wallet,
     cart,
     favorites
@@ -3046,6 +3069,7 @@ export async function validateCustomerPortalLocation(userId: string, input: {
   longitude: number;
   addressId?: string | null;
   source?: string | null;
+  preferredClusterId?: string | null;
 }) {
   const customerId = await requireCustomerPortalCustomerId(userId);
   return validateBookingLocation({ customerId, ...input });
@@ -4136,6 +4160,37 @@ export async function cancelCustomerPortalBooking(userId: string, input: { booki
   }
 }
 
+export async function getAssistantPortalDashboard(userId: string) {
+  await ensurePortalSchema();
+  const result = await pool.query(`
+    with bounds as (
+      select date_trunc('month', now() at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata' as month_start,
+        date_trunc('week', now() at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata' as week_start
+    ), tasks as (
+      select distinct sr.id, lower(ta.status_code) as status,
+        coalesce(sr.completed_at, ta.responded_at, sr.created_at) as event_at,
+        case when coalesce(ta.metadata->>'assistantEarningPaise', '') ~ '^[0-9]+$'
+          then (ta.metadata->>'assistantEarningPaise')::numeric end as earned
+      from zigo.assistants a
+      join zigo.task_assignments ta on ta.assistant_id = a.id
+      join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
+      cross join bounds
+      where a.user_id = $1 and (sr.accepted_assignment_id = ta.id
+        or lower(ta.status_code) in ('completed', 'cancelled', 'canceled', 'rejected'))
+        and coalesce(sr.completed_at, ta.responded_at, sr.created_at) >= least(bounds.month_start, bounds.week_start)
+    )
+    select count(*) filter (where event_at >= bounds.month_start)::int as "totalTasks",
+      count(*) filter (where status = 'completed' and event_at >= bounds.month_start)::int as "completed",
+      count(*) filter (where status in ('cancelled', 'canceled') and event_at >= bounds.month_start)::int as "cancelled",
+      sum(earned) filter (where status = 'completed' and event_at >= bounds.month_start) as "monthlyEarningPaise",
+      sum(earned) filter (where status = 'completed' and event_at >= bounds.week_start) as "weeklyEarningPaise",
+      (select round(avg(br.assistant_rating)::numeric, 1) from zigo.booking_reviews br
+        join zigo.assistants a on a.id = br.assistant_id where a.user_id = $1) as rating
+    from tasks cross join bounds group by bounds.week_start, bounds.month_start
+  `, [userId]);
+  return result.rows[0] || { totalTasks: 0, completed: 0, cancelled: 0, monthlyEarningPaise: null, weeklyEarningPaise: null, rating: null };
+}
+
 export async function listAssistantPortalTasks(userId: string) {
   const client = await pool.connect();
   try {
@@ -4175,9 +4230,25 @@ export async function listAssistantPortalTasks(userId: string) {
         where a.user_id = $1
           and (
             sr.accepted_assignment_id = ta.id
+            or (ta.status_code = 'offered' and ta.metadata->>'adminOffer' = 'true' and ta.expires_at > now()
+              and sr.metadata->>'pendingAssignmentId' = ta.id::text and sr.accepted_assignment_id is null)
+            or (ta.status_code = 'expired' and ta.metadata->>'adminOffer' = 'true'
+              and not exists (
+                select 1
+                from zigo.task_assignments next_ta
+                where next_ta.assistant_id = ta.assistant_id
+                  and coalesce(next_ta.service_request_id, next_ta.request_id) = sr.id
+                  and next_ta.id <> ta.id
+                  and (
+                    sr.accepted_assignment_id = next_ta.id
+                    or (next_ta.metadata->>'adminOffer' = 'true'
+                      and coalesce(next_ta.offered_at, next_ta.assigned_at, next_ta.responded_at)
+                        > coalesce(ta.offered_at, ta.assigned_at, ta.responded_at))
+                  )
+              ))
             or lower(coalesce(ta.status_code, '')) in ('rejected', 'cancelled', 'canceled', 'completed')
           )
-          and lower(coalesce(ta.status_code, '')) not in ('reassigned', 'reserved', 'offered', 'released')
+          and lower(coalesce(ta.status_code, '')) not in ('reassigned', 'reserved', 'released')
         group by ta.id, sr.id, u.display_name, u.phone, u.metadata, s.name, c.name
         order by
           case
@@ -4212,7 +4283,70 @@ type AssistantPortalLocationInput = {
   longitude?: number | null;
   accuracy?: number | null;
   capturedAt?: string | null;
+  speed?: number | null;
+  heading?: number | null;
 };
+
+function validateTrackingFix(input: AssistantPortalLocationInput) {
+  const capturedAt = input.capturedAt ? new Date(input.capturedAt) : new Date();
+  if (!Number.isFinite(capturedAt.getTime()) || Date.now() - capturedAt.getTime() > 30000 || capturedAt.getTime() - Date.now() > 10000) {
+    throw new HttpError(400, "A fresh GPS reading is required.");
+  }
+  if (input.accuracy != null && (!Number.isFinite(input.accuracy) || input.accuracy < 0 || input.accuracy > 500)) {
+    throw new HttpError(400, "GPS accuracy is too low. Please wait for a better signal.");
+  }
+  return capturedAt;
+}
+
+export async function getAssistantLiveTracking(assistantId: string, assignmentId: string | null = null, nextStopIndex = 0) {
+  await ensureAssistantLocationTrackingSchema();
+  const result = await pool.query(`
+    select a.id as "assistantId", av.status_code as "availabilityStatus", av.latitude, av.longitude,
+      av.gps_captured_at as "capturedAt", av.heartbeat_at as "heartbeatAt",
+      p.accuracy_meters as "accuracy", u.display_name as "displayName",
+      t."bookingId", t."assignmentId", coalesce(t.locations, '[]'::json) as locations
+    from zigo.assistants a join zigo.users u on u.id = a.user_id
+    left join zigo.assistant_availability av on av.assistant_id = a.id
+    left join lateral (select accuracy_meters from zigo.assistant_location_pings where assistant_id = a.id order by captured_at desc, created_at desc limit 1) p on true
+    left join lateral (
+      select sr.id as "bookingId", ta.id as "assignmentId",
+        (select json_agg(json_build_object('latitude', rl.latitude, 'longitude', rl.longitude, 'address', rl.address) order by rl.sequence)
+         from zigo.request_locations rl where rl.service_request_id = sr.id) as locations
+      from zigo.task_assignments ta join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
+      where ta.assistant_id = a.id and sr.accepted_assignment_id = ta.id and ($2::uuid is null or ta.id = $2::uuid)
+        and lower(ta.status_code) in ('assigned','accepted','in_progress','working','approval_pending')
+        and lower(sr.status_code) not in ('completed','success','done','cancelled','canceled','failed','rejected','expired')
+      order by case when lower(ta.status_code) in ('in_progress','working','approval_pending') then 0 else 1 end, ta.assigned_at desc limit 1
+    ) t on true
+    where a.id = $1::uuid and u.deleted_at is null
+  `, [assistantId, assignmentId]);
+  const row = result.rows[0];
+  if (!row) throw new HttpError(404, "Assistant not found.");
+  const allStops = row.locations.map(portalLiveRouteCoordinate).filter(Boolean);
+  const stops = allStops.slice(Math.min(nextStopIndex, Math.max(0, allStops.length - 1)));
+  const assistantLocation = row.latitude == null || row.longitude == null ? null : {
+    latitude: Number(row.latitude), longitude: Number(row.longitude), accuracy: row.accuracy == null ? null : Number(row.accuracy), capturedAt: row.capturedAt
+  };
+  const destination = stops.at(-1) || null;
+  const route = assistantLocation && destination ? await cachedTrackingRoute(assistantLocation, destination, stops.slice(0, -1), 'bike') : null;
+  const assistantMasterSettings = await getAssistantMasterSetting();
+  return { ...row, assistantLocation, stopLocations: stops, destinationLocation: destination,
+    startEligibility: assistantStartEligibility(
+      assistantLocation,
+      allStops[0] || null,
+      Date.now(),
+      assistantMasterSettings.autoArrivedRadiusMeters
+    ),
+    routePath: route?.routePath || [], etaMinutes: route?.etaMinutes || null,
+    routeSteps: route?.routeSteps || [], distanceMeters: route?.distanceMeters || null, travelMode: 'bike',
+    status: row.capturedAt && Date.now() - new Date(row.capturedAt).getTime() < 90000 ? "live" : "stale" };
+}
+
+export async function getAssistantPortalLiveTracking(userId: string, assignmentId: string | null = null, nextStopIndex = 0) {
+  const assistant = await pool.query("select id from zigo.assistants where user_id=$1", [userId]);
+  if (!assistant.rows[0]) throw new HttpError(404, "Assistant not found.");
+  return getAssistantLiveTracking(assistant.rows[0].id, assignmentId, nextStopIndex);
+}
 
 function portalLiveRouteCoordinate(input: Record<string, unknown> | null | undefined) {
   const latitude = Number(input?.latitude ?? input?.lat);
@@ -4370,11 +4504,16 @@ function dedupePortalRouteCoordinates(points: Array<{ latitude: number; longitud
   return unique;
 }
 
+let assistantTrackingSchemaReady: Promise<unknown> | null = null;
 async function ensureAssistantLocationTrackingSchema(client: Queryable = pool) {
-  await client.query(`
+  if (client === pool && assistantTrackingSchemaReady) return assistantTrackingSchemaReady;
+  const ready = client.query(`
     alter table if exists zigo.assistant_availability
       add column if not exists latitude numeric(10,7),
-      add column if not exists longitude numeric(10,7);
+      add column if not exists longitude numeric(10,7),
+      add column if not exists gps_captured_at timestamptz,
+      add column if not exists heartbeat_at timestamptz,
+      add column if not exists presence_status text;
 
     create table if not exists zigo.assistant_location_pings (
       id uuid primary key default gen_random_uuid(),
@@ -4406,10 +4545,31 @@ async function ensureAssistantLocationTrackingSchema(client: Queryable = pool) {
 
     create index if not exists idx_assistant_location_pings_request
       on zigo.assistant_location_pings (service_request_id, created_at desc);
+    create index if not exists idx_assistant_location_pings_assistant_captured
+      on zigo.assistant_location_pings (assistant_id, captured_at desc, created_at desc);
+    create index if not exists idx_assistant_location_pings_booking_captured
+      on zigo.assistant_location_pings (service_request_id, captured_at desc, created_at desc);
   `);
+  if (client === pool) assistantTrackingSchemaReady = ready;
+  try { return await ready; }
+  catch (error) { if (assistantTrackingSchemaReady === ready) assistantTrackingSchemaReady = null; throw error; }
 }
 
-async function fetchPortalOlaRoute(origin: { latitude: number; longitude: number }, destination: { latitude: number; longitude: number }, waypoints: Array<{ latitude: number; longitude: number }> = []) {
+const trackingRouteCache = new Map<string, { expiresAt: number; value: ReturnType<typeof fetchPortalOlaRoute> }>();
+function cachedTrackingRoute(origin: { latitude: number; longitude: number }, destination: { latitude: number; longitude: number }, waypoints: Array<{ latitude: number; longitude: number }> = [], mode: 'driving' | 'bike' = 'driving') {
+  const key = mode + ':' + [origin, ...waypoints, destination].map(p => `${p.latitude.toFixed(3)},${p.longitude.toFixed(3)}`).join('|');
+  const cached = trackingRouteCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  trackingRouteCache.delete(key);
+  if (trackingRouteCache.size >= 200) trackingRouteCache.delete(trackingRouteCache.keys().next().value!);
+  const value = fetchPortalOlaRoute(origin, destination, waypoints, mode);
+  const entry = { expiresAt: Date.now() + 30000, value };
+  trackingRouteCache.set(key, entry);
+  void value.then(result => { if (!result && trackingRouteCache.get(key) === entry) entry.expiresAt = Date.now() + 5000; });
+  return value;
+}
+
+async function fetchPortalOlaRoute(origin: { latitude: number; longitude: number }, destination: { latitude: number; longitude: number }, waypoints: Array<{ latitude: number; longitude: number }> = [], mode: 'driving' | 'bike' = 'driving') {
   if (!env.OLA_MAPS_API_KEY && (!env.OLA_MAPS_CLIENT_ID || !env.OLA_MAPS_CLIENT_SECRET)) return null;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3500);
@@ -4417,7 +4577,7 @@ async function fetchPortalOlaRoute(origin: { latitude: number; longitude: number
     const url = new URL("https://api.olamaps.io/routing/v1/directions/basic");
     url.searchParams.set("origin", `${origin.latitude},${origin.longitude}`);
     url.searchParams.set("destination", `${destination.latitude},${destination.longitude}`);
-    url.searchParams.set("mode", "driving");
+    url.searchParams.set("mode", mode);
     url.searchParams.set("alternatives", "false");
     url.searchParams.set("steps", "true");
     url.searchParams.set("overview", "full");
@@ -4443,6 +4603,13 @@ async function fetchPortalOlaRoute(origin: { latitude: number; longitude: number
     const routePath = dedupePortalRouteCoordinates(geometryPoints.length >= 2 ? geometryPoints : stepPoints);
     return {
       routePath: routePath.length >= 2 ? routePath : null,
+      routeSteps: legs.flatMap((leg: any) => Array.isArray(leg.steps) ? leg.steps : []).map((step: any) => ({
+        instruction: String(step.instructions || step.html_instructions || step.instruction || step.maneuver?.instruction || ''),
+        maneuver: String(typeof step.maneuver === 'string' ? step.maneuver : step.maneuver?.type || ''),
+        location: portalLiveRouteCoordinate(step.start_location || step.maneuver?.location)
+          || portalRouteCoordinatesFromUnknown(step.geometry || step.polyline)[0] || null,
+        distanceMeters: Number(step.distance?.value ?? step.distance ?? 0)
+      })),
       etaMinutes: Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.ceil(seconds / 60)) : null,
       distanceMeters: Number.isFinite(meters) && meters > 0 ? meters : null
     };
@@ -4516,7 +4683,7 @@ async function attachCustomerLiveRoutes(rows: Array<Record<string, any>>) {
       select assistant_id as "assistantId",
         latitude,
         longitude,
-        updated_at as "capturedAt"
+        gps_captured_at as "capturedAt"
       from zigo.assistant_availability
       where assistant_id = any($1::uuid[])
         and latitude is not null
@@ -4553,7 +4720,7 @@ async function attachCustomerLiveRoutes(rows: Array<Record<string, any>>) {
     const fallbackPath = [assistantLocation, ...routeLocations];
     const directMeters = fallbackPath.slice(1).reduce((total, point, index) => total + portalDistanceMeters(fallbackPath[index], point), 0);
     const intermediateWaypoints = routeLocations.slice(0, -1);
-    const route = await fetchPortalOlaRoute(assistantLocation, destination, intermediateWaypoints);
+    const route = await cachedTrackingRoute(assistantLocation, destination, intermediateWaypoints);
     const distanceMeters = route?.distanceMeters || directMeters;
     row.liveRoute = {
       status: route?.routePath?.length ? "live" : "route_pending",
@@ -4581,6 +4748,7 @@ export async function setAssistantPortalOnline(userId: string, isOnline: boolean
   if (!assistant.rows[0]) throw new HttpError(404, "Assistant profile not found.");
   const point = portalLiveRouteCoordinate(location as Record<string, unknown>);
   if (isOnline && !point) throw new HttpError(400, "Current GPS location is required to go online.");
+  if (isOnline) validateTrackingFix(location ?? {});
   const data = await updateAssistantAvailability({ assistantId: assistant.rows[0].id, isOnline, actorUserId: userId });
   const dispatchState = isOnline
     ? await goAssistantOnline({ assistantId: assistant.rows[0].id, location: location ?? {}, actorUserId: userId })
@@ -4600,34 +4768,54 @@ export async function setAssistantPortalOnline(userId: string, isOnline: boolean
   return { ...data, dispatch: dispatchState, ...(point ? { latitude: point.latitude, longitude: point.longitude } : {}) };
 }
 
-export async function recordAssistantPortalLocationPing(userId: string, input: AssistantPortalLocationInput) {
+export async function recordAssistantPortalLocationPing(userId: string, input: AssistantPortalLocationInput, assignmentId: string | null = null) {
   await ensureAssistantLocationTrackingSchema();
   const point = portalLiveRouteCoordinate(input as Record<string, unknown>);
   if (!point) throw new HttpError(400, "Latitude and longitude are required.");
   const assistant = await pool.query<{ id: string }>("select id from zigo.assistants where user_id = $1 limit 1", [userId]);
   if (!assistant.rows[0]) throw new HttpError(404, "Assistant profile not found.");
-  const active = await pool.query<{ bookingId: string | null; assignmentId: string | null }>(
+  const active = await pool.query<{ bookingId: string | null; assignmentId: string | null; latitude: number | null; longitude: number | null }>(
     `
-      select sr.id as "bookingId", ta.id as "assignmentId"
+      select sr.id as "bookingId", ta.id as "assignmentId", first_stop.latitude, first_stop.longitude
       from zigo.task_assignments ta
       join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
+      left join lateral (select latitude, longitude from zigo.request_locations where service_request_id = sr.id order by sequence limit 1) first_stop on true
       where ta.assistant_id = $1
+        and sr.accepted_assignment_id = ta.id
+        and ($2::uuid is null or ta.id = $2::uuid)
         and lower(coalesce(ta.status_code, '')) in ('assigned', 'accepted', 'in_progress', 'working', 'approval_pending')
         and lower(coalesce(sr.status_code, '')) not in ('completed', 'success', 'done', 'cancelled', 'canceled', 'failed', 'rejected', 'expired')
       order by case when lower(coalesce(ta.status_code, '')) in ('in_progress', 'working') then 0 else 1 end,
         ta.assigned_at desc nulls last
       limit 1
     `,
-    [assistant.rows[0].id]
+    [assistant.rows[0].id, assignmentId]
   );
+  if (assignmentId && !active.rows[0]) throw new HttpError(409, 'This task is no longer assigned to you.');
   const bookingId = active.rows[0]?.bookingId || null;
-  const capturedAt = input.capturedAt ? new Date(input.capturedAt) : new Date();
-  const accuracy = Number(input.accuracy);
+  const capturedAt = validateTrackingFix(input);
+  const accuracy = input.accuracy == null ? NaN : Number(input.accuracy);
   const saved = await pool.query(
     `
+      with accepted as (
+        update zigo.assistant_availability av
+        set latitude = $3, longitude = $4, heartbeat_at = now(), gps_captured_at = $6,
+            presence_status = 'ONLINE', updated_at = now()
+        where av.assistant_id = $1
+          and lower(av.status_code) in ('available','online','active','working')
+          and (av.gps_captured_at is null or av.gps_captured_at < $6)
+          and exists (select 1 from zigo.users u where u.id = $8 and u.deleted_at is null
+            and lower(coalesce(u.metadata->>'isActive', 'true')) not in ('false','0','no')
+            and lower(coalesce(u.metadata->>'isAdminDeactivated', 'false')) not in ('true','1','yes')
+            and lower(coalesce(u.metadata->>'isDeleted', 'false')) not in ('true','1','yes')
+            and lower(coalesce(u.metadata->>'deactivationSource', '')) <> 'admin'
+            and lower(coalesce(u.metadata->>'accountStatus', 'active')) not in ('inactive','deactive','deactivated','disabled','suspended','blocked','deleted')
+            and lower(coalesce(u.metadata->>'verificationStatus', 'active')) not in ('inactive','deactive','deactivated','disabled','suspended','blocked','deleted'))
+        returning assistant_id
+      )
       insert into zigo.assistant_location_pings
         (assistant_id, request_id, service_request_id, latitude, longitude, accuracy_meters, captured_at, metadata)
-      values ($1, $2, $2, $3, $4, $5, $6, $7::jsonb)
+      select $1, $2, $2, $3, $4, $5, $6, $7::jsonb from accepted
       returning id, assistant_id as "assistantId", service_request_id as "bookingId", latitude, longitude, accuracy_meters as "accuracyMeters", captured_at as "capturedAt"
     `,
     [
@@ -4637,39 +4825,74 @@ export async function recordAssistantPortalLocationPing(userId: string, input: A
       point.longitude,
       Number.isFinite(accuracy) ? accuracy : null,
       Number.isNaN(capturedAt.getTime()) ? new Date() : capturedAt,
-      JSON.stringify({ source: "assistant_portal" })
+      JSON.stringify({ source: "assistant_portal", speed: input.speed ?? null, heading: input.heading ?? null }),
+      userId
     ]
   );
-  await pool.query(
-    `
-      update zigo.assistant_availability
-      set latitude = $2,
-          longitude = $3,
-          heartbeat_at = now(),
-          gps_captured_at = $4,
-          presence_status = case when presence_status = 'OFFLINE' then 'ONLINE' else coalesce(presence_status, 'ONLINE') end,
-          updated_at = now()
-      where assistant_id = $1
-    `,
-    [assistant.rows[0].id, point.latitude, point.longitude, Number.isNaN(capturedAt.getTime()) ? new Date() : capturedAt]
+  if (!saved.rows[0]) return { ignored: true, assistantId: assistant.rows[0].id, bookingId, assignmentId: active.rows[0]?.assignmentId || null };
+  const firstStop = portalLiveRouteCoordinate(active.rows[0] || {});
+  const assistantMasterSettings = await getAssistantMasterSetting();
+  const startEligibility = assistantStartEligibility(
+    { ...point, capturedAt, accuracy: input.accuracy },
+    firstStop,
+    Date.now(),
+    assistantMasterSettings.autoArrivedRadiusMeters
   );
-  await recordAssistantHeartbeat({
-    assistantId: assistant.rows[0].id,
-    location: {
-      latitude: point.latitude,
-      longitude: point.longitude,
-      accuracy: Number.isFinite(accuracy) ? accuracy : null,
-      capturedAt: Number.isNaN(capturedAt.getTime()) ? new Date() : capturedAt
-    }
-  });
+  let reachedAt: string | null = null;
+  if (startEligibility.eligible && active.rows[0]?.assignmentId) {
+    reachedAt = await markAssistantReached(active.rows[0].assignmentId, bookingId!, capturedAt.toISOString());
+  }
   return {
     ...saved.rows[0],
+    startEligibility, reachedAt,
     assignmentId: active.rows[0]?.assignmentId || null
   };
 }
 
+async function markAssistantReached(assignmentId: string, bookingId: string, capturedAt: string) {
+  const arrival = await pool.query(`
+      with reached as (
+        update zigo.task_assignments ta set metadata = coalesce(ta.metadata, '{}'::jsonb) || jsonb_build_object('reachedAt', $3::text)
+        from zigo.service_requests sr
+        where ta.id = $1 and sr.id = $2 and sr.accepted_assignment_id = ta.id
+          and lower(ta.status_code) in ('assigned','accepted') and ta.actual_started_at is null
+          and lower(sr.status_code) not in ('completed','success','done','cancelled','canceled','failed','rejected','expired')
+          and not (coalesce(ta.metadata, '{}'::jsonb) ? 'reachedAt')
+        returning ta.id
+      ) update zigo.service_requests sr set metadata = coalesce(sr.metadata, '{}'::jsonb) || jsonb_build_object('assistantReachedAt', $3::text)
+        where sr.id = $2 and exists(select 1 from reached) returning $3::text as "reachedAt"
+    `, [assignmentId, bookingId, capturedAt]);
+  return arrival.rows[0]?.reachedAt || null;
+}
+
+export async function confirmAssistantPortalArrival(userId: string, assignmentId: string, input: AssistantPortalLocationInput) {
+  await recordAssistantPortalLocationPing(userId, input, assignmentId);
+  const result = await pool.query(`
+    select sr.id as "bookingId", ta.metadata->>'reachedAt' as "reachedAt",
+      av.latitude, av.longitude, av.gps_captured_at as "capturedAt", p.accuracy_meters as accuracy,
+      first_stop.latitude as "stopLatitude", first_stop.longitude as "stopLongitude"
+    from zigo.task_assignments ta
+    join zigo.assistants a on a.id = ta.assistant_id
+    join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id) and sr.accepted_assignment_id = ta.id
+    join zigo.assistant_availability av on av.assistant_id = a.id and lower(av.status_code) in ('available','online','active','working')
+    left join lateral (select accuracy_meters from zigo.assistant_location_pings where assistant_id = a.id order by captured_at desc, created_at desc limit 1) p on true
+    left join lateral (select latitude, longitude from zigo.request_locations where service_request_id = sr.id order by sequence limit 1) first_stop on true
+    where ta.id = $1 and a.user_id = $2 and lower(ta.status_code) in ('assigned','accepted')
+      and sr.actual_task_started_at is null and ta.actual_started_at is null
+      and lower(sr.status_code) not in ('completed','success','done','cancelled','canceled','failed','rejected','expired')
+  `, [assignmentId, userId]);
+  const row = result.rows[0];
+  if (!row) throw new HttpError(409, 'Go online and select an assigned task before starting.');
+  const location = portalLiveRouteCoordinate(row);
+  const assistantMasterSettings = await getAssistantMasterSetting();
+  const startEligibility = assistantStartEligibility(location ? { ...location, capturedAt: row.capturedAt, accuracy: row.accuracy == null ? null : Number(row.accuracy) } : null,
+    portalLiveRouteCoordinate({latitude:row.stopLatitude,longitude:row.stopLongitude}), Date.now(), assistantMasterSettings.autoArrivedRadiusMeters);
+  const reachedAt = row.reachedAt || (startEligibility.eligible ? await markAssistantReached(assignmentId, row.bookingId, startEligibility.capturedAt!) : null);
+  return { assignmentId, bookingId:row.bookingId, startEligibility, reachedAt };
+}
+
 export async function updateAssistantPortalTaskStatus(userId: string, input: { assignmentId: string; status: "accepted" | "in_progress" | "completed" | "rejected"; pin?: string }) {
-  const settings = await getBookingEngineSetting();
+  const [settings, assistantMasterSettings] = await Promise.all([getBookingEngineSetting(), getAssistantMasterSetting()]);
   if (!settings.assistantPortal.isEnabled || !settings.assistantPortal.allowTaskExecution) throw new HttpError(403, "Assistant task execution is disabled.");
   const client = await pool.connect();
   try {
@@ -4700,9 +4923,10 @@ export async function updateAssistantPortalTaskStatus(userId: string, input: { a
       bookingMetadata: Record<string, any> | null;
       assignmentMetadata: Record<string, any> | null;
       assignmentRespondedAt: string | null;
+      acceptedAssignmentId: string | null;
     }>(
       `
-        select sr.id as "bookingId", a.id as "assistantId", cu.user_id as "customerUserId",
+        select sr.id as "bookingId", a.id as "assistantId", cu.user_id as "customerUserId", sr.accepted_assignment_id as "acceptedAssignmentId",
           sr.duration_minutes as "durationMinutes", sr.status_code as "bookingStatus", ta.status_code as "assignmentStatus",
           sr.booking_amount_paise as "bookingAmountPaise", sr.waiting_time_minutes as "waitingTimeMinutes",
           sr.waiting_charges_paise as "waitingChargesPaise",
@@ -4732,6 +4956,7 @@ export async function updateAssistantPortalTaskStatus(userId: string, input: { a
     );
     if (!assignment.rows[0]) throw new HttpError(404, "Task not found.");
     const current = assignment.rows[0];
+    if (current.assignmentStatus === 'offered') throw new HttpError(409, 'Respond to the booking offer before executing this task.');
     const now = new Date();
     const bookingPins = taskPinsFromMetadata(current.bookingMetadata);
     const assignmentPins = taskPinsFromMetadata(current.assignmentMetadata);
@@ -4749,6 +4974,22 @@ export async function updateAssistantPortalTaskStatus(userId: string, input: { a
     ].filter((value, index, values) => values.indexOf(value) === index);
     const suppliedPin = String(input.pin || "").trim();
     if (input.status === "in_progress") {
+      if (current.acceptedAssignmentId !== input.assignmentId || isBookingFinalStatus(current.bookingStatus || '')) throw new HttpError(409, 'Task is no longer assigned to you.');
+      await ensureAssistantLocationTrackingSchema(client);
+      const proximity = await client.query(`
+        select av.latitude, av.longitude, av.gps_captured_at as "capturedAt", p.accuracy_meters as accuracy,
+          first_stop.latitude as "stopLatitude", first_stop.longitude as "stopLongitude"
+        from zigo.assistant_availability av
+        left join lateral (select accuracy_meters from zigo.assistant_location_pings where assistant_id = av.assistant_id order by captured_at desc, created_at desc limit 1) p on true
+        left join lateral (select latitude, longitude from zigo.request_locations where service_request_id = $2 order by sequence limit 1) first_stop on true
+        where av.assistant_id = $1 and lower(av.status_code) in ('available','online','active','working')
+      `, [current.assistantId, current.bookingId]);
+      const fix = proximity.rows[0];
+      const eligibility = assistantStartEligibility(fix ? { ...portalLiveRouteCoordinate(fix)!, capturedAt: fix.capturedAt, accuracy: fix.accuracy == null ? null : Number(fix.accuracy) } : null,
+        fix ? portalLiveRouteCoordinate({ latitude: fix.stopLatitude, longitude: fix.stopLongitude }) : null,
+        Date.now(), assistantMasterSettings.autoArrivedRadiusMeters);
+      if (!eligibility.eligible) throw new HttpError(409, eligibility.reason);
+      if (!['assigned','accepted'].includes(String(current.assignmentStatus).toLowerCase()) || current.actualTaskStartedAt || current.assignmentActualStartedAt) throw new HttpError(409, 'Task has already started or is no longer available to start.');
       if (!/^\d{4}$/.test(suppliedPin)) throw new HttpError(400, "Ask customer to share 4 digit PIN to start.");
       if (!startPinCandidates.length) throw new HttpError(409, "Start PIN is not ready. Ask customer to reopen Track Booking.");
       if (!startPinCandidates.includes(suppliedPin)) throw new HttpError(403, "Invalid Start PIN.");

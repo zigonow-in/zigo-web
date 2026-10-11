@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { assistantStartEligibility } from '../dist/modules/portal/assistantArrival.js';
+const now = Date.now(), stop = { latitude:28.6,longitude:77.2 };
+const fix = { ...stop,accuracy:8,capturedAt:new Date(now).toISOString() };
+assert.equal(assistantStartEligibility(fix,stop,now).eligible,true);
+assert.equal(assistantStartEligibility({...fix,latitude:28.60089},stop,now).eligible,true);
+assert.equal(assistantStartEligibility({...fix,latitude:28.60091},stop,now).eligible,false);
+assert.equal(assistantStartEligibility({...fix,latitude:28.60108},stop,now,125).eligible,true);
+assert.equal(assistantStartEligibility({...fix,latitude:28.60117},stop,now,125).eligible,false);
+assert.equal(assistantStartEligibility({...fix,capturedAt:new Date(now-31000).toISOString()},stop,now).eligible,false);
+assert.equal(assistantStartEligibility({...fix,capturedAt:new Date(now+11000).toISOString()},stop,now).eligible,false);
+assert.equal(assistantStartEligibility({...fix,accuracy:51},stop,now).eligible,false);
+assert.equal(assistantStartEligibility({...fix,accuracy:null},stop,now).eligible,false);
+assert.equal(assistantStartEligibility(fix,null,now).eligible,false);
+assert.equal(assistantStartEligibility({...fix,latitude:NaN},stop,now).eligible,false);
+console.log('Arrival: default/configured radius, stale/future GPS, accuracy, missing location and invalid coordinates passed');

@@ -15,6 +15,9 @@
     "migrate:rbac-foundation": "node scripts/migrate-rbac-foundation.mjs",
     "migrate:admin-master-pages": "node scripts/migrate-admin-master-pages.mjs",
     "migrate:settings": "node scripts/migrate-settings.mjs",
+    "db:backup": "node scripts/backup-database.mjs",
+    "db:migrate:release": "node scripts/migrate-release.mjs",
+    "db:migrate:status": "node scripts/migrate-release.mjs --status",
     "seed:rbac-foundation": "node scripts/seed-rbac-foundation.mjs",
     "seed:access-master": "node scripts/seed-access-master.mjs",
     "seed:access-verify": "node scripts/verify-access-master.mjs",
@@ -29,6 +32,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@turf/bearing": "^7.4.0",
+    "@turf/distance": "^7.4.0",
+    "@turf/helpers": "^7.4.0",
+    "@turf/nearest-point-on-line": "^7.4.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

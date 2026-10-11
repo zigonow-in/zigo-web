@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requirePermission } from "../../http/auth.js";
 import { emitBookingRealtimeEvent } from "../operations/bookingRealtime.js";
+import { getAssistantLiveTracking } from "../portal/portal.repository.js";
 import {
   assignAssistantCluster,
   saveAssistantAreas,
@@ -116,6 +117,14 @@ assistantMasterRouter.get("/:assistantId/logs", requirePermission("verification.
   } catch (error) {
     next(error);
   }
+});
+
+assistantMasterRouter.get("/:assistantId/live-tracking", requirePermission("verification.view"), async (req, res, next) => {
+  try {
+    const { assistantId } = assistantParamsSchema.parse(req.params);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ data: await getAssistantLiveTracking(assistantId) });
+  } catch (error) { next(error); }
 });
 
 assistantMasterRouter.put("/:assistantId/work", requirePermission("verification.edit"), async (req, res, next) => {

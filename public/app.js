@@ -271,6 +271,7 @@ function adminAuthError(message = "Session expired. Please login again.") {
 }
 
 function clearAdminSession(message = "") {
+  closeAdminAssistantLiveMap();
   adminSessionGeneration++;
   Object.keys(cache).forEach(key => { cache[key] = Array.isArray(cache[key]) ? [] : null; });
   if (assistantOnlineTimer) clearInterval(assistantOnlineTimer);
@@ -6170,6 +6171,7 @@ function assistantCards(items) {
       <div class="assistant-record-vehicle">${assistantVehiclePreview(assistant)}</div>
       <div class="assistant-record-status">${status(lifecycle.isActive ? "active" : "deactive")}<small>${escapeHtml(createdOn)}</small></div>
       <div class="assistant-record-actions">
+        <button class="btn btn-soft btn-xs" data-action="assistant-live-map" data-id="${escapeHtml(assistant.id)}" type="button">Live Map</button>
         <button class="btn btn-soft btn-xs" data-action="open-assistant-master-cell" data-field="basic" data-id="${escapeHtml(assistant.id)}" type="button">Edit</button>
         ${deleteButton}
       </div>
@@ -6180,6 +6182,51 @@ function assistantCards(items) {
     ${rows}
   </div>`;
 }
+
+let adminAssistantLiveMap = null, adminAssistantLiveId = '', adminAssistantLiveRoute = {}, adminAssistantLiveTimer = null, adminAssistantLiveGeneration = 0;
+function closeAdminAssistantLiveMap() {
+  adminAssistantLiveGeneration++;
+  clearInterval(adminAssistantLiveTimer); adminAssistantLiveTimer = null;
+  adminAssistantLiveMap?.destroy(); adminAssistantLiveMap = null; adminAssistantLiveId = ''; adminAssistantLiveRoute = {};
+  document.querySelector('[data-admin-assistant-live-dialog]')?.remove();
+}
+async function openAdminAssistantLiveMap(assistantId) {
+  closeAdminAssistantLiveMap();
+  adminAssistantLiveId = assistantId;
+  const current = adminAssistantLiveGeneration;
+  const assistant = cache.assistantMasters.find(item => item.id === assistantId);
+  const dialog = document.createElement('dialog'); dialog.dataset.adminAssistantLiveDialog = '';
+  dialog.className = 'admin-assistant-live-dialog';
+  dialog.innerHTML = `<header><h3>${escapeHtml(assistant?.displayName || 'Assistant')} · Live Location</h3><button type="button" aria-label="Close live map">Close</button></header><div class="zigo-live-map" data-admin-assistant-live-map></div>`;
+  dialog.querySelector('button').onclick = closeAdminAssistantLiveMap;
+  dialog.addEventListener('cancel', e => { e.preventDefault(); closeAdminAssistantLiveMap(); });
+  document.body.append(dialog); dialog.showModal();
+  const container = dialog.querySelector('[data-admin-assistant-live-map]');
+  let busy = false;
+  const refresh = async () => {
+    if (busy || current !== adminAssistantLiveGeneration || !state.token) return;
+    busy = true;
+    try {
+      const payload = await api(`/assistant-master/${encodeURIComponent(assistantId)}/live-tracking`);
+      if (current !== adminAssistantLiveGeneration) return;
+      const newest = adminAssistantLiveRoute.assistantLocation;
+      adminAssistantLiveRoute = payload.data;
+      if (Date.parse(newest?.capturedAt || '') > Date.parse(payload.data.assistantLocation?.capturedAt || '')) adminAssistantLiveRoute.assistantLocation = newest;
+      if (!adminAssistantLiveMap) {
+        const created = await window.ZigoLiveMap.create(container, adminAssistantLiveRoute);
+        if (current !== adminAssistantLiveGeneration) { created?.destroy(); return; }
+        adminAssistantLiveMap = created;
+      } else adminAssistantLiveMap.update(adminAssistantLiveRoute);
+    } catch { if (!adminAssistantLiveMap && container.isConnected) container.textContent = 'Unable to load location. Retrying...'; }
+    finally { busy = false; }
+  };
+  await refresh();
+  if (current === adminAssistantLiveGeneration) adminAssistantLiveTimer = setInterval(refresh, 30000);
+}
+document.addEventListener('click', e => {
+  const button = e.target.closest('[data-action="assistant-live-map"]');
+  if (button) void openAdminAssistantLiveMap(button.dataset.id);
+});
 
 function assistantPaginationControls(totalRecords, totalPages) {
   if (!totalRecords) return "";
@@ -7276,6 +7323,7 @@ async function loadOperations() {
           <label class="form-label">Reason <textarea class="form-control" name="reason" rows="3" required>Manual dispatch from admin panel</textarea></label>
           <div class="form-actions">
             <button class="btn btn-primary" name="mode" value="assign">Assign</button>
+            <button class="btn btn-outline-primary" name="mode" value="confirm">Confirm</button>
             <button class="btn btn-outline-primary" name="mode" value="reassign">Reassign</button>
           </div>
         </form>
@@ -8707,6 +8755,17 @@ function mergeAssistantRealtimePayload(event = {}) {
 function handleBookingRealtimeEvent(event = {}) {
   const eventType = String(event.type || "");
   if (eventType === 'user.session.revoked' && event.payload?.userId === state.user?.id) { clearAdminSession('Unable to sign in. Please contact support.'); return; }
+  if (eventType === 'assistant.location.updated') {
+    if (adminAssistantLiveMap && event.assistantId === adminAssistantLiveId) {
+      const incoming = event.payload || {};
+      const stamp = Date.parse(incoming.capturedAt || '');
+      if (Number.isFinite(stamp) && stamp > Date.parse(adminAssistantLiveRoute.assistantLocation?.capturedAt || '1970-01-01')) {
+        adminAssistantLiveRoute = { ...adminAssistantLiveRoute, assistantLocation: incoming };
+        adminAssistantLiveMap.update(adminAssistantLiveRoute);
+      }
+    }
+    return;
+  }
   if (eventType.startsWith("support.")) {
     if (state.section === "supportTickets") void loadSupportTickets();
     const openTicketId = cache.supportTicketDetail?.ticket?.id;
@@ -9894,7 +9953,7 @@ function bookingAssistantPickerHtml(assistants = [], booking = {}) {
       const todayStats = assistantTodayTaskStats(assistant);
       const eligibility = assistant.assignmentEligibility || {};
       const taskStartText = bookingAssistantTaskStartText(eligibility.assignmentWindowStartAt);
-      return `<button class="booking-assistant-picker-card ${isActuallyWorking ? "busy" : ""}" data-action="assign-booking-assistant-card" data-id="${escapeHtml(assistant.id)}" data-busy="false" type="button">
+      return `<div class="booking-assistant-picker-card ${isActuallyWorking ? "busy" : ""}" data-id="${escapeHtml(assistant.id)}">
         <div class="booking-assistant-photo-wrap">
           ${profileAvatar(assistant.profilePictureUrl, name)}
           <span class="assistant-status-capsule ${assistantStatusDotClass(assistantProfileLifecycle(assistant).verificationStatus)}">${escapeHtml(String(assistantProfileLifecycle(assistant).verificationStatus || "verified").replace(/_/g, " "))}</span>
@@ -9909,7 +9968,7 @@ function bookingAssistantPickerHtml(assistants = [], booking = {}) {
           ${assistantStatusLabel(assistant)}
           <small>${escapeHtml(assistantTodayOnlineLabel(assistant))}</small>
           <small class="booking-next-available">${escapeHtml(taskStartText)}</small>
-          <span class="btn btn-primary btn-xs booking-card-assign-btn">Assign</span>
+          <div class="booking-assistant-picker-actions"><button class="btn btn-primary btn-xs" data-action="assign-booking-assistant-card" data-id="${escapeHtml(assistant.id)}" data-mode="offer" type="button">Assign</button><button class="btn btn-outline-primary btn-xs" data-action="assign-booking-assistant-card" data-id="${escapeHtml(assistant.id)}" data-mode="confirm" type="button">Confirm</button></div>
         </div>
         <div class="booking-assistant-task-metrics" aria-label="Today task counts">
           <span><small>Today Assigned</small><b>${escapeHtml(todayStats.assigned)}</b></span>
@@ -9917,7 +9976,7 @@ function bookingAssistantPickerHtml(assistants = [], booking = {}) {
           <span><small>Today Completed</small><b>${escapeHtml(todayStats.completed)}</b></span>
           <span><small>Today Cancelled</small><b>${escapeHtml(todayStats.cancelled)}</b></span>
         </div>
-      </button>`;
+      </div>`;
     }).join("")}`;
 }
 
@@ -16254,6 +16313,183 @@ async function loadUserRoles() {
     </div>`;
 }
 
+const assistantMasterFallbackSlabs = [
+  { fromKm: 0, toKm: 3, rateType: "fixed", ratePaise: 5000 },
+  { fromKm: 3, toKm: 5, rateType: "per_km", ratePaise: 1000 },
+  { fromKm: 5, toKm: 10, rateType: "per_km", ratePaise: 900 },
+  { fromKm: 10, toKm: 15, rateType: "per_km", ratePaise: 800 },
+  { fromKm: 15, toKm: 20, rateType: "per_km", ratePaise: 700 }
+];
+
+function assistantMasterDecimal(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "0";
+  return Number(numeric.toFixed(3)).toString();
+}
+
+function assistantMasterSlabRow(slab = {}, kind = "travelCostSlabs", index = 0) {
+  const rateType = slab.rateType === "fixed" ? "fixed" : "per_km";
+  return `<tr data-assistant-master-slab data-slab-kind="${escapeHtml(kind)}" data-slab-index="${index}">
+    <td>
+      <div class="assistant-master-distance-inputs">
+        <label><span>From</span><input class="form-control form-control-sm" type="number" min="0" max="10000" step="0.1" value="${escapeHtml(assistantMasterDecimal(slab.fromKm))}" data-slab-field="fromKm" required></label>
+        <span class="assistant-master-range-separator">to</span>
+        <label><span>To</span><input class="form-control form-control-sm" type="number" min="0" max="10000" step="0.1" value="${slab.toKm == null ? "" : escapeHtml(assistantMasterDecimal(slab.toKm))}" data-slab-field="toKm" placeholder="No limit"></label>
+        <span class="assistant-master-unit">km</span>
+      </div>
+    </td>
+    <td>
+      <div class="assistant-master-rate-inputs">
+        <select class="form-select form-select-sm" data-slab-field="rateType" aria-label="Rate type">
+          <option value="fixed" ${rateType === "fixed" ? "selected" : ""}>Fixed</option>
+          <option value="per_km" ${rateType === "per_km" ? "selected" : ""}>Per km</option>
+        </select>
+        <label><span>INR</span><input class="form-control form-control-sm" type="number" min="0" max="1000000" step="0.01" value="${escapeHtml(assistantMasterDecimal(Number(slab.ratePaise || 0) / 100))}" data-slab-field="rateRupees" required></label>
+      </div>
+    </td>
+    <td data-slab-calculation>-</td>
+    <td><strong data-slab-charge>${money(0)}</strong></td>
+    <td class="text-end"><button class="btn btn-outline-danger btn-xs" data-action="remove-assistant-master-slab" type="button" aria-label="Remove distance slab" title="Remove slab">Remove</button></td>
+  </tr>`;
+}
+
+function assistantMasterCollectSlabs(form, kind) {
+  return [...form.querySelectorAll(`[data-assistant-master-slab][data-slab-kind="${kind}"]`)].map((row) => {
+    const fromValue = row.querySelector('[data-slab-field="fromKm"]')?.value ?? "";
+    const toValue = row.querySelector('[data-slab-field="toKm"]')?.value ?? "";
+    const rateValue = row.querySelector('[data-slab-field="rateRupees"]')?.value ?? "";
+    return {
+      fromKm: Number(fromValue),
+      toKm: String(toValue).trim() === "" ? null : Number(toValue),
+      rateType: row.querySelector('[data-slab-field="rateType"]')?.value === "fixed" ? "fixed" : "per_km",
+      ratePaise: Math.round(Number(rateValue) * 100)
+    };
+  });
+}
+
+function validateAssistantMasterSlabs(slabs, label) {
+  if (!slabs.length) throw new Error(`Add at least one ${label} slab.`);
+  if (slabs.length > 20) throw new Error(`${label} supports a maximum of 20 slabs.`);
+  const tolerance = 0.0001;
+  slabs.forEach((slab, index) => {
+    if (!Number.isFinite(slab.fromKm) || slab.fromKm < 0) throw new Error(`${label} slab ${index + 1}: enter a valid From distance.`);
+    if (slab.toKm !== null && (!Number.isFinite(slab.toKm) || slab.toKm <= slab.fromKm)) throw new Error(`${label} slab ${index + 1}: To distance must be greater than From distance.`);
+    if (slab.toKm === null && index !== slabs.length - 1) throw new Error(`${label}: only the final slab can have no upper limit.`);
+    if (!Number.isInteger(slab.ratePaise) || slab.ratePaise < 0) throw new Error(`${label} slab ${index + 1}: enter a valid rate.`);
+    if (index === 0 && Math.abs(slab.fromKm) > tolerance) throw new Error(`${label}: the first slab must start at 0 km.`);
+    if (index > 0) {
+      const previous = slabs[index - 1];
+      if (previous.toKm === null || Math.abs(previous.toKm - slab.fromKm) > tolerance) throw new Error(`${label} slab ${index + 1} must start where slab ${index} ends.`);
+    }
+  });
+}
+
+function updateAssistantMasterSlabPreview(kind) {
+  const form = document.querySelector('[data-form="assistant-master-values"]');
+  if (!form) return;
+  const distanceInput = form.querySelector(`[data-assistant-master-preview="${kind}"]`);
+  const distanceKm = Math.max(0, Number(distanceInput?.value || 0));
+  const slabs = assistantMasterCollectSlabs(form, kind);
+  let totalPaise = 0;
+  const rows = [...form.querySelectorAll(`[data-assistant-master-slab][data-slab-kind="${kind}"]`)];
+  rows.forEach((row, index) => {
+    const slab = slabs[index];
+    const upperBound = slab?.toKm == null ? distanceKm : slab.toKm;
+    const billableKm = slab && Number.isFinite(slab.fromKm) && Number.isFinite(upperBound)
+      ? Math.max(0, Math.min(distanceKm, upperBound) - slab.fromKm)
+      : 0;
+    const amountPaise = billableKm <= 0 || !Number.isFinite(slab?.ratePaise)
+      ? 0
+      : slab.rateType === "fixed"
+        ? slab.ratePaise
+        : Math.round(billableKm * slab.ratePaise);
+    totalPaise += amountPaise;
+    const calculation = row.querySelector("[data-slab-calculation]");
+    const charge = row.querySelector("[data-slab-charge]");
+    if (calculation) calculation.textContent = billableKm <= 0
+      ? "Not reached"
+      : slab.rateType === "fixed"
+        ? "Base fare"
+        : `${assistantMasterDecimal(billableKm)} km x ${money(slab.ratePaise)}`;
+    if (charge) charge.textContent = money(amountPaise);
+  });
+  form.querySelectorAll(`[data-assistant-master-preview-label="${kind}"]`).forEach((label) => {
+    label.textContent = `${assistantMasterDecimal(distanceKm)} km`;
+  });
+  const total = form.querySelector(`[data-assistant-master-total="${kind}"]`);
+  if (total) total.textContent = money(totalPaise);
+  const coverage = form.querySelector(`[data-assistant-master-coverage="${kind}"]`);
+  const finalToKm = slabs.at(-1)?.toKm;
+  if (coverage) coverage.textContent = finalToKm !== null && Number.isFinite(finalToKm) && distanceKm > finalToKm
+    ? `Distance above ${assistantMasterDecimal(finalToKm)} km is not covered by these slabs.`
+    : "Leave the final To distance blank to make that slab open-ended.";
+}
+
+function assistantMasterSlabEditor(kind, title, description, slabs) {
+  return `<section class="assistant-master-slab-section" data-assistant-master-slab-section="${escapeHtml(kind)}">
+    <div class="assistant-master-section-head">
+      <div><p>Distance Pricing</p><h2>${escapeHtml(title)}</h2><span>${escapeHtml(description)}</span></div>
+      <label class="assistant-master-preview-control">Calculate for
+        <span><input class="form-control form-control-sm" type="number" min="0" max="10000" step="0.1" value="20" data-assistant-master-preview="${escapeHtml(kind)}"> km</span>
+      </label>
+    </div>
+    <div class="table-responsive assistant-master-slab-table-wrap">
+      <table class="table assistant-master-slab-table">
+        <thead><tr><th>Distance slab</th><th>Rate</th><th>Calculation for <span data-assistant-master-preview-label="${escapeHtml(kind)}">20 km</span></th><th>Charge</th><th></th></tr></thead>
+        <tbody data-assistant-master-slab-list="${escapeHtml(kind)}">${slabs.map((slab, index) => assistantMasterSlabRow(slab, kind, index)).join("")}</tbody>
+        <tfoot><tr><td colspan="3"><strong>Total for <span data-assistant-master-preview-label="${escapeHtml(kind)}">20 km</span></strong></td><td><strong data-assistant-master-total="${escapeHtml(kind)}">${money(0)}</strong></td><td></td></tr></tfoot>
+      </table>
+    </div>
+    <div class="assistant-master-slab-footer">
+      <button class="btn btn-outline-primary btn-sm" data-action="add-assistant-master-slab" data-kind="${escapeHtml(kind)}" type="button">+ Add slab</button>
+      <p class="helper-text" data-assistant-master-coverage="${escapeHtml(kind)}"></p>
+    </div>
+  </section>`;
+}
+
+async function loadAssistantMasterValues() {
+  const payload = await api("/settings/assistant-master");
+  const settings = payload.data || {};
+  const travelCostSlabs = Array.isArray(settings.travelCostSlabs) && settings.travelCostSlabs.length
+    ? settings.travelCostSlabs
+    : assistantMasterFallbackSlabs;
+  const payoutSlabs = Array.isArray(settings.assistantTravelPayoutSlabs) && settings.assistantTravelPayoutSlabs.length
+    ? settings.assistantTravelPayoutSlabs
+    : assistantMasterFallbackSlabs;
+  $("#assistantMasterValuesSection").innerHTML =
+    pageTitleBlock("Assistant Master", "Control assistant broadcast, arrival, dry run, customer travel cost, and assistant travel payout values") +
+    `<form class="assistant-master-settings-form" data-form="assistant-master-values">
+      <section class="assistant-master-operational-section">
+        <div class="assistant-master-section-head">
+          <div><p>Operational Rules</p><h2>Assignment & Arrival</h2><span>Changes apply to new broadcasts and the next live GPS eligibility check.</span></div>
+          <span class="assistant-master-updated">Updated ${escapeHtml(formatDate(settings.updatedAt))}</span>
+        </div>
+        <div class="assistant-master-rule-grid">
+          <label class="form-label">Broadcast Time
+            <span class="assistant-master-input-unit"><input class="form-control" name="broadcastTimeSeconds" type="number" min="5" max="600" step="1" value="${escapeHtml(settings.broadcastTimeSeconds ?? 30)}" required><b>seconds</b></span>
+            <small>Time available to accept or reject a booking broadcast.</small>
+          </label>
+          <label class="form-label">Auto Arrived Radius
+            <span class="assistant-master-input-unit"><input class="form-control" name="autoArrivedRadiusMeters" type="number" min="10" max="5000" step="1" value="${escapeHtml(settings.autoArrivedRadiusMeters ?? 100)}" required><b>metres</b></span>
+            <small>Marks the assistant reached and enables Start PIN inside this radius.</small>
+          </label>
+          <label class="form-label">Dry Run Distance
+            <span class="assistant-master-input-unit"><input class="form-control" name="dryRunDistanceKm" type="number" min="0" max="500" step="0.1" value="${escapeHtml(settings.dryRunDistanceKm ?? 3)}" required><b>km</b></span>
+            <small>Master distance retained for dry-run policy and settlement use.</small>
+          </label>
+        </div>
+      </section>
+      ${assistantMasterSlabEditor("travelCostSlabs", "Travel Cost Slabs", "Progressive amount charged across each covered distance band.", travelCostSlabs)}
+      ${assistantMasterSlabEditor("assistantTravelPayoutSlabs", "Assistant Travel Payout Slabs", "Independent progressive payout payable to the assistant.", payoutSlabs)}
+      <div class="assistant-master-save-bar">
+        <p>Rates are stored in paise and calculated progressively to avoid rounding drift.</p>
+        <button class="btn btn-primary" type="submit">Save Assistant Master</button>
+      </div>
+    </form>`;
+  updateAssistantMasterSlabPreview("travelCostSlabs");
+  updateAssistantMasterSlabPreview("assistantTravelPayoutSlabs");
+}
+
 async function loadSettings() {
   const [mediaPayload, cartMixPayload, automationPayload, liveSyncPayload, otpPayload, servicesPayload] = await Promise.all([
     api("/settings/media-paths"),
@@ -16715,6 +16951,7 @@ const loaders = {
   priceMaster: loadPriceMaster,
   stores: loadStores,
   assistant: loadAssistant,
+  assistantMasterValues: loadAssistantMasterValues,
   vehicles: loadVehicles,
   verification: loadVerification,
   users: loadUsers,
@@ -16764,6 +17001,7 @@ const titles = {
   priceMaster: "Price Master",
   stores: "Stores",
   assistant: "Assistant",
+  assistantMasterValues: "Assistant Master",
   vehicles: "Vehicle Master",
   verification: "Verification",
   users: "Users",
@@ -17347,6 +17585,9 @@ document.addEventListener("submit", async (event) => {
   }
   if (form instanceof HTMLFormElement && form.id === "assignBookingForm") {
     event.preventDefault();
+    if(form.dataset.assignmentBusy==='true') return;
+    form.dataset.assignmentBusy='true';
+    document.querySelectorAll('[data-action="assign-booking-assistant-card"]').forEach(button=>{button.disabled=true;});
     const data = formObject(form);
     try {
       if (!data.assistantId) throw new Error("Select an available assistant.");
@@ -17354,7 +17595,8 @@ document.addEventListener("submit", async (event) => {
         method: "POST",
         body: JSON.stringify({
           assistantId: data.assistantId,
-          reason: data.reason
+          reason: data.reason,
+          mode: form.dataset.assignmentMode || 'offer'
         })
       });
       $("#assignBookingModal").classList.add("d-none");
@@ -17363,6 +17605,9 @@ document.addEventListener("submit", async (event) => {
       const message = error.message || "Unable to assign assistant.";
       $("#assignBookingModalAlert").textContent = message;
       $("#assignBookingModalAlert").classList.remove("d-none");
+    } finally {
+      form.dataset.assignmentBusy='false';
+      document.querySelectorAll('[data-action="assign-booking-assistant-card"]').forEach(button=>{button.disabled=false;});
     }
     return;
   }
@@ -17542,6 +17787,25 @@ document.addEventListener("submit", async (event) => {
   try {
     const data = formObject(form);
     const formName = form.dataset.form;
+    if (formName === "assistant-master-values") {
+      const travelCostSlabs = assistantMasterCollectSlabs(form, "travelCostSlabs");
+      const assistantTravelPayoutSlabs = assistantMasterCollectSlabs(form, "assistantTravelPayoutSlabs");
+      validateAssistantMasterSlabs(travelCostSlabs, "Travel Cost");
+      validateAssistantMasterSlabs(assistantTravelPayoutSlabs, "Assistant Travel Payout");
+      await api("/settings/assistant-master", {
+        method: "PUT",
+        body: JSON.stringify({
+          broadcastTimeSeconds: Number(data.broadcastTimeSeconds),
+          autoArrivedRadiusMeters: Number(data.autoArrivedRadiusMeters),
+          dryRunDistanceKm: Number(data.dryRunDistanceKm),
+          travelCostSlabs,
+          assistantTravelPayoutSlabs
+        })
+      });
+      await loadAssistantMasterValues();
+      showAlert("Assistant Master values saved.", "success");
+      return;
+    }
     if (formName === "offer-master") {
       const payload = collectOfferPayload(form);
       if (editingOfferId) {
@@ -18325,9 +18589,9 @@ document.addEventListener("submit", async (event) => {
     if (formName === "operation-assign") {
       const submitter = event.submitter;
       const mode = submitter?.value || "assign";
-      await api(`/operations/bookings/${data.serviceRequestId}/${mode}`, {
+      await api(`/operations/bookings/${data.serviceRequestId}/${mode === 'confirm' ? 'assign' : mode}`, {
         method: "POST",
-        body: JSON.stringify({ assistantId: data.assistantId, reason: data.reason })
+        body: JSON.stringify({ assistantId: data.assistantId, reason: data.reason,mode:mode === 'assign' ? 'offer' : 'confirm' })
       });
     }
     if (formName === "media-paths") {
@@ -18593,6 +18857,11 @@ document.addEventListener("visibilitychange", assistantAvailabilityBoardVisibili
 
 document.addEventListener("input", (event) => {
   const input = event.target;
+  const assistantMasterSlabSection = input.closest?.("[data-assistant-master-slab-section]");
+  if (assistantMasterSlabSection) {
+    updateAssistantMasterSlabPreview(assistantMasterSlabSection.dataset.assistantMasterSlabSection);
+    return;
+  }
   if (input.closest?.("#taxMasterForm")) {
     taxMasterEvaluateFormula(input.closest("#taxMasterForm"));
   }
@@ -18659,6 +18928,11 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   const input = event.target;
+  const assistantMasterSlabSection = input.closest?.("[data-assistant-master-slab-section]");
+  if (assistantMasterSlabSection) {
+    updateAssistantMasterSlabPreview(assistantMasterSlabSection.dataset.assistantMasterSlabSection);
+    return;
+  }
   if (input instanceof HTMLSelectElement && input.dataset.assistantAvailabilityFilter) {
   if (input instanceof HTMLSelectElement && input.dataset.assistantReportFilter) {
     const key = input.dataset.assistantReportFilter;
@@ -19364,6 +19638,43 @@ document.addEventListener("drop", async (event) => {
 
 document.addEventListener("click", async (event) => {
   if (event.target.closest?.('a[href^="https://wa.me/"]')) return;
+  const addAssistantMasterSlab = event.target.closest?.('[data-action="add-assistant-master-slab"]');
+  if (addAssistantMasterSlab) {
+    event.preventDefault();
+    try {
+      const form = addAssistantMasterSlab.closest('[data-form="assistant-master-values"]');
+      const kind = addAssistantMasterSlab.dataset.kind;
+      if (!form || !kind) return;
+      const slabs = assistantMasterCollectSlabs(form, kind);
+      if (slabs.length >= 20) throw new Error("A maximum of 20 distance slabs is allowed.");
+      const last = slabs.at(-1);
+      if (last?.toKm == null && slabs.length) throw new Error("Enter the final To distance before adding another slab.");
+      const fromKm = last?.toKm ?? 0;
+      const previousWidth = last?.toKm != null && Number.isFinite(last.fromKm) ? Math.max(1, last.toKm - last.fromKm) : 5;
+      const list = form.querySelector(`[data-assistant-master-slab-list="${kind}"]`);
+      list?.insertAdjacentHTML("beforeend", assistantMasterSlabRow({ fromKm, toKm: fromKm + previousWidth, rateType: "per_km", ratePaise: last?.ratePaise ?? 0 }, kind, slabs.length));
+      updateAssistantMasterSlabPreview(kind);
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const removeAssistantMasterSlab = event.target.closest?.('[data-action="remove-assistant-master-slab"]');
+  if (removeAssistantMasterSlab) {
+    event.preventDefault();
+    const row = removeAssistantMasterSlab.closest("[data-assistant-master-slab]");
+    const form = removeAssistantMasterSlab.closest('[data-form="assistant-master-values"]');
+    const kind = row?.dataset.slabKind;
+    if (!row || !form || !kind) return;
+    const rows = form.querySelectorAll(`[data-assistant-master-slab][data-slab-kind="${kind}"]`);
+    if (rows.length <= 1) {
+      showAlert("Keep at least one distance slab.");
+      return;
+    }
+    row.remove();
+    updateAssistantMasterSlabPreview(kind);
+    return;
+  }
   const assistantReportRow = event.target.closest?.('[data-action="open-assistant-report-detail"]');
   if (assistantReportRow && state.section === "assistantReport") {
     event.preventDefault();
@@ -20801,8 +21112,10 @@ document.addEventListener("click", async (event) => {
     }
     if (action === "assign-booking-assistant-card") {
       const form = $("#assignBookingForm");
+      if(form?.dataset.assignmentBusy==='true') return;
       if (form?.elements?.assistantId) form.elements.assistantId.value = id;
       if (form) form.dataset.forceMultiTaskAssignment = "false";
+      if (form) form.dataset.assignmentMode = button.dataset.mode || 'offer';
       document.querySelectorAll(".booking-assistant-picker-card").forEach((card) => {
         card.classList.toggle("selected", card.dataset.id === id);
       });

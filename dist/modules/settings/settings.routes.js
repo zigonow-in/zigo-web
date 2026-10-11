@@ -3,7 +3,8 @@ import { z } from "zod";
 import { isSuperAdmin, requirePermission } from "../../http/auth.js";
 import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
-import { getBookingCartMixSetting, getBookingEngineSetting, getBookingLiveSyncSetting, getBookingTypeAutomationSetting, getMediaPaths, getOtpProviderSettings, saveDocumentUpload, saveImageUpload, updateBookingCartMixSetting, updateBookingEngineSetting, updateBookingLiveSyncSetting, updateBookingTypeAutomationSetting, updateMediaPaths, updateOtpProviderSettings } from "./settings.repository.js";
+import { getAssistantMasterSetting, getBookingCartMixSetting, getBookingEngineSetting, getBookingLiveSyncSetting, getBookingTypeAutomationSetting, getMediaPaths, getOtpProviderSettings, saveDocumentUpload, saveImageUpload, updateAssistantMasterSetting, updateBookingCartMixSetting, updateBookingEngineSetting, updateBookingLiveSyncSetting, updateBookingTypeAutomationSetting, updateMediaPaths, updateOtpProviderSettings } from "./settings.repository.js";
+import { validateAssistantDistanceSlabs } from "./assistantMasterSettings.js";
 export const settingsRouter = Router();
 const mediaPathsBodySchema = z.object({
     imageSavePath: z.string().trim().min(1, "Image save path is required."),
@@ -134,6 +135,26 @@ const bookingEngineBodySchema = z.object({
 const otpProviderBodySchema = z.object({
     smsProviders: z.array(z.record(z.unknown())).default([]),
     emailProviders: z.array(z.record(z.unknown())).default([])
+});
+const assistantDistanceSlabSchema = z.object({
+    fromKm: z.number().min(0).max(10000),
+    toKm: z.number().min(0).max(10000).nullable(),
+    rateType: z.enum(["fixed", "per_km"]),
+    ratePaise: z.number().int().min(0).max(100_000_000)
+});
+const assistantMasterBodySchema = z.object({
+    broadcastTimeSeconds: z.coerce.number().int().min(5).max(600),
+    autoArrivedRadiusMeters: z.coerce.number().int().min(10).max(5000),
+    dryRunDistanceKm: z.coerce.number().min(0).max(500),
+    travelCostSlabs: z.array(assistantDistanceSlabSchema).min(1).max(20),
+    assistantTravelPayoutSlabs: z.array(assistantDistanceSlabSchema).min(1).max(20)
+}).superRefine((value, context) => {
+    const costError = validateAssistantDistanceSlabs(value.travelCostSlabs);
+    if (costError)
+        context.addIssue({ code: z.ZodIssueCode.custom, message: costError, path: ["travelCostSlabs"] });
+    const payoutError = validateAssistantDistanceSlabs(value.assistantTravelPayoutSlabs);
+    if (payoutError)
+        context.addIssue({ code: z.ZodIssueCode.custom, message: payoutError, path: ["assistantTravelPayoutSlabs"] });
 });
 function requireAnyPermission(permissionCodes) {
     return async (req, _res, next) => {
@@ -271,6 +292,28 @@ settingsRouter.put("/booking-engine", requirePermission("settings.edit"), async 
         const body = bookingEngineBodySchema.parse(req.body);
         res.json({
             data: await updateBookingEngineSetting({
+                ...body,
+                actorUserId: req.auth.sub
+            })
+        });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+settingsRouter.get("/assistant-master", requirePermission("settings.view"), async (_req, res, next) => {
+    try {
+        res.json({ data: await getAssistantMasterSetting() });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+settingsRouter.put("/assistant-master", requirePermission("settings.edit"), async (req, res, next) => {
+    try {
+        const body = assistantMasterBodySchema.parse(req.body);
+        res.json({
+            data: await updateAssistantMasterSetting({
                 ...body,
                 actorUserId: req.auth.sub
             })

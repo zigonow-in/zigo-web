@@ -183,7 +183,16 @@ async function verifyReleaseSchema(database) {
     ["assistant_location_pings", "captured_at"],
     ["assistant_location_pings", "accuracy_meters"],
     ["booking_realtime_events", "assistant_id"],
-    ["booking_realtime_events", "cluster_id"]
+    ["booking_realtime_events", "cluster_id"],
+    ["zones", "polygon_description"],
+    ["zones", "is_open"],
+    ["cities", "service_region_code"],
+    ["cities", "allow_intercity_service"],
+    ["micro_markets", "polygon_description"],
+    ["nano_markets", "polygon_description"],
+    ["nano_markets", "market_type_id"],
+    ["market_types", "color"],
+    ["nano_market_types", "sort_order"]
   ];
   const columns = await database.query(`
     select table_name, column_name

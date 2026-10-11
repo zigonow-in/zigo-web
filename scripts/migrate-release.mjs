@@ -15,16 +15,18 @@ const target = parseDatabaseUrl(connectionString);
 const isLocalTarget = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(target.host.toLowerCase());
 const statusOnly = process.argv.includes("--status");
 const localMode = process.argv.includes("--local");
+const productionMode = process.argv.includes("--production");
 const confirmedHost = optionValue("--confirm-host");
 
+if (localMode && productionMode) throw new Error("Choose either --local or --production, not both.");
 if (localMode && !isLocalTarget) throw new Error("--local cannot be used with a remote database.");
-if (!isLocalTarget && confirmedHost.toLowerCase() !== target.host.toLowerCase()) {
+if ((productionMode || !isLocalTarget) && confirmedHost.toLowerCase() !== target.host.toLowerCase()) {
   throw new Error(`Remote migration refused. Re-run with --confirm-host=${target.host}.`);
 }
-if (!statusOnly && isLocalTarget && !localMode) {
-  throw new Error("Local migration requires --local. Remote migration requires a verified backup.");
+if (!statusOnly && isLocalTarget && !localMode && !productionMode) {
+  throw new Error("Use --local for development or --production with a verified backup for production.");
 }
-if (!statusOnly && !isLocalTarget) await verifyBackup(target);
+if (!statusOnly && (productionMode || !isLocalTarget)) await verifyBackup(target);
 
 const migrations = await loadMigrations();
 const client = new pg.Client({ connectionString, application_name: "zigo-release-migration" });
@@ -243,7 +245,7 @@ function printStatus(identity, migrations, applied) {
     target: `${target.host}:${target.port}/${identity.database}`,
     serverAddress: identity.serverAddress,
     serverVersion: identity.serverVersion,
-    mode: statusOnly ? "status" : isLocalTarget ? "local-apply" : "remote-apply",
+    mode: statusOnly ? "status" : productionMode ? "production-apply" : isLocalTarget ? "local-apply" : "remote-apply",
     pendingCount,
     migrations: migrations.map((migration) => ({
       id: migration.id,

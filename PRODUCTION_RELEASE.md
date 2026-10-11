@@ -26,7 +26,7 @@ The command creates a PostgreSQL custom-format archive, validates it with `pg_re
 
 ```powershell
 $env:RELEASE_VERSION="<git-commit-or-release-id>"
-npm.cmd run db:migrate:release -- --confirm-host=<production-db-host> --backup=D:\zigo-backups\zigo-before-<release>.dump
+npm.cmd run db:migrate:release -- --production --confirm-host=<production-db-host> --backup=D:\zigo-backups\zigo-before-<release>.dump
 ```
 
 Remote migration is refused unless:
@@ -36,6 +36,8 @@ Remote migration is refused unless:
 - `pg_restore` validation succeeded;
 - the backup checksum and size still match; and
 - the backup is less than four hours old by default.
+
+Always use `--production` on a live host, including when PostgreSQL is reached through `localhost`.
 
 Migrations use an advisory lock, checksums, a migration ledger, short lock timeouts, transactions for schema changes, and concurrent index creation. Current release SQL is additive and does not delete or replace business records.
 

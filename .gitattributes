@@ -1,0 +1,3 @@
+database/release-migrations/*.sql text eol=lf
+scripts/*.mjs text eol=lf
+public/uploads export-ignore

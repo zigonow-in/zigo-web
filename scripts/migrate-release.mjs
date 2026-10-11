@@ -69,10 +69,11 @@ try {
     for (const migration of migrations) {
       const existing = currentApplied.get(migration.id);
       if (existing) {
-        if (existing.checksum !== migration.checksum) {
+        if (!migration.compatibleChecksums.has(existing.checksum)) {
           throw new Error(`Migration checksum changed after apply: ${migration.id}`);
         }
-        console.log(`skip ${migration.id} (already applied)`);
+        const lineEndingNote = existing.checksum === migration.checksum ? "" : "; line-ending equivalent";
+        console.log(`skip ${migration.id} (already applied${lineEndingNote})`);
         continue;
       }
       await applyMigration(client, migration);
@@ -93,16 +94,27 @@ async function loadMigrations() {
     const filePath = path.join(migrationsDir, name);
     const sql = await readFile(filePath, "utf8");
     assertAdditiveMigration(name, sql);
+    const compatibleChecksums = migrationChecksumVariants(sql);
     migrations.push({
       id: name.replace(/\.sql$/, ""),
       name,
       sql,
-      checksum: createHash("sha256").update(sql).digest("hex"),
+      checksum: sha256(sql),
+      compatibleChecksums,
       mode: name.endsWith(".nontransactional.sql") ? "nontransactional" : "transactional"
     });
   }
   if (!migrations.length) throw new Error("No release migrations were found.");
   return migrations;
+}
+
+function migrationChecksumVariants(sql) {
+  const lf = sql.replace(/\r\n?/g, "\n");
+  return new Set([sha256(sql), sha256(lf), sha256(lf.replace(/\n/g, "\r\n"))]);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function assertAdditiveMigration(name, sql) {
@@ -175,6 +187,32 @@ async function recordMigration(database, migration, executionMs) {
 }
 
 async function verifyReleaseSchema(database) {
+  const requiredTables = [
+    "market_types",
+    "micro_markets",
+    "nano_markets",
+    "nano_market_types",
+    "offers",
+    "offer_versions",
+    "offer_scopes",
+    "offer_included_users",
+    "offer_excluded_users",
+    "offer_services",
+    "offer_categories",
+    "offer_booking_types",
+    "offer_durations",
+    "offer_payment_modes",
+    "offer_referral_codes",
+    "offer_content_items",
+    "offer_purchase_orders",
+    "user_offer_entitlements",
+    "offer_redemption_ledger",
+    "offer_referral_attributions",
+    "offer_audit_logs",
+    "customer_wallets",
+    "wallet_settlements",
+    "customer_wallet_transactions"
+  ];
   const requiredColumns = [
     ["booking_task_update_reads", "delivered_at"],
     ["assistant_availability", "gps_captured_at"],
@@ -199,6 +237,10 @@ async function verifyReleaseSchema(database) {
     from information_schema.columns
     where table_schema = 'zigo'
   `);
+  const availableTables = new Set(columns.rows.map((row) => row.table_name));
+  const missingTables = requiredTables.filter((table) => !availableTables.has(table));
+  if (missingTables.length) throw new Error(`Schema verification failed; missing tables: ${missingTables.join(", ")}`);
+
   const available = new Set(columns.rows.map((row) => `${row.table_name}.${row.column_name}`));
   const missingColumns = requiredColumns
     .map(([table, column]) => `${table}.${column}`)
@@ -208,7 +250,23 @@ async function verifyReleaseSchema(database) {
   const requiredIndexes = [
     "idx_assistant_location_pings_assistant_captured",
     "idx_assistant_location_pings_booking_captured",
-    "idx_admin_assignment_offer_expiry"
+    "idx_admin_assignment_offer_expiry",
+    "idx_offers_status_active",
+    "idx_offers_public_code_unique",
+    "idx_offer_scopes_offer",
+    "idx_offer_services_master_unique",
+    "idx_offer_services_legacy_unique",
+    "idx_offer_payment_modes_id_unique",
+    "idx_offer_payment_modes_code_unique",
+    "idx_offer_redemption_customer",
+    "idx_offer_entitlements_customer",
+    "idx_category_price_offer_flags",
+    "idx_customer_wallet_transactions_customer_created",
+    "idx_customer_wallet_transactions_booking",
+    "idx_wallet_settlements_customer_created",
+    "idx_service_requests_created_at",
+    "idx_service_requests_customer_created_at",
+    "idx_service_requests_paid_created_at"
   ];
   const indexes = await database.query(`
     select ci.relname as indexname

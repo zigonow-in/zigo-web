@@ -11,6 +11,7 @@ export type AssistantMasterSettings = {
   broadcastTimeSeconds: number;
   autoArrivedRadiusMeters: number;
   dryRunDistanceKm: number;
+  travelCostBasePaise: number;
   travelCostSlabs: AssistantDistanceSlab[];
   assistantTravelPayoutSlabs: AssistantDistanceSlab[];
 };
@@ -27,6 +28,7 @@ export const DEFAULT_ASSISTANT_MASTER_SETTINGS: AssistantMasterSettings = {
   broadcastTimeSeconds: 30,
   autoArrivedRadiusMeters: 100,
   dryRunDistanceKm: 3,
+  travelCostBasePaise: 3000,
   travelCostSlabs: DEFAULT_DISTANCE_SLABS.map((slab) => ({ ...slab })),
   assistantTravelPayoutSlabs: DEFAULT_DISTANCE_SLABS.map((slab) => ({ ...slab }))
 };
@@ -59,8 +61,13 @@ export function validateAssistantDistanceSlabs(slabs: AssistantDistanceSlab[]) {
     if (index === 0 && Math.abs(slab.fromKm) > tolerance) return "The first distance slab must start at 0 km.";
     if (index > 0) {
       const previous = slabs[index - 1];
-      if (previous.toKm === null || Math.abs(previous.toKm - slab.fromKm) > tolerance) {
-        return `Slab ${index + 1} must start where slab ${index} ends.`;
+      const startsAtBoundary = previous.toKm !== null && Math.abs(previous.toKm - slab.fromKm) <= tolerance;
+      const startsAtNextWholeKm = previous.toKm !== null
+        && Number.isInteger(previous.toKm)
+        && Number.isInteger(slab.fromKm)
+        && Math.abs(previous.toKm + 1 - slab.fromKm) <= tolerance;
+      if (!startsAtBoundary && !startsAtNextWholeKm) {
+        return `Slab ${index + 1} must start at the previous boundary or the next whole kilometre.`;
       }
     }
   }
@@ -103,6 +110,12 @@ export function normalizeAssistantMasterSettings(value: unknown): AssistantMaste
       0,
       500
     ),
+    travelCostBasePaise: boundedInteger(
+      source.travelCostBasePaise,
+      DEFAULT_ASSISTANT_MASTER_SETTINGS.travelCostBasePaise,
+      0,
+      100_000_000
+    ),
     travelCostSlabs: normalizedSlabs(source.travelCostSlabs, DEFAULT_ASSISTANT_MASTER_SETTINGS.travelCostSlabs),
     assistantTravelPayoutSlabs: normalizedSlabs(
       source.assistantTravelPayoutSlabs,
@@ -111,11 +124,25 @@ export function normalizeAssistantMasterSettings(value: unknown): AssistantMaste
   };
 }
 
-export function calculateAssistantDistanceSlabs(slabs: AssistantDistanceSlab[], distanceKm: number) {
+export function calculateAssistantDistanceSlabs(
+  slabs: AssistantDistanceSlab[],
+  distanceKm: number,
+  basePaise = 0
+) {
   const normalizedDistanceKm = Math.max(0, Number.isFinite(distanceKm) ? distanceKm : 0);
-  const lines = slabs.map((slab) => {
+  const normalizedBasePaise = Number.isFinite(basePaise) ? Math.max(0, Math.round(basePaise)) : 0;
+  const lines = slabs.map((slab, index) => {
+    const previousToKm = index > 0 ? slabs[index - 1].toKm : null;
+    const startsAtBoundary = previousToKm !== null && Math.abs(previousToKm - slab.fromKm) <= 0.0001;
+    const startsAtNextWholeKm = previousToKm !== null
+      && Number.isInteger(previousToKm)
+      && Number.isInteger(slab.fromKm)
+      && Math.abs(previousToKm + 1 - slab.fromKm) <= 0.0001;
+    const billableFromKm = startsAtBoundary || startsAtNextWholeKm
+      ? previousToKm ?? slab.fromKm
+      : slab.fromKm;
     const upperBound = slab.toKm === null ? normalizedDistanceKm : slab.toKm;
-    const billableKm = Math.max(0, Math.min(normalizedDistanceKm, upperBound) - slab.fromKm);
+    const billableKm = Math.max(0, Math.min(normalizedDistanceKm, upperBound) - billableFromKm);
     const amountPaise = billableKm <= 0
       ? 0
       : slab.rateType === "fixed"
@@ -125,7 +152,8 @@ export function calculateAssistantDistanceSlabs(slabs: AssistantDistanceSlab[], 
   });
   return {
     distanceKm: normalizedDistanceKm,
-    totalPaise: lines.reduce((total, line) => total + line.amountPaise, 0),
+    basePaise: normalizedBasePaise,
+    totalPaise: normalizedBasePaise + lines.reduce((total, line) => total + line.amountPaise, 0),
     lines
   };
 }

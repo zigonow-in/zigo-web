@@ -13,7 +13,7 @@ pool.query = async (sql, params = []) => {
     assert.match(sql,/sr.accepted_assignment_id = ta.id/);
     return {rows:online && active && params[0]===assistantId ? [{bookingId:userId,...latestFix,stopLatitude:28.6,stopLongitude:77.2,reachedAt:previous?.toISOString()}] : []};
   }
-  if (sql.includes('select sr.id as "bookingId"') && !sql.includes('select a.id as "assistantId", av.status_code')) return { rows: withTask && (!params[1] || params[1]===assistantId) ? [{bookingId:userId,assignmentId:assistantId,latitude:28.6,longitude:77.2}] : [] };
+  if (sql.includes('select sr.id as "bookingId"') && !sql.includes('select a.id as "assistantId", av.status_code')) return { rows: withTask && (!params[1] || params[1]===assistantId) ? [{bookingId:userId,assignmentId:assistantId,latitude:28.6,longitude:77.2,jobStartedAt:new Date().toISOString()}] : [] };
   if (sql.includes('with reached as')) {
     assert.match(sql,/sr.accepted_assignment_id = ta.id/);
     assert.match(sql,/actual_started_at is null/);
@@ -23,6 +23,7 @@ pool.query = async (sql, params = []) => {
   if (sql.includes('with accepted as')) {
     assert.match(sql, /av\.gps_captured_at < \$6/);
     assert.match(sql, /lower\(av\.status_code\)/);
+    assert.match(sql, /where \$2::uuid is not null/, 'Idle availability pings must not create history rows');
     assert.match(sql, /u\.deleted_at is null/);
     assert.match(sql, /metadata->>'accountStatus'/);
     assert.equal(params[7], userId);
@@ -30,6 +31,9 @@ pool.query = async (sql, params = []) => {
     previous = params[5]; writes++;
     latestFix={latitude:params[2],longitude:params[3],accuracy:params[4],capturedAt:params[5]};
     return { rows: [{ id: 'ping', assistantId, bookingId: null, latitude: params[2], longitude: params[3], accuracyMeters: params[4], capturedAt: params[5] }] };
+  }
+  if (sql.includes("select lower(coalesce(status_code, 'offline'))")) {
+    return { rows: [{ statusCode: online ? 'available' : 'offline', presenceStatus: online ? 'ONLINE' : 'OFFLINE', gpsCapturedAt: previous, updatedAt: new Date() }] };
   }
   if (sql.includes('select a.id as "assistantId", av.status_code')) {
     assert.match(sql, /sr.accepted_assignment_id = ta.id/);

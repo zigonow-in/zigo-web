@@ -211,7 +211,9 @@ async function verifyReleaseSchema(database) {
     "offer_audit_logs",
     "customer_wallets",
     "wallet_settlements",
-    "customer_wallet_transactions"
+    "customer_wallet_transactions",
+    "assistant_support_tickets",
+    "assistant_support_messages"
   ];
   const requiredColumns = [
     ["booking_task_update_reads", "delivered_at"],
@@ -250,6 +252,7 @@ async function verifyReleaseSchema(database) {
   const requiredIndexes = [
     "idx_assistant_location_pings_assistant_captured",
     "idx_assistant_location_pings_booking_captured",
+    "idx_assistant_availability_live_lease",
     "idx_admin_assignment_offer_expiry",
     "idx_offers_status_active",
     "idx_offers_public_code_unique",

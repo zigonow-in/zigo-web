@@ -2,7 +2,8 @@ import { pool } from "../../db/pool.js";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../http/errors.js";
 import { isPointInPolygon, parseWktPolygon } from "../../utils/geofence.js";
-import { locationMarketsAreOpen, locationClustersCanInterserve } from "../masters/locationHierarchy.repository.js";
+import { businessDate, inclusiveCalendarDateRange } from "../../utils/dateRange.js";
+import { locationClustersCanInterserve } from "../masters/locationHierarchy.repository.js";
 import { requestOlaJson } from "../maps/olaMaps.service.js";
 import { generateZigoBookingReference, isZigoBookingReference, zigoServiceTypeCode } from "../../utils/bookingReference.js";
 import { calculateClusterCategoryPricing } from "../pricing/pricing.js";
@@ -10,7 +11,8 @@ import { quotePriceMaster, resolveBookingEngineRuleForContext } from "../masters
 import { getAssistantMasterSetting, getBookingEngineSetting, getBookingTypeAutomationSetting } from "../settings/settings.repository.js";
 import { ensurePaymentsSchema } from "../payments/payments.repository.js";
 import { ensureBookingEngineSchema, releaseCapacityReservations, upsertBookingOrchestrationState, upsertCapacityReservation } from "./bookingEngine.js";
-import { stopAssistantCalendarBlocksForBooking } from "./assistantDispatchEngine.js";
+import { dispatchConfigFromEnv, stopAssistantCalendarBlocksForBooking } from "./assistantDispatchEngine.js";
+import { ADMIN_ASSIGNMENT_OFFER_RESPONSE_GRACE_MS } from "./assignmentOfferPolicy.js";
 
 type Queryable = Pick<typeof pool, "query">;
 
@@ -53,12 +55,14 @@ type LocationCandidate = {
   postalCode?: string;
   source: LocationSource;
   provider?: "ola_maps" | "local";
+  placeId?: string;
+  lookupKind?: "autocomplete" | "textsearch" | "geocode" | "details" | "reverse";
 };
 
 
 const assistantOnlineStatusCodes = new Set(["available", "online", "active", "working"]);
 
-const notServiceableMessage = "This location is not serviceable yet. Please choose another location within an active cluster.";
+const notServiceableMessage = "Service is not available at this location yet.";
 
 async function ensureCustomerProfilesForSearch(db: Queryable, term: string) {
   await db.query(
@@ -100,8 +104,12 @@ export async function listBookings(input: {
   const page = Math.max(1, Number(input.page || 1));
   const pageSize = Math.min(100, Math.max(5, Number(input.pageSize || 20)));
   const offset = (page - 1) * pageSize;
-  const startDate = input.datePreset === "all" ? null : input.datePreset === "today" ? "today" : input.startDate || null;
-  const endDate = input.datePreset === "all" ? null : input.datePreset === "today" ? "today" : input.endDate || input.startDate || null;
+  const today = input.datePreset === "today" ? businessDate() : null;
+  const dateRange = input.datePreset === "all"
+    ? inclusiveCalendarDateRange()
+    : inclusiveCalendarDateRange(today || input.startDate, today || input.endDate);
+  const startDate = dateRange.startDate;
+  const endDateExclusive = dateRange.endDateExclusive;
   const search = input.search?.trim() ? `%${input.search.trim()}%` : null;
   const result = await pool.query(
     `
@@ -136,7 +144,7 @@ export async function listBookings(input: {
         sr.assistant_start_delay_minutes as "assistantStartDelayMinutes",
         sr.delay_credit_minutes as "delayCreditMinutes",
         sr.booking_at as "bookingAt",
-        service_date.service_date as "serviceDate",
+        service_date.service_date::text as "serviceDate",
         service_date.service_sort_at as "serviceSortAt",
         sr.metadata,
         coalesce(sr.metadata->>'bookingType', case when sr.scheduled_at is not null then 'schedule' else 'instant' end) as "bookingType",
@@ -211,9 +219,12 @@ export async function listBookings(input: {
         u.email::text as "customerEmail",
         u.phone as "customerPhone",
         u.metadata->>'profilePictureUrl' as "customerProfilePictureUrl",
+        ta.id as "assignmentId",
         ta.status_code as "assignmentStatus",
         ta.offered_at as "assignmentOfferedAt",
         ta.assigned_at as "assignmentAssignedAt",
+        ta.responded_at as "assignmentRespondedAt",
+        coalesce(ta.metadata, '{}'::jsonb) as "assignmentMetadata",
         ta.actual_started_at as "assignmentActualStartedAt",
         ta.start_delay_minutes as "assignmentStartDelayMinutes",
         ta.delay_credit_minutes as "assignmentDelayCreditMinutes",
@@ -356,14 +367,25 @@ export async function listBookings(input: {
         select *
         from zigo.task_assignments latest_ta
         where (latest_ta.service_request_id = sr.id or latest_ta.request_id = sr.id)
-          and latest_ta.status_code not in ('reserved', 'released', 'reassigned')
+          and (
+            (
+              $1::text = 'rejected'
+              and lower(coalesce(latest_ta.status_code, '')) in ('failed', 'rejected', 'declined', 'not_accepted')
+            )
+            or
+            (
+              $1::text <> 'rejected'
+              and lower(coalesce(latest_ta.status_code, '')) not in ('reserved', 'released', 'reassigned', 'failed', 'rejected', 'declined', 'not_accepted')
+            )
+          )
         order by
           case when latest_ta.id = sr.accepted_assignment_id then 0 else 1 end,
           coalesce(latest_ta.responded_at, latest_ta.assigned_at, latest_ta.offered_at) desc nulls last
-        limit 1
+        limit case when $1::text = 'rejected' then 2147483647 else 1 end
       ) ta on true
       left join lateral (
         select case
+          when $1::text = 'rejected' and ta.status_code in ('failed', 'rejected', 'declined', 'not_accepted') then 'rejected'
           when sr.status_code in ('cancelled', 'canceled') or ta.status_code in ('cancelled', 'canceled') then 'cancelled'
           when sr.status_code in ('completed', 'success') or ta.status_code in ('completed', 'success') then 'success'
           when sr.status_code in ('failed', 'rejected') or ta.status_code in ('failed', 'rejected', 'declined', 'not_accepted') then 'rejected'
@@ -407,11 +429,11 @@ export async function listBookings(input: {
       where booking_queue.tab = $1
       and (
         $2::text is null
-        or service_date.service_date >= case when $2::text = 'today' then (now() at time zone 'Asia/Kolkata')::date else $2::date end
+        or service_date.service_date >= $2::date
       )
       and (
         $3::text is null
-        or service_date.service_date <= case when $3::text = 'today' then (now() at time zone 'Asia/Kolkata')::date else $3::date end
+        or service_date.service_date < $3::date
       )
       and (
         $4::text is null
@@ -430,10 +452,12 @@ export async function listBookings(input: {
         or coalesce(au.phone, '') ilike $4
         or coalesce(a.assistant_code, '') ilike $4
       )
-      order by service_date.service_sort_at desc, sr.created_at desc
+      order by service_date.service_sort_at desc,
+        coalesce(ta.responded_at, ta.assigned_at, ta.offered_at) desc nulls last,
+        sr.created_at desc
       limit $5 offset $6
     `,
-    [tab, startDate, endDate, search, pageSize, offset]
+    [tab, startDate, endDateExclusive, search, pageSize, offset]
   );
   const totalRecords = Number(result.rows[0]?.totalRecords || 0);
   return {
@@ -458,16 +482,17 @@ export async function listBookingReviews(input: {
   const pageSize = Math.max(5, Math.min(1000, Math.round(Number(input.pageSize || 50))));
   const offset = (page - 1) * pageSize;
   const search = String(input.search || "").trim();
+  const dateRange = inclusiveCalendarDateRange(input.startDate, input.endDate);
   const params: unknown[] = [];
   const where: string[] = [];
 
-  if (input.startDate) {
-    params.push(input.startDate);
-    where.push(`(br.created_at at time zone 'Asia/Kolkata')::date >= $${params.length}::date`);
+  if (dateRange.startDate) {
+    params.push(dateRange.startDate);
+    where.push(`br.created_at >= ($${params.length}::date::timestamp at time zone 'Asia/Kolkata')`);
   }
-  if (input.endDate) {
-    params.push(input.endDate);
-    where.push(`(br.created_at at time zone 'Asia/Kolkata')::date <= $${params.length}::date`);
+  if (dateRange.endDateExclusive) {
+    params.push(dateRange.endDateExclusive);
+    where.push(`br.created_at < ($${params.length}::date::timestamp at time zone 'Asia/Kolkata')`);
   }
   if (search) {
     params.push(`%${search.toLowerCase()}%`);
@@ -604,15 +629,16 @@ export async function listCustomerUnserviceableLocationsReport(input: {
   const pageSize = Math.max(5, Math.min(1000, Math.round(Number(input.pageSize || 50))));
   const offset = (page - 1) * pageSize;
   const search = String(input.search || "").trim();
+  const dateRange = inclusiveCalendarDateRange(input.startDate, input.endDate);
   const params: unknown[] = [];
   const where: string[] = [];
-  if (input.startDate) {
-    params.push(input.startDate);
-    where.push(`(cul.last_seen_at at time zone 'Asia/Kolkata')::date >= $${params.length}::date`);
+  if (dateRange.startDate) {
+    params.push(dateRange.startDate);
+    where.push(`cul.last_seen_at >= ($${params.length}::date::timestamp at time zone 'Asia/Kolkata')`);
   }
-  if (input.endDate) {
-    params.push(input.endDate);
-    where.push(`(cul.last_seen_at at time zone 'Asia/Kolkata')::date <= $${params.length}::date`);
+  if (dateRange.endDateExclusive) {
+    params.push(dateRange.endDateExclusive);
+    where.push(`cul.last_seen_at < ($${params.length}::date::timestamp at time zone 'Asia/Kolkata')`);
   }
   if (search) {
     params.push(`%${search.toLowerCase()}%`);
@@ -793,6 +819,7 @@ export async function validateBookingLocation(input: {
         cl.name,
         cl.code,
         cl.polygon_description as "polygonDescription",
+        z.id as "zoneId",
         z.polygon_description as "zonePolygonDescription",
         z.is_open as "zoneIsOpen",
         cl.metadata,
@@ -804,14 +831,16 @@ export async function validateBookingLocation(input: {
       from zigo.clusters cl
       left join zigo.cities city on city.id = cl.city_id
       left join zigo.states state on state.id = city.state_id
-      left join zigo.zones z on z.id = cl.zone_id
+      join zigo.zones z on z.id = cl.zone_id
       where coalesce(cl.is_deleted, false) = false
         and coalesce(cl.is_booking_enabled, false) = true
         and coalesce(city.is_active, true) = true
         and coalesce(city.is_deleted, false) = false
         and coalesce(state.is_active, true) = true
         and coalesce(state.is_deleted, false) = false
-        and (cl.zone_id is null or (coalesce(z.is_active, true) = true and coalesce(z.is_deleted, false) = false))
+        and coalesce(z.is_open, false) = true
+        and coalesce(z.is_active, false) = true
+        and coalesce(z.is_deleted, false) = false
       order by coalesce((cl.metadata->>'isPinned')::boolean, false) desc,
                coalesce((cl.metadata->>'pinPriority')::int, 0),
                cl.priority,
@@ -820,23 +849,17 @@ export async function validateBookingLocation(input: {
     `
   );
 
-  // Keep a selected overlapping cluster only when it still passes every coverage check.
+  // A cluster is retained only as the operational context for pricing and assignment.
+  // Customer serviceability is determined exclusively by the parent Zone polygon.
   const candidates = input.preferredClusterId
     ? [...clusters.rows.filter(cluster => cluster.id === input.preferredClusterId), ...clusters.rows.filter(cluster => cluster.id !== input.preferredClusterId)]
     : clusters.rows;
   for (const cluster of candidates) {
     const polygon = parseWktPolygon(cluster.polygonDescription);
     const serviceRangeMeters = Number(cluster.metadata?.serviceRangeMeters);
-    const rangeCenter = clusterRangeCenter(cluster, polygon);
-    const insidePolygon = polygon.length >= 4 && isPointInPolygon(input.latitude, input.longitude, polygon);
-    const withinRange = Number.isFinite(serviceRangeMeters) && serviceRangeMeters > 0 && rangeCenter
-      ? distanceMeters([input.longitude, input.latitude], rangeCenter) <= serviceRangeMeters
-      : false;
-    const hasConfiguredBoundary = polygon.length >= 4 || (Number.isFinite(serviceRangeMeters) && serviceRangeMeters > 0 && rangeCenter);
-    if (!hasConfiguredBoundary || (!insidePolygon && !withinRange)) continue;
     const zonePolygon = parseWktPolygon(cluster.zonePolygonDescription);
-    if (cluster.zoneIsOpen === false || (zonePolygon.length >= 4 && !isPointInPolygon(input.latitude, input.longitude, zonePolygon))) continue;
-    if (!await locationMarketsAreOpen(cluster.id, input.latitude, input.longitude)) continue;
+    const insideZone = zonePolygon.length >= 4 && isPointInPolygon(input.latitude, input.longitude, zonePolygon);
+    if (cluster.zoneIsOpen !== true || !insideZone) continue;
     return {
       isServiceable: true,
       message: "Location is serviceable.",
@@ -847,6 +870,11 @@ export async function validateBookingLocation(input: {
         latitude: input.latitude,
         longitude: input.longitude,
         source: input.source ?? "manual"
+      },
+      zone: {
+        zoneId: cluster.zoneId,
+        name: cluster.zoneName,
+        cityName: cluster.cityName
       },
       cluster: {
         clusterId: cluster.id,
@@ -871,6 +899,7 @@ export async function validateBookingLocation(input: {
       longitude: input.longitude,
       source: input.source ?? "manual"
     },
+    zone: null,
     cluster: null
   };
 }
@@ -886,14 +915,16 @@ export async function listBookingLocationServiceBoundaries() {
       from zigo.clusters cl
       left join zigo.cities city on city.id = cl.city_id
       left join zigo.states state on state.id = city.state_id
-      left join zigo.zones z on z.id = cl.zone_id
+      join zigo.zones z on z.id = cl.zone_id
       where coalesce(cl.is_deleted, false) = false
         and coalesce(cl.is_booking_enabled, false) = true
         and coalesce(city.is_active, true) = true
         and coalesce(city.is_deleted, false) = false
         and coalesce(state.is_active, true) = true
         and coalesce(state.is_deleted, false) = false
-        and (cl.zone_id is null or (coalesce(z.is_active, true) = true and coalesce(z.is_deleted, false) = false))
+        and coalesce(z.is_open, false) = true
+        and coalesce(z.is_active, false) = true
+        and coalesce(z.is_deleted, false) = false
       order by cl.priority, cl.name
     `
   );
@@ -915,22 +946,53 @@ export async function searchBookingLocations(query: string) {
   const direct = directCoordinateCandidate(text);
   if (direct) return [direct];
 
-  const placeLookups = await Promise.allSettled([
+  const primaryLookups = await Promise.allSettled([
     fetchOlaPlaceCandidates("autocomplete", text),
-    fetchOlaPlaceCandidates("textsearch", text)
+    fetchOlaLocationCandidates("geocode", text)
   ]);
-  const placeCandidates = placeLookups.flatMap((lookup) => (lookup.status === "fulfilled" ? lookup.value : []));
-  if (placeCandidates.length) return rankLocationCandidates(placeCandidates, text).slice(0, 12);
+  const primaryCandidates = primaryLookups.flatMap((lookup) => (lookup.status === "fulfilled" ? lookup.value : []));
+  if (primaryCandidates.length) return rankLocationCandidates(primaryCandidates, text).slice(0, 12);
 
-  const geocodeLookup = await Promise.allSettled([fetchOlaLocationCandidates("geocode", text)]);
-  const candidates = geocodeLookup.flatMap((lookup) => (lookup.status === "fulfilled" ? lookup.value : []));
-  if (candidates.length) return rankLocationCandidates(candidates, text).slice(0, 12);
+  const textSearchLookup = await Promise.allSettled([fetchOlaPlaceCandidates("textsearch", text)]);
+  const textSearchCandidates = textSearchLookup.flatMap((lookup) => (lookup.status === "fulfilled" ? lookup.value : []));
+  if (textSearchCandidates.length) return rankLocationCandidates(textSearchCandidates, text).slice(0, 12);
 
-  const lookups = [...placeLookups, ...geocodeLookup];
+  const lookups = [...primaryLookups, ...textSearchLookup];
   const rejected = lookups.filter((lookup): lookup is PromiseRejectedResult => lookup.status === "rejected");
   const firstError = rejected[0]?.reason;
   if (rejected.length === lookups.length && firstError instanceof HttpError) throw firstError;
   throw new HttpError(502, "Ola Places did not return any places for this search.");
+}
+
+export async function geocodeBookingLocation(input: {
+  address: string;
+  placeId?: string | null;
+  latitude?: number;
+  longitude?: number;
+}) {
+  const address = input.address.trim();
+  const placeId = String(input.placeId || "").trim();
+  const lookups = await Promise.allSettled([
+    ...(placeId ? [fetchOlaPlaceDetails(placeId)] : []),
+    fetchOlaLocationCandidates("geocode", address)
+  ]);
+  const candidates = lookups.flatMap((lookup) => (lookup.status === "fulfilled" ? lookup.value : []));
+  if (!candidates.length) {
+    const firstError = lookups.find((lookup): lookup is PromiseRejectedResult => lookup.status === "rejected")?.reason;
+    if (firstError instanceof HttpError) throw firstError;
+    throw new HttpError(502, "Ola Maps could not resolve this address.");
+  }
+
+  const latitude = Number(input.latitude);
+  const longitude = Number(input.longitude);
+  const ranked = rankLocationCandidates(candidates, address);
+  const selected = Number.isFinite(latitude) && Number.isFinite(longitude)
+    ? [...ranked].sort((left, right) =>
+        Math.hypot(left.latitude - latitude, left.longitude - longitude) -
+        Math.hypot(right.latitude - latitude, right.longitude - longitude)
+      )[0]
+    : ranked[0];
+  return { ...selected, source: "search" as const };
 }
 
 export async function reverseBookingLocation(input: { latitude: number; longitude: number }) {
@@ -949,15 +1011,6 @@ export async function reverseBookingLocation(input: { latitude: number; longitud
   };
 }
 
-function clusterRangeCenter(cluster: { metadata?: Record<string, unknown> | null }, polygon: [number, number][]) {
-  const metadata = cluster.metadata || {};
-  const latitude = Number(metadata.serviceCenterLatitude ?? metadata.centerLatitude ?? metadata.latitude);
-  const longitude = Number(metadata.serviceCenterLongitude ?? metadata.centerLongitude ?? metadata.longitude);
-  if (Number.isFinite(latitude) && Number.isFinite(longitude)) return [longitude, latitude] as [number, number];
-  if (polygon.length >= 4) return polygonCentroid(polygon);
-  return null;
-}
-
 async function fetchOlaLocationCandidates(kind: "autocomplete" | "geocode", query: string) {
   const payload = await requestOlaMaps(kind, (url) => {
     url.searchParams.set(kind === "autocomplete" ? "input" : "address", query);
@@ -967,7 +1020,7 @@ async function fetchOlaLocationCandidates(kind: "autocomplete" | "geocode", quer
       url.searchParams.set("radius", "100000");
     }
   });
-  return collectLocationCandidates(payload, query);
+  return collectLocationCandidates(payload, query, "search", kind);
 }
 
 async function fetchOlaPlaceCandidates(kind: "autocomplete" | "textsearch", query: string) {
@@ -981,23 +1034,32 @@ async function fetchOlaPlaceCandidates(kind: "autocomplete" | "textsearch", quer
     }
     url.searchParams.set("language", "en");
   });
-  return collectLocationCandidates(payload, query, "search");
+  return collectLocationCandidates(payload, query, "search", kind);
+}
+
+async function fetchOlaPlaceDetails(placeId: string) {
+  const payload = await requestOlaMaps("details", (url) => {
+    url.searchParams.set("place_id", placeId);
+    url.searchParams.set("language", "en");
+  });
+  return collectLocationCandidates(payload, "Selected location", "search", "details");
 }
 
 async function fetchOlaReverseGeocode(latitude: number, longitude: number) {
   const payload = await requestOlaMaps("reverse-geocode", (url) => {
     url.searchParams.set("latlng", `${latitude},${longitude}`);
   });
-  return collectLocationCandidates(payload, "Picked location", "reverse")[0] ?? null;
+  return collectLocationCandidates(payload, "Picked location", "reverse", "reverse")[0] ?? null;
 }
 
-async function requestOlaMaps(path: "autocomplete" | "textsearch" | "geocode" | "reverse-geocode", configure: (url: URL) => void) {
+async function requestOlaMaps(path: "autocomplete" | "textsearch" | "details" | "geocode" | "reverse-geocode", configure: (url: URL) => void) {
   if (!env.OLA_MAPS_API_KEY && (!env.OLA_MAPS_CLIENT_ID || !env.OLA_MAPS_CLIENT_SECRET)) {
     throw new HttpError(503, "Ola Maps credentials are not configured. Add OLA_MAPS_API_KEY or OAuth client credentials and restart the admin server.");
   }
   const url = new URL(`https://api.olamaps.io/places/v1/${path}`);
   configure(url);
-  return requestOlaJson(url.pathname, Object.fromEntries(url.searchParams));
+  const timeoutMs = path === "autocomplete" ? 1800 : path === "textsearch" ? 3000 : 5000;
+  return requestOlaJson(url.pathname, Object.fromEntries(url.searchParams), { timeoutMs });
 }
 
 function directCoordinateCandidate(value: string): LocationCandidate | null {
@@ -1019,7 +1081,12 @@ function isOlaDomainRestriction(payload: unknown) {
   return /domain is not allowed|domain.*not allowed/i.test(locationSearchErrorMessage(payload, ""));
 }
 
-function collectLocationCandidates(payload: unknown, fallbackText = "Searched location", source: LocationSource = "search") {
+function collectLocationCandidates(
+  payload: unknown,
+  fallbackText = "Searched location",
+  source: LocationSource = "search",
+  lookupKind: LocationCandidate["lookupKind"] = source === "reverse" ? "reverse" : "geocode"
+) {
   const results: LocationCandidate[] = [];
   const seen = new Set<string>();
   const visit = (value: unknown) => {
@@ -1049,22 +1116,27 @@ function collectLocationCandidates(payload: unknown, fallbackText = "Searched lo
         ? item.address_components
         : Array.isArray(item.addressComponents) ? item.addressComponents : [];
       const componentValue = (matchingTypes: string[]) => {
-        const component = components.find((entry) => {
-          if (!entry || typeof entry !== "object") return false;
-          const types = Array.isArray((entry as Record<string, unknown>).types)
-            ? ((entry as Record<string, unknown>).types as unknown[]).map((type) => String(type).toLowerCase())
-            : [String((entry as Record<string, unknown>).type || "").toLowerCase()];
-          return matchingTypes.some((type) => types.includes(type));
-        }) as Record<string, unknown> | undefined;
-        return String(component?.long_name || component?.longName || component?.name || component?.short_name || component?.shortName || "").trim();
+        for (const matchingType of matchingTypes) {
+          const component = components.find((entry) => {
+            if (!entry || typeof entry !== "object") return false;
+            const types = Array.isArray((entry as Record<string, unknown>).types)
+              ? ((entry as Record<string, unknown>).types as unknown[]).map((type) => String(type).toLowerCase())
+              : [String((entry as Record<string, unknown>).type || "").toLowerCase()];
+            return types.includes(matchingType);
+          }) as Record<string, unknown> | undefined;
+          const value = String(component?.long_name || component?.longName || component?.name || component?.short_name || component?.shortName || "").trim();
+          if (value) return value;
+        }
+        return "";
       };
       const stateName = String(item.state || item.state_name || item.stateName || componentValue(["administrative_area_level_1", "state"]) || "").trim();
       const cityName = String(item.city || item.city_name || item.cityName || item.locality || componentValue(["locality", "administrative_area_level_2", "city"]) || "").trim();
       const postalCode = String(item.postal_code || item.postalCode || item.postcode || item.pincode || item.zip || componentValue(["postal_code", "postcode"]) || "").trim();
+      const placeId = String(item.place_id || item.placeId || "").trim();
       const key = `${latitude.toFixed(6)},${longitude.toFixed(6)},${label}`;
       if (textValue && !seen.has(key)) {
         seen.add(key);
-        results.push({ label, address, latitude, longitude, stateName, cityName, postalCode, source, provider: "ola_maps" });
+        results.push({ label, address, latitude, longitude, stateName, cityName, postalCode, source, provider: "ola_maps", placeId: placeId || undefined, lookupKind });
       }
     }
     for (const child of Object.values(item)) visit(child);
@@ -1074,15 +1146,21 @@ function collectLocationCandidates(payload: unknown, fallbackText = "Searched lo
 }
 
 function rankLocationCandidates(candidates: LocationCandidate[], query: string) {
-  const queryText = query.toLowerCase();
+  const queryText = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const queryTokens = queryText.split(/\s+/).filter((token) => token.length > 1);
   const seen = new Set<string>();
   return candidates
     .filter((candidate) => Number.isFinite(candidate.latitude) && Number.isFinite(candidate.longitude))
     .map((candidate) => {
-      const text = `${candidate.label} ${candidate.address}`.toLowerCase();
+      const label = candidate.label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const address = candidate.address.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const text = `${label} ${address}`;
+      const tokenScore = queryTokens.reduce((score, token) => score + (label.includes(token) ? 18 : address.includes(token) ? 6 : 0), 0);
       const score =
-        (text.includes(queryText) ? 100 : 0) +
-        (text.startsWith(queryText) ? 20 : 0) +
+        (label === queryText ? 180 : 0) +
+        (label.startsWith(queryText) ? 90 : 0) +
+        (text.includes(queryText) ? 70 : 0) +
+        tokenScore +
         (candidate.provider === "ola_maps" ? 8 : 0) -
         Math.abs(candidate.latitude - 28.6139) * 0.05 -
         Math.abs(candidate.longitude - 77.209) * 0.05;
@@ -1136,29 +1214,6 @@ async function assertBookingCustomer(customerId: string) {
     throw new HttpError(400, `Customer "${customer.displayName || customerId}" is not active. Activate the customer before selecting booking location.`);
   }
   return customer;
-}
-
-function polygonCentroid(polygon: [number, number][]) {
-  const points = polygon.slice(0, -1);
-  if (!points.length) return [0, 0] as [number, number];
-  const totals = points.reduce(
-    (sum, [longitude, latitude]) => ({ longitude: sum.longitude + longitude, latitude: sum.latitude + latitude }),
-    { longitude: 0, latitude: 0 }
-  );
-  return [totals.longitude / points.length, totals.latitude / points.length] as [number, number];
-}
-
-function distanceMeters(from: [number, number], to: [number, number]) {
-  const [fromLng, fromLat] = from;
-  const [toLng, toLat] = to;
-  const earthRadiusMeters = 6371000;
-  const toRadians = (value: number) => (value * Math.PI) / 180;
-  const dLat = toRadians(toLat - fromLat);
-  const dLng = toRadians(toLng - fromLng);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRadians(fromLat)) * Math.cos(toRadians(toLat)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
-  return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function activeTimeCategories(categories: unknown[]) {
@@ -1633,6 +1688,9 @@ async function selectAssistantForCapacityWindow(db: Queryable, input: {
   instantReadyByMinutes?: number;
   allowedStatusCodes?: string[];
 }) {
+  const dispatchConfig = dispatchConfigFromEnv();
+  const allowedStatusCodes = input.allowedStatusCodes?.length ? input.allowedStatusCodes : Array.from(assistantOnlineStatusCodes);
+  const requireLivePresence = !allowedStatusCodes.includes("offline");
   const assistants = await db.query<{
     assistantId: string;
     statusCode: string;
@@ -1647,7 +1705,7 @@ async function selectAssistantForCapacityWindow(db: Queryable, input: {
         coalesce(future_schedule."futureScheduledCount", 0)::int as "futureScheduledCount"
       from zigo.assistants a
       join zigo.users u on u.id = a.user_id
-      left join zigo.assistant_availability av on av.assistant_id = a.id
+      join zigo.assistant_availability av on av.assistant_id = a.id
       left join lateral (
         select max(window_end) as "busyFreeAt"
         from (
@@ -1710,10 +1768,18 @@ async function selectAssistantForCapacityWindow(db: Queryable, input: {
           )
         )
         and coalesce(av.status_code, 'offline') = any($2::text[])
+        and (
+          $3::boolean = false
+          or (
+            upper(coalesce(av.presence_status, 'OFFLINE')) = 'ONLINE'
+            and av.heartbeat_at >= now() - ($4::int * interval '1 second')
+            and av.gps_captured_at >= now() - ($5::int * interval '1 second')
+          )
+        )
       order by a.id
-      for update of a
+      for update of a, av
     `,
-    [input.clusterId, input.allowedStatusCodes?.length ? input.allowedStatusCodes : Array.from(assistantOnlineStatusCodes)]
+    [input.clusterId, allowedStatusCodes, requireLivePresence, dispatchConfig.heartbeatTimeoutSeconds, dispatchConfig.gpsFreshnessSeconds]
   );
   if (!assistants.rows.length) return null;
   const blocked = await db.query<{ assistantId: string; startAt: Date | null; endAt: Date | null; scheduledDate: string | null; scheduledTime: string | null; durationMinutes: number }>(
@@ -1892,10 +1958,14 @@ export async function getBookingAvailabilityDecision(input: {
   const scheduleInitiateMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleInitiateMinutes ?? 0)));
   const scheduleWrapUpMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleWrapUpMinutes ?? 0)));
   const scheduleTravelMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleTravelMinutes ?? 0)));
+  const dispatchConfig = dispatchConfigFromEnv();
 
   const assistants = await pool.query<{
     assistantId: string;
     statusCode: string;
+    presenceStatus: string | null;
+    heartbeatAt: Date | null;
+    gpsCapturedAt: Date | null;
     latitude: number | null;
     longitude: number | null;
     busyFreeAt: Date | null;
@@ -1905,6 +1975,9 @@ export async function getBookingAvailabilityDecision(input: {
       select
         a.id as "assistantId",
         lower(coalesce(av.status_code, 'offline')) as "statusCode",
+        upper(coalesce(av.presence_status, 'OFFLINE')) as "presenceStatus",
+        av.heartbeat_at as "heartbeatAt",
+        av.gps_captured_at as "gpsCapturedAt",
         av.latitude,
         av.longitude,
         active_work."busyFreeAt" as "busyFreeAt",
@@ -1957,7 +2030,8 @@ export async function getBookingAvailabilityDecision(input: {
       where u.deleted_at is null
         and coalesce(u.metadata->>'accountStatus', 'active') = 'active'
         and (a.current_cluster_id = $1::uuid or acm.cluster_id = $1::uuid)
-      group by a.id, av.status_code, av.latitude, av.longitude, active_work."busyFreeAt", future_schedule."futureScheduledCount"
+      group by a.id, av.status_code, av.presence_status, av.heartbeat_at, av.gps_captured_at,
+        av.latitude, av.longitude, active_work."busyFreeAt", future_schedule."futureScheduledCount"
     `,
     [requiredClusterId]
   );
@@ -1966,7 +2040,15 @@ export async function getBookingAvailabilityDecision(input: {
     ? []
     : assistants.rows
       .map((assistant) => ({ ...assistant, nextAvailableAt: assistant.busyFreeAt && assistant.busyFreeAt.getTime() > now.getTime() ? assistant.busyFreeAt : now }));
-  const assistantPool = clusterAssistantPool.filter((assistant) => assistantOnlineStatusCodes.has(assistant.statusCode));
+  const assistantPool = clusterAssistantPool.filter((assistant) => {
+    if (!assistantOnlineStatusCodes.has(assistant.statusCode) || assistant.presenceStatus !== "ONLINE") return false;
+    const heartbeatAt = assistant.heartbeatAt ? assistant.heartbeatAt.getTime() : Number.NaN;
+    const gpsCapturedAt = assistant.gpsCapturedAt ? assistant.gpsCapturedAt.getTime() : Number.NaN;
+    return Number.isFinite(heartbeatAt)
+      && Number.isFinite(gpsCapturedAt)
+      && now.getTime() - Number(heartbeatAt) <= dispatchConfig.heartbeatTimeoutSeconds * 1000
+      && now.getTime() - Number(gpsCapturedAt) <= dispatchConfig.gpsFreshnessSeconds * 1000;
+  });
   const instantAssistantPool = assistantPool.filter((assistant) =>
     assistant.nextAvailableAt.getTime() <= now.getTime()
     && !["working", "busy", "assigned", "in_progress"].includes(String(assistant.statusCode || "").toLowerCase())
@@ -3692,6 +3774,9 @@ export async function assignBooking(input: {
     const offered = input.mode === 'offer';
     const broadcastTimeSeconds = assistantMasterSettings.broadcastTimeSeconds;
     const assignmentExpiry = offered ? new Date(Date.now() + broadcastTimeSeconds * 1000) : availability.slotEnd;
+    const orchestrationNextCheckAt = offered
+      ? new Date(assignmentExpiry.getTime() + ADMIN_ASSIGNMENT_OFFER_RESPONSE_GRACE_MS)
+      : nextCheckAt;
     const assignmentStatus = offered ? 'offered' : 'accepted';
     const assignmentMetadata = JSON.stringify({source:'admin_panel',autoAcceptedByAdminAssignment:!offered,adminOffer:offered,offerExpiresAt:offered ? assignmentExpiry.toISOString() : null,broadcastTimeSeconds});
     await client.query(
@@ -3861,7 +3946,7 @@ export async function assignBooking(input: {
       slaDeadlineAt,
       assistantId: input.assistantId,
       reservationId: reservation.id,
-      nextCheckAt: offered ? assignmentExpiry : nextCheckAt,
+      nextCheckAt: orchestrationNextCheckAt,
       lastEventType: "booking.assigned",
       metadata: {
         assignmentId,
@@ -4147,6 +4232,7 @@ export async function cancelBookingByAdmin(serviceRequestId: string, actorUserId
   try {
     await client.query("begin");
     await ensureBookingEngineSchema(client);
+    const cancelledAt = new Date().toISOString();
     const result = await client.query<{
       id: string;
       clusterId: string | null;
@@ -4156,11 +4242,24 @@ export async function cancelBookingByAdmin(serviceRequestId: string, actorUserId
       `
         update zigo.service_requests
         set status_code = 'cancelled',
-            cancelled_reason = $2::text
+            cancelled_reason = $2::text,
+            metadata = coalesce(metadata, '{}'::jsonb) || $3::jsonb,
+            updated_at = now()
         where id = $1::uuid and status_code <> 'completed'
         returning id, cluster_id as "clusterId", coalesce(metadata, '{}'::jsonb) as metadata, accepted_assignment_id as "acceptedAssistantId"
       `,
-      [serviceRequestId, reason]
+      [
+        serviceRequestId,
+        reason,
+        JSON.stringify({
+          cancelledBy: "admin",
+          cancelledAt,
+          cancellationReason: reason,
+          cancellationReasonCode: "admin_cancelled_booking",
+          cancellationSource: "admin_panel",
+          autoCancelled: false
+        })
+      ]
     );
     if (result.rows[0]) {
       await client.query(
@@ -4177,7 +4276,9 @@ export async function cancelBookingByAdmin(serviceRequestId: string, actorUserId
           JSON.stringify({
             cancelledBy: "admin",
             cancellationReason: reason,
-            cancelledAt: new Date().toISOString()
+            cancellationReasonCode: "admin_cancelled_booking",
+            cancellationSource: "admin_panel",
+            cancelledAt
           })
         ]
       );
@@ -4214,6 +4315,27 @@ export async function cancelBookingByAdmin(serviceRequestId: string, actorUserId
           metadata: { reason }
         });
       }
+      await client.query(
+        `
+          insert into zigo.booking_task_updates
+            (service_request_id, task_assignment_id, actor_user_id, actor_type, update_type, message, media_urls, metadata)
+          values ($1::uuid, $2::uuid, $3::uuid, 'admin', 'status', $4::text, '[]'::jsonb, $5::jsonb)
+        `,
+        [
+          serviceRequestId,
+          result.rows[0].acceptedAssistantId,
+          actorUserId,
+          `Booking cancelled by admin. Reason: ${reason}`,
+          JSON.stringify({
+            status: "cancelled",
+            reason,
+            reasonCode: "admin_cancelled_booking",
+            cancelledBy: "admin",
+            cancellationSource: "admin_panel",
+            cancelledAt
+          })
+        ]
+      );
       await writeAdminAction(client, actorUserId, serviceRequestId, "cancel", reason, {});
     }
     await client.query("commit");

@@ -224,6 +224,11 @@ export async function createAssistantForVerification(input) {
         values ($1, $2, '{"verificationStatus": "processing"}'::jsonb)
         returning id
       `, [user.rows[0].id, input.assistantCode]);
+        await client.query(`
+        insert into zigo.assistant_availability (assistant_id, status_code, presence_status, updated_at)
+        values ($1, 'offline', 'OFFLINE', now())
+        on conflict (assistant_id) do nothing
+      `, [assistant.rows[0].id]);
         const role = await client.query("select id from zigo.roles where code = 'assistant'");
         if (role.rows[0]) {
             await client.query(`

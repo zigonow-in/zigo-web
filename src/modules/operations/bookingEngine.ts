@@ -1,4 +1,5 @@
 import { pool } from "../../db/pool.js";
+import { ADMIN_ASSIGNMENT_OFFER_RESPONSE_GRACE_MS } from "./assignmentOfferPolicy.js";
 
 type Queryable = Pick<typeof pool, "query">;
 
@@ -242,7 +243,7 @@ export async function releaseCapacityReservations(client: Queryable, input: {
            release_reason = $3::text,
            updated_at = now()
        where service_request_id = $1::uuid
-        and status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active')
+        and status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'accepted', 'active', 'in_progress')
         and ($4::uuid is null or assignment_id is distinct from $4::uuid)
     `,
     [input.serviceRequestId, input.statusCode, input.reason, input.exceptAssignmentId ?? null]
@@ -336,12 +337,15 @@ export async function runBookingOrchestrationCycle(client: Queryable = pool, lim
           ta.assistant_id,
           ta.id as assignment_id,
           sr.booking_start_at as planned_start_at,
-          coalesce(sr.booking_end_at, sr.booking_start_at + ($1::int || ' minutes')::interval) as expiry_at,
+          sr.booking_start_at + ($1::int * interval '1 minute') as expiry_at,
           greatest(0, floor(extract(epoch from (now() - sr.booking_start_at)) / 60))::int as delay_minutes
         from zigo.service_requests sr
-        left join zigo.task_assignments ta on ta.id = sr.accepted_assignment_id
+        left join zigo.task_assignments ta on ta.id = coalesce(
+          sr.accepted_assignment_id,
+          nullif(sr.metadata->>'pendingAssignmentId', '')::uuid
+        )
         where sr.booking_start_at is not null
-          and coalesce(sr.booking_end_at, sr.booking_start_at + ($1::int || ' minutes')::interval) <= now()
+          and sr.booking_start_at + ($1::int * interval '1 minute') <= now()
           and lower(coalesce(sr.status_code, '')) in ('confirmed', 'processing', 'assigned', 'accepted', 'queued', 'paid', 'payment_pending', 'hold', 'on_hold')
           and (
             ta.id is null
@@ -351,6 +355,11 @@ export async function runBookingOrchestrationCycle(client: Queryable = pool, lim
             )
           )
           and sr.actual_task_started_at is null
+          and not (
+            lower(coalesce(ta.status_code, '')) = 'offered'
+            and ta.metadata->>'adminOffer' = 'true'
+            and ta.expires_at + ($3::int * interval '1 millisecond') > now()
+          )
         order by sr.booking_start_at
         limit $2
         for update of sr skip locked
@@ -472,7 +481,7 @@ export async function runBookingOrchestrationCycle(client: Queryable = pool, lim
       from cancelled_bookings
       join inserted_updates using (service_request_id)
     `,
-    [autoCancelDelayMinutes, Math.max(1, Math.min(500, limit))]
+    [autoCancelDelayMinutes, Math.max(1, Math.min(500, limit)), ADMIN_ASSIGNMENT_OFFER_RESPONSE_GRACE_MS]
   );
   const autoFinished = await client.query<{
     serviceRequestId: string;
@@ -596,6 +605,7 @@ export async function runBookingOrchestrationCycle(client: Queryable = pool, lim
             updated_at = now()
         from completed_bookings cb
         where av.assistant_id = cb.assistant_id
+          and lower(coalesce(av.status_code, 'offline')) in ('available', 'online', 'active', 'working')
           and not exists (
             select 1
             from zigo.task_assignments active_ta
@@ -675,6 +685,7 @@ export async function runBookingOrchestrationCycle(client: Queryable = pool, lim
             updated_at = now()
         from released_capacity rc
         where av.assistant_id = rc.assistant_id
+          and lower(coalesce(av.status_code, 'offline')) in ('available', 'online', 'active', 'working')
           and not exists (
             select 1
             from zigo.task_assignments active_ta
@@ -902,10 +913,21 @@ export async function getNextBookingOrchestrationDueAt(client: Queryable = pool,
         where os.next_check_at is not null
           and os.risk_status <> 'closed'
           and lower(coalesce(sr.status_code, '')) not in ('completed', 'cancelled', 'canceled', 'failed', 'rejected')
+          and not exists (
+            select 1
+            from zigo.task_assignments offer_ta
+            where offer_ta.id::text = sr.metadata->>'pendingAssignmentId'
+              and offer_ta.status_code = 'offered'
+              and offer_ta.metadata->>'adminOffer' = 'true'
+              and offer_ta.expires_at + ($2::int * interval '1 millisecond') > now()
+          )
         union all
-        select min(coalesce(sr.booking_end_at, sr.booking_start_at + ($1::int || ' minutes')::interval)) as due_at
+        select min(sr.booking_start_at + ($1::int * interval '1 minute')) as due_at
         from zigo.service_requests sr
-        left join zigo.task_assignments ta on ta.id = sr.accepted_assignment_id
+        left join zigo.task_assignments ta on ta.id = coalesce(
+          sr.accepted_assignment_id,
+          nullif(sr.metadata->>'pendingAssignmentId', '')::uuid
+        )
         where sr.booking_start_at is not null
           and lower(coalesce(sr.status_code, '')) in ('confirmed', 'processing', 'assigned', 'accepted', 'queued', 'paid', 'payment_pending', 'hold', 'on_hold')
           and (
@@ -916,6 +938,19 @@ export async function getNextBookingOrchestrationDueAt(client: Queryable = pool,
             )
           )
           and sr.actual_task_started_at is null
+          and not (
+            lower(coalesce(ta.status_code, '')) = 'offered'
+            and ta.metadata->>'adminOffer' = 'true'
+            and ta.expires_at + ($2::int * interval '1 millisecond') > now()
+          )
+        union all
+        select min(ta.expires_at + ($2::int * interval '1 millisecond')) as due_at
+        from zigo.task_assignments ta
+        join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
+        where ta.status_code = 'offered'
+          and ta.metadata->>'adminOffer' = 'true'
+          and sr.metadata->>'pendingAssignmentId' = ta.id::text
+          and sr.accepted_assignment_id is null
         union all
         select min(coalesce(
             sr.booking_end_at,
@@ -939,7 +974,7 @@ export async function getNextBookingOrchestrationDueAt(client: Queryable = pool,
       from due_points
       where due_at is not null
     `,
-    [autoCancelDelayMinutes]
+    [autoCancelDelayMinutes, ADMIN_ASSIGNMENT_OFFER_RESPONSE_GRACE_MS]
   );
   return result.rows[0]?.dueAt ?? null;
 }

@@ -11,11 +11,11 @@ import { runBookingOrchestrationCycle } from "../operations/bookingEngine.js";
 import { enqueueTrackingOutboxEvent } from "../operations/trackingOutbox.js";
 import { pokeBookingOrchestrationWorker } from "../operations/bookingOrchestrator.js";
 import { getBookingEngineSetting } from "../settings/settings.repository.js";
-import { addCustomerPortalCartItem, assertActivePortalSession, approvePortalTimeExtension, cancelCustomerPortalBooking, createCustomerPortalBooking, createCustomerPortalBookingAddOnOrder, createCustomerPortalCashExtension, createCustomerPortalTipOrder, completeCustomerPortalBookingAddOn, createCustomerPortalDispute, createPortalTaskUpdate, deleteCustomerPortalCartItem, deleteCustomerPortalAddress, getCustomerPortalBookingAvailability, getCustomerPortalDefaultLocation, getCustomerPortalBooking, getCustomerPortalCatalog, getCustomerPortalWallet, getCustomerPortalWalletTransaction, getCustomerPortalCart, getPortalConfig, getPortalMe, listPortalBookingQuickReplies, listCustomerPortalAddresses, listCustomerPortalPreviousUsedLocations, listCustomerPortalServiceBoundaries, recordAssistantPortalLocationPing, confirmAssistantPortalArrival, getAssistantPortalLiveTracking, recordCustomerPortalUnserviceableLocation, refreshPortalSession, listAssistantPortalTasks, getAssistantPortalDashboard, listCustomerPortalAssistants, listCustomerPortalBookings, listCustomerPortalWalletTransactions, loginAssistantPortalWithPassword, markPortalBookingTaskUpdatesRead, requestPortalCode, reverseCustomerPortalLocation, saveCustomerPortalAddress, saveCustomerPortalDefaultLocation, saveCustomerPortalPreviousUsedLocation, setCustomerPortalDefaultAddress, saveCustomerPortalCart, searchCustomerPortalLocations, sendAssistantPasswordResetCode, setAssistantPortalOnline, saveCustomerPortalBookingReview, saveCustomerPortalFavorites, updateAssistantPortalTaskStatus, updateCustomerPortalProfile, updateCustomerPortalBookingTip, updateCustomerPortalAddress, validateCustomerPortalLocation, verifyAssistantPasswordResetCode, verifyPortalCode, verifyPortalToken } from "./portal.repository.js";
+import { addCustomerPortalCartItem, assertActivePortalSession, approvePortalTimeExtension, cancelCustomerPortalBooking, createCustomerPortalBooking, createCustomerPortalBookingAddOnOrder, createCustomerPortalCashExtension, createCustomerPortalTipOrder, completeCustomerPortalBookingAddOn, createCustomerPortalDispute, createPortalTaskUpdate, deleteCustomerPortalCartItem, deleteCustomerPortalAddress, getCustomerPortalBookingAvailability, getCustomerPortalDefaultLocation, getCustomerPortalBooking, getCustomerPortalCatalog, getCustomerPortalWallet, getCustomerPortalWalletTransaction, getCustomerPortalCart, getPortalConfig, getPortalMe, geocodeCustomerPortalLocation, listPortalBookingQuickReplies, listCustomerPortalAddresses, listCustomerPortalPreviousUsedLocations, listCustomerPortalServiceBoundaries, recordAssistantPortalLocationPing, confirmAssistantPortalArrival, getAssistantPortalLiveTracking, recordCustomerPortalUnserviceableLocation, refreshPortalSession, listAssistantPortalTasks, getAssistantPortalDashboard, listCustomerPortalAssistants, listCustomerPortalBookings, listCustomerPortalWalletTransactions, loginAssistantPortalWithPassword, markPortalBookingTaskUpdatesRead, requestPortalCode, reverseCustomerPortalLocation, saveCustomerPortalAddress, saveCustomerPortalDefaultLocation, saveCustomerPortalPreviousUsedLocation, setCustomerPortalDefaultAddress, saveCustomerPortalCart, searchCustomerPortalLocations, sendAssistantPasswordResetCode, setAssistantPortalOnline, startAssistantPortalJob, saveCustomerPortalBookingReview, saveCustomerPortalFavorites, updateAssistantPortalTaskStatus, updateCustomerPortalProfile, updateCustomerPortalBookingTip, updateCustomerPortalAddress, validateCustomerPortalLocation, verifyAssistantPasswordResetCode, verifyPortalCode, verifyPortalToken } from "./portal.repository.js";
 import { pokeBookingInvoiceEmailWorker } from "./bookingInvoice.worker.js";
 import { saveDocumentUpload } from "../settings/settings.repository.js";
 import { createRazorpayPaymentOrder, getCustomerRazorpayOrderStatus, verifyAndSaveRazorpayPayment } from "../payments/payments.repository.js";
-import { addCustomerSupportMessage, createCustomerSupportTicket, getCustomerSupportTicket, listCustomerSupportTickets } from "../support/support.repository.js";
+import { addAssistantSupportMessage, addCustomerSupportMessage, createAssistantSupportTicket, createCustomerSupportTicket, getAssistantSupportTicket, getCustomerSupportTicket, listCustomerSupportTickets } from "../support/support.repository.js";
 export const portalRouter = Router();
 const actorParamsSchema = z.object({ actor: z.enum(["customer", "assistant"]) });
 const codeRequestBodySchema = z.object({
@@ -41,6 +41,12 @@ const assistantPasswordResetVerifyBodySchema = z.object({
     password: z.string().min(8, "Password must be at least 8 characters.").max(200)
 });
 const locationSearchQuerySchema = z.object({ q: z.string().trim().min(1).max(200) });
+const locationGeocodeQuerySchema = z.object({
+    address: z.string().trim().min(1).max(300),
+    placeId: z.string().trim().max(256).optional(),
+    latitude: z.coerce.number().min(-90).max(90).optional(),
+    longitude: z.coerce.number().min(-180).max(180).optional()
+});
 const reverseLocationQuerySchema = z.object({
     latitude: z.coerce.number().min(-90).max(90),
     longitude: z.coerce.number().min(-180).max(180)
@@ -78,6 +84,10 @@ const customerSupportMessageSchema = z.object({
     attachments: z.array(customerSupportAttachmentSchema).max(8).default([])
 }).refine((value) => Boolean(value.message || value.attachments.length), "Enter a message or attach a file.");
 const customerSupportParamsSchema = z.object({ ticketId: z.string().uuid() });
+const assistantSupportTicketSchema = z.object({
+    assignmentId: z.string().uuid(),
+    message: z.string().trim().max(4000).default("")
+});
 const customerProfileBodySchema = z.object({
     displayName: z.string().trim().min(2, "Enter your name.").max(150),
     email: z.union([z.string().trim().email("Enter a valid email address.").max(320), z.null()]).optional(),
@@ -212,14 +222,20 @@ const assistantLocationBodySchema = z.object({
 });
 const onlineBodySchema = z.object({
     isOnline: z.boolean(),
+    requestId: z.string().trim().max(100).optional(),
     latitude: z.coerce.number().min(-90).max(90).nullable().optional(),
     longitude: z.coerce.number().min(-180).max(180).nullable().optional(),
     accuracy: z.coerce.number().min(0).nullable().optional(),
     capturedAt: z.string().datetime().nullable().optional()
 });
 const taskStatusBodySchema = z.object({
-    status: z.enum(["accepted", "in_progress", "completed", "rejected"]),
-    pin: z.string().trim().regex(/^\d{4}$/, "PIN must be 4 digits").optional()
+    status: z.enum(["accepted", "in_progress", "completed", "rejected", "cancelled"]),
+    pin: z.string().trim().regex(/^\d{4}$/, "PIN must be 4 digits").optional(),
+    reason: z.string().trim().max(500).optional()
+}).superRefine((value, context) => {
+    if (value.status === "cancelled" && String(value.reason || "").trim().length < 3) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["reason"], message: "Enter a cancellation reason." });
+    }
 });
 const taskUpdateBodySchema = z.object({
     bookingId: z.string().uuid(),
@@ -398,15 +414,11 @@ portalRouter.get("/assistant/events", async (req, res, next) => {
         keepAlive = setInterval(() => {
             if (res.writableEnded || res.destroyed)
                 return;
-            void listAssistantBookingRealtimeEventsAfter(me.assistantId, lastDeliveredEventId || lastEventId, 100).then((events) => {
-                for (const event of events)
-                    sendEvent(event, true);
-                if (res.writableEnded || res.destroyed)
-                    return;
-                res.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString(), stats: getBookingRealtimeStats() })}\n\n`);
-                res.flush?.();
-            }).catch(() => undefined);
-        }, 10000);
+            // Live events arrive through the in-process emitter or Redis. Durable
+            // replay is needed only when EventSource reconnects, not per rider tick.
+            res.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString(), stats: getBookingRealtimeStats() })}\n\n`);
+            res.flush?.();
+        }, 15000);
         req.on("close", cleanup);
         res.on("close", cleanup);
         res.on("error", cleanup);
@@ -806,6 +818,15 @@ portalRouter.get("/customer/locations/search", requirePortalAuth("customer"), as
         next(error);
     }
 });
+portalRouter.get("/customer/locations/geocode", requirePortalAuth("customer"), async (req, res, next) => {
+    try {
+        const query = locationGeocodeQuerySchema.parse(req.query);
+        res.json({ data: await geocodeCustomerPortalLocation(query) });
+    }
+    catch (error) {
+        next(error);
+    }
+});
 portalRouter.get("/customer/locations/reverse", requirePortalAuth("customer"), async (req, res, next) => {
     try {
         const query = reverseLocationQuerySchema.parse(req.query);
@@ -1146,23 +1167,25 @@ portalRouter.post("/customer/bookings/:bookingId/cancel", requirePortalAuth("cus
         const params = z.object({ bookingId: z.string().uuid() }).parse(req.params);
         const body = cancelBookingBodySchema.parse(req.body);
         const data = await cancelCustomerPortalBooking(req.portalAuth.userId, { bookingId: params.bookingId, reason: body.reason });
-        await emitBookingRealtimeEvent({
-            type: "booking.cancelled",
-            bookingId: data.bookingId,
-            assistantId: data.assistantId ?? undefined,
-            tab: "cancelled",
-            message: "Customer cancelled booking",
-            payload: {
+        if (!data.alreadyCancelled) {
+            await emitBookingRealtimeEvent({
+                type: "booking.cancelled",
                 bookingId: data.bookingId,
-                customerUserId: req.portalAuth.userId,
-                assistantId: data.assistantId,
-                reason: body.reason,
-                reasonCode: data.reasonCode,
-                delayMinutes: data.delayMinutes,
-                source: "customer_portal"
-            }
-        });
-        pokeBookingOrchestrationWorker("customer_booking_cancelled");
+                assistantId: data.assistantId ?? undefined,
+                tab: "cancelled",
+                message: "Customer cancelled booking",
+                payload: {
+                    bookingId: data.bookingId,
+                    customerUserId: req.portalAuth.userId,
+                    assistantId: data.assistantId,
+                    reason: body.reason,
+                    reasonCode: data.reasonCode,
+                    delayMinutes: data.delayMinutes,
+                    source: "customer_portal"
+                }
+            });
+            pokeBookingOrchestrationWorker("customer_booking_cancelled");
+        }
         res.json({ data });
     }
     catch (error) {
@@ -1228,6 +1251,61 @@ portalRouter.get("/assistant/dashboard", requirePortalAuth("assistant"), async (
         next(error);
     }
 });
+portalRouter.post("/assistant/support/tickets", requirePortalAuth("assistant"), async (req, res, next) => {
+    try {
+        const result = await createAssistantSupportTicket(req.portalAuth.userId, assistantSupportTicketSchema.parse(req.body));
+        if (result.created || result.messageAdded) {
+            await emitBookingRealtimeEvent({
+                type: result.created ? "support.ticket.created" : "support.message.created",
+                bookingId: result.ticket.bookingId || undefined,
+                assistantId: result.ticket.assistantId,
+                message: result.created ? "Assistant requested support." : "Assistant replied to support.",
+                payload: {
+                    ticketId: result.ticket.id,
+                    assistantId: result.ticket.assistantId,
+                    assistantUserId: req.portalAuth.userId,
+                    requesterType: "assistant"
+                }
+            });
+        }
+        res.status(result.created ? 201 : 200).json({ data: result });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+portalRouter.get("/assistant/support/tickets/:ticketId", requirePortalAuth("assistant"), async (req, res, next) => {
+    try {
+        const { ticketId } = customerSupportParamsSchema.parse(req.params);
+        res.json({ data: await getAssistantSupportTicket(req.portalAuth.userId, ticketId) });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+portalRouter.post("/assistant/support/tickets/:ticketId/messages", requirePortalAuth("assistant"), async (req, res, next) => {
+    try {
+        const { ticketId } = customerSupportParamsSchema.parse(req.params);
+        const result = await addAssistantSupportMessage(req.portalAuth.userId, ticketId, customerSupportMessageSchema.parse(req.body));
+        await emitBookingRealtimeEvent({
+            type: "support.message.created",
+            bookingId: result.ticket.bookingId || undefined,
+            assistantId: result.ticket.assistantId,
+            message: "Assistant replied to support.",
+            payload: {
+                ticketId,
+                assistantId: result.ticket.assistantId,
+                assistantUserId: req.portalAuth.userId,
+                requesterType: "assistant",
+                actor: "assistant"
+            }
+        });
+        res.status(201).json({ data: result });
+    }
+    catch (error) {
+        next(error);
+    }
+});
 portalRouter.post("/internal/tracking/authorize", async (req, res, next) => {
     try {
         const internalToken = req.header("x-zigo-tracking-gateway");
@@ -1255,7 +1333,12 @@ portalRouter.post("/internal/tracking/authorize", async (req, res, next) => {
         next(error);
     }
 });
-portalRouter.patch("/assistant/availability", requirePortalAuth("assistant"), async (req, res, next) => {
+portalRouter.patch("/assistant/availability", requirePortalAuth("assistant"), rateLimit({
+    keyPrefix: "assistant-availability",
+    windowMs: 60000,
+    max: 20,
+    key: req => req.portalAuth.userId
+}), async (req, res, next) => {
     try {
         const body = onlineBodySchema.parse(req.body);
         const data = await setAssistantPortalOnline(req.portalAuth.userId, body.isOnline, body);
@@ -1263,7 +1346,18 @@ portalRouter.patch("/assistant/availability", requirePortalAuth("assistant"), as
             type: "assistant.availability.changed",
             assistantId: data.assistantId,
             message: body.isOnline ? "Assistant is online" : "Assistant is offline",
-            payload: { assistantId: data.assistantId, isOnline: body.isOnline, latitude: body.latitude ?? null, longitude: body.longitude ?? null }
+            payload: {
+                assistantId: data.assistantId,
+                isOnline: body.isOnline,
+                availabilityStatus: data.availabilityStatus,
+                presenceStatus: data.presenceStatus,
+                heartbeatFresh: data.heartbeatFresh,
+                gpsFresh: data.gpsFresh,
+                availabilityUpdatedAt: data.availabilityUpdatedAt,
+                requestId: body.requestId ?? null,
+                latitude: body.latitude ?? null,
+                longitude: body.longitude ?? null
+            }
         });
         res.json({ data });
     }
@@ -1286,12 +1380,32 @@ portalRouter.post('/assistant/tasks/:assignmentId/offer-response', requirePortal
         const { assignmentId } = z.object({ assignmentId: z.string().uuid() }).parse(req.params);
         const { response } = z.object({ response: z.enum(['accepted', 'rejected']) }).parse(req.body);
         const data = await respondAdminAssignmentOffer(req.portalAuth.userId, assignmentId, response);
+        const returnedToPending = data.status === 'rejected' || data.status === 'expired';
         await emitBookingRealtimeEvent({ type: data.status === 'accepted' ? 'booking.assigned' : 'booking.updated', bookingId: data.bookingId, assistantId: data.assistantId,
-            message: `Booking offer ${data.status}`, payload: { assignmentId: data.assignmentId, assignmentStatus: data.status } });
+            tab: returnedToPending ? 'pending_assign' : 'assigned', message: `Booking offer ${data.status}`,
+            payload: { bookingId: data.bookingId, assistantId: data.assistantId, assignmentId: data.assignmentId, assignmentStatus: data.status,
+                returnedToPending, pendingReason: returnedToPending ? (data.status === 'expired' ? 'assistant_offer_expired' : 'assistant_offer_rejected') : undefined } });
         if (data.status === 'expired') {
             res.status(409).json({ message: 'This booking offer has expired.' });
             return;
         }
+        res.json({ data });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+portalRouter.post('/assistant/tasks/:assignmentId/start-job', requirePortalAuth('assistant'), async (req, res, next) => {
+    try {
+        const { assignmentId } = z.object({ assignmentId: z.string().uuid() }).parse(req.params);
+        const data = await startAssistantPortalJob(req.portalAuth.userId, assignmentId);
+        await emitBookingRealtimeEvent({
+            type: 'booking.updated',
+            bookingId: data.bookingId,
+            assistantId: data.assistantId,
+            message: 'Assistant started the job journey.',
+            payload: { ...data, assignmentStatus: data.status, jobStartedAt: data.jobStartedAt }
+        });
         res.json({ data });
     }
     catch (error) {
@@ -1333,6 +1447,8 @@ portalRouter.post("/assistant/location-pings", requirePortalAuth("assistant"), r
                     latitude: data.latitude,
                     longitude: data.longitude,
                     accuracyMeters: data.accuracyMeters,
+                    speed: data.speed,
+                    heading: data.heading,
                     capturedAt: data.capturedAt
                 }
             });
@@ -1354,13 +1470,26 @@ portalRouter.patch("/assistant/tasks/:assignmentId/status", requirePortalAuth("a
     try {
         const params = z.object({ assignmentId: z.string().uuid() }).parse(req.params);
         const body = taskStatusBodySchema.parse(req.body);
-        const data = await updateAssistantPortalTaskStatus(req.portalAuth.userId, { assignmentId: params.assignmentId, status: body.status, pin: body.pin });
+        const data = await updateAssistantPortalTaskStatus(req.portalAuth.userId, { assignmentId: params.assignmentId, status: body.status, pin: body.pin, reason: body.reason });
+        const returnedToPending = body.status === "rejected";
+        const assistantCancelled = body.status === "cancelled";
         await emitBookingRealtimeEvent({
-            type: "booking.updated",
+            type: assistantCancelled ? "booking.cancelled" : "booking.updated",
             bookingId: data.bookingId,
             assistantId: data.assistantId,
-            message: `Assistant task ${body.status.replace("_", " ")}`,
-            payload: data
+            tab: returnedToPending ? "pending_assign" : assistantCancelled ? "cancelled" : undefined,
+            message: assistantCancelled ? "Assistant cancelled booking" : `Assistant task ${body.status.replace("_", " ")}`,
+            payload: {
+                ...data,
+                assignmentStatus: data.status,
+                statusCode: assistantCancelled ? "cancelled" : undefined,
+                returnedToPending,
+                pendingReason: returnedToPending ? "assistant_task_rejected" : undefined,
+                reason: assistantCancelled ? data.reason : undefined,
+                reasonCode: assistantCancelled ? "assistant_cancelled_booking" : undefined,
+                autoCancelled: assistantCancelled ? false : undefined,
+                source: assistantCancelled ? "assistant_portal" : undefined
+            }
         });
         pokeBookingOrchestrationWorker("assistant_task_status_changed");
         res.json({ data });

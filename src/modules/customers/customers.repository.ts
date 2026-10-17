@@ -69,7 +69,8 @@ export async function listAdminCustomers() {
       ca.is_default as "isDefaultAddress",
       c.rating_avg as "ratingAvg",
       c.rating_count as "ratingCount",
-      c.created_at as "createdAt"
+      c.created_at as "createdAt",
+      greatest(c.updated_at, u.updated_at) as "updatedAt"
     from zigo.customers c
     join zigo.users u on u.id = c.user_id
     left join lateral (
@@ -137,7 +138,7 @@ export async function getAdminCustomer(id: string) {
         ca.is_default as "isDefaultAddress",
         c.preferences,
         c.created_at as "createdAt",
-        c.updated_at as "updatedAt"
+        greatest(c.updated_at, u.updated_at) as "updatedAt"
       from zigo.customers c
       join zigo.users u on u.id = c.user_id
       left join lateral (
@@ -162,7 +163,14 @@ export async function getAdminCustomer(id: string) {
 
 export async function updateAdminCustomer(
   id: string,
-  input: { displayName?: string | null; email?: string | null; phone?: string | null; status?: string | null; userId: string }
+  input: {
+    displayName?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    status?: "active" | "inactive" | null;
+    profilePictureUrl?: string | null;
+    userId: string;
+  }
 ) {
   const result = await pool.query(
     `
@@ -170,14 +178,27 @@ export async function updateAdminCustomer(
       set display_name = coalesce($2, display_name),
           email = coalesce($3, email),
           phone = coalesce($4, phone),
-          metadata = jsonb_set(metadata, '{accountStatus}', to_jsonb(coalesce($5::text, metadata->>'accountStatus', 'active')), true),
-          updated_by = $6,
+          metadata = jsonb_set(
+            jsonb_set(coalesce(metadata, '{}'::jsonb), '{accountStatus}', to_jsonb(coalesce($5::text, metadata->>'accountStatus', 'active')), true),
+            '{profilePictureUrl}',
+            to_jsonb(coalesce($6::text, metadata->>'profilePictureUrl', '')),
+            true
+          ),
+          updated_by = $7,
           updated_at = now()
       from zigo.customers c
       where c.id = $1 and u.id = c.user_id and u.deleted_at is null
       returning c.id
     `,
-    [id, input.displayName ?? null, input.email ?? null, input.phone ?? null, input.status ?? null, input.userId]
+    [
+      id,
+      input.displayName ?? null,
+      input.email ?? null,
+      input.phone ?? null,
+      input.status ?? null,
+      input.profilePictureUrl ?? null,
+      input.userId
+    ]
   );
   return result.rows[0] ?? null;
 }

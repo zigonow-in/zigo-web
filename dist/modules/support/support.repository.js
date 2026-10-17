@@ -1,6 +1,49 @@
 import { randomInt } from "node:crypto";
 import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
+let assistantSupportSchemaReady = null;
+function ensureAssistantSupportSchema() {
+    if (assistantSupportSchemaReady)
+        return assistantSupportSchemaReady;
+    assistantSupportSchemaReady = pool.query(`
+    create table if not exists zigo.assistant_support_tickets (
+      id uuid primary key default gen_random_uuid(),
+      ticket_number varchar(32) not null unique,
+      assistant_id uuid not null references zigo.assistants(id),
+      booking_id uuid references zigo.service_requests(id) on delete set null,
+      task_assignment_id uuid references zigo.task_assignments(id) on delete set null,
+      subject varchar(200) not null,
+      category varchar(60) not null default 'task_help',
+      status_code varchar(30) not null default 'open',
+      priority_code varchar(20) not null default 'normal',
+      assigned_admin_user_id uuid references zigo.users(id),
+      last_message_at timestamptz not null default now(),
+      closed_at timestamptz,
+      metadata jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create table if not exists zigo.assistant_support_messages (
+      id uuid primary key default gen_random_uuid(),
+      ticket_id uuid not null references zigo.assistant_support_tickets(id) on delete cascade,
+      sender_type varchar(20) not null,
+      sender_user_id uuid references zigo.users(id),
+      message text not null,
+      metadata jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now()
+    );
+    create index if not exists idx_assistant_support_tickets_assistant
+      on zigo.assistant_support_tickets (assistant_id, last_message_at desc);
+    create index if not exists idx_assistant_support_tickets_status
+      on zigo.assistant_support_tickets (status_code, priority_code, last_message_at desc);
+    create index if not exists idx_assistant_support_messages_ticket
+      on zigo.assistant_support_messages (ticket_id, created_at);
+  `).then(() => undefined).catch((error) => {
+        assistantSupportSchemaReady = null;
+        throw error;
+    });
+    return assistantSupportSchemaReady;
+}
 function ticketNumber(now = new Date()) {
     const parts = [
         String(now.getFullYear()).slice(-2),
@@ -10,6 +53,9 @@ function ticketNumber(now = new Date()) {
         String(now.getMinutes()).padStart(2, "0")
     ].join("");
     return `TKZUI${parts}${String(randomInt(0, 100_000_000)).padStart(8, "0")}`;
+}
+function assistantTicketNumber(now = new Date()) {
+    return ticketNumber(now).replace(/^TKZUI/, "ATZUI");
 }
 async function customerIdForUser(userId, client = pool) {
     const result = await client.query("select id from zigo.customers where user_id = $1::uuid limit 1", [userId]);
@@ -255,4 +301,221 @@ export async function updateAdminSupportTicket(adminUserId, ticketId, input) {
     if (!result.rows[0])
         throw new HttpError(404, "Support ticket not found.");
     return getAdminSupportTicket(ticketId);
+}
+async function assistantIdForUser(userId, client = pool) {
+    const result = await client.query("select id from zigo.assistants where user_id = $1::uuid limit 1", [userId]);
+    if (!result.rows[0])
+        throw new HttpError(404, "Assistant profile not found.");
+    return result.rows[0].id;
+}
+const assistantTicketSelect = `
+  select t.id,
+    t.ticket_number as "ticketNumber",
+    t.assistant_id as "assistantId",
+    t.booking_id as "bookingId",
+    t.task_assignment_id as "assignmentId",
+    sr.request_number as "bookingNumber",
+    t.subject,
+    t.category,
+    t.status_code as "statusCode",
+    t.priority_code as "priorityCode",
+    t.assigned_admin_user_id as "assignedAdminUserId",
+    au.display_name as "assignedAdminName",
+    a.user_id as "assistantUserId",
+    u.display_name as "assistantName",
+    u.phone as "assistantPhone",
+    u.metadata->>'profilePictureUrl' as "assistantProfilePictureUrl",
+    coalesce(lm.created_at, t.last_message_at, t.created_at) as "lastMessageAt",
+    t.closed_at as "closedAt",
+    t.metadata,
+    t.created_at as "createdAt",
+    t.updated_at as "updatedAt",
+    lm.message as "lastMessage",
+    (select count(*)::int from zigo.assistant_support_messages m where m.ticket_id = t.id) as "messageCount"
+  from zigo.assistant_support_tickets t
+  join zigo.assistants a on a.id = t.assistant_id
+  join zigo.users u on u.id = a.user_id
+  left join zigo.users au on au.id = t.assigned_admin_user_id
+  left join zigo.service_requests sr on sr.id = t.booking_id
+  left join lateral (
+    select m.message, m.created_at
+    from zigo.assistant_support_messages m
+    where m.ticket_id = t.id
+    order by m.created_at desc, m.id desc
+    limit 1
+  ) lm on true
+`;
+async function getAssistantTicket(ticketId, assistantUserId, client = pool) {
+    await ensureAssistantSupportSchema();
+    const params = [ticketId];
+    let ownership = "";
+    if (assistantUserId) {
+        params.push(assistantUserId);
+        ownership = `and a.user_id = $${params.length}::uuid`;
+    }
+    const result = await client.query(`${assistantTicketSelect} where t.id = $1::uuid ${ownership} limit 1`, params);
+    if (!result.rows[0])
+        throw new HttpError(404, "Assistant support chat not found.");
+    return result.rows[0];
+}
+async function listAssistantSupportMessages(ticketId, client = pool) {
+    const result = await client.query(`select m.id,
+       m.ticket_id as "ticketId",
+       m.sender_type as "senderType",
+       m.sender_user_id as "senderUserId",
+       coalesce(u.display_name, case when m.sender_type = 'system' then 'ZIGO Support' else initcap(m.sender_type) end) as "senderName",
+       m.message,
+       m.metadata,
+       m.created_at as "createdAt"
+     from zigo.assistant_support_messages m
+     left join zigo.users u on u.id = m.sender_user_id
+     where m.ticket_id = $1::uuid
+     order by m.created_at asc, m.id asc`, [ticketId]);
+    return result.rows;
+}
+export async function getAssistantSupportTicket(userId, ticketId) {
+    const ticket = await getAssistantTicket(ticketId, userId);
+    return { ticket, messages: await listAssistantSupportMessages(ticketId) };
+}
+export async function createAssistantSupportTicket(userId, input) {
+    await ensureAssistantSupportSchema();
+    const client = await pool.connect();
+    try {
+        await client.query("begin");
+        const assistantId = await assistantIdForUser(userId, client);
+        const assignment = await client.query(`select sr.id as "bookingId", sr.request_number as "bookingNumber"
+       from zigo.task_assignments ta
+       join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
+       where ta.id = $1::uuid and ta.assistant_id = $2::uuid
+       limit 1`, [input.assignmentId, assistantId]);
+        if (!assignment.rows[0])
+            throw new HttpError(404, "Task not found for this assistant.");
+        const bookingId = assignment.rows[0].bookingId;
+        const bookingNumber = assignment.rows[0].bookingNumber || bookingId;
+        await client.query("select pg_advisory_xact_lock(hashtext($1))", [`assistant-support:${assistantId}:${input.assignmentId}`]);
+        const existing = await client.query(`select id
+       from zigo.assistant_support_tickets
+       where assistant_id = $1::uuid and task_assignment_id = $2::uuid
+         and status_code not in ('closed', 'resolved')
+       order by coalesce(last_message_at, created_at) desc
+       limit 1`, [assistantId, input.assignmentId]);
+        let ticketId = existing.rows[0]?.id || "";
+        let created = false;
+        if (!ticketId) {
+            for (let attempt = 0; attempt < 5; attempt += 1) {
+                try {
+                    const inserted = await client.query(`insert into zigo.assistant_support_tickets
+              (ticket_number, assistant_id, booking_id, task_assignment_id, subject, category, metadata)
+             values ($1, $2::uuid, $3::uuid, $4::uuid, $5, 'task_help', $6::jsonb)
+             returning id`, [assistantTicketNumber(), assistantId, bookingId, input.assignmentId, `Help with booking ${bookingNumber}`, JSON.stringify({ source: "assistant_task_help" })]);
+                    ticketId = inserted.rows[0].id;
+                    created = true;
+                    break;
+                }
+                catch (error) {
+                    if (error.code !== "23505" || attempt === 4)
+                        throw error;
+                }
+            }
+        }
+        if (!ticketId)
+            throw new HttpError(500, "Unable to start assistant support chat.");
+        const message = String(input.message || "").trim();
+        if (message) {
+            await client.query(`with inserted_message as (
+           insert into zigo.assistant_support_messages (ticket_id, sender_type, sender_user_id, message)
+           values ($1::uuid, 'assistant', $2::uuid, $3)
+           returning created_at
+         )
+         update zigo.assistant_support_tickets
+         set status_code = case when status_code = 'waiting_assistant' then 'open' else status_code end,
+             last_message_at = (select created_at from inserted_message), updated_at = now()
+         where id = $1::uuid`, [ticketId, userId, message]);
+        }
+        await client.query("commit");
+        return { ...(await getAssistantSupportTicket(userId, ticketId)), created, messageAdded: Boolean(message) };
+    }
+    catch (error) {
+        await client.query("rollback");
+        throw error;
+    }
+    finally {
+        client.release();
+    }
+}
+export async function addAssistantSupportMessage(userId, ticketId, input) {
+    const ticket = await getAssistantTicket(ticketId, userId);
+    if (["closed", "resolved"].includes(String(ticket.statusCode)))
+        throw new HttpError(409, "This support chat is closed.");
+    const attachments = input.attachments || [];
+    await pool.query(`with inserted_message as (
+       insert into zigo.assistant_support_messages (ticket_id, sender_type, sender_user_id, message, metadata)
+       values ($1::uuid, 'assistant', $2::uuid, $3, $4::jsonb)
+       returning created_at
+     )
+     update zigo.assistant_support_tickets
+     set status_code = case when status_code = 'waiting_assistant' then 'open' else status_code end,
+         last_message_at = (select created_at from inserted_message), updated_at = now()
+     where id = $1::uuid`, [ticketId, userId, input.message, JSON.stringify({ attachments })]);
+    return getAssistantSupportTicket(userId, ticketId);
+}
+export async function listAdminAssistantSupportTickets(input) {
+    await ensureAssistantSupportSchema();
+    const { page, pageSize } = normalizePage(input.page, input.pageSize);
+    const params = [];
+    const conditions = [];
+    const search = String(input.search || "").trim();
+    const status = String(input.status || "all").trim().toLowerCase();
+    if (status && status !== "all") {
+        params.push(status);
+        conditions.push(`t.status_code = $${params.length}`);
+    }
+    if (search) {
+        params.push(`%${search}%`);
+        conditions.push(`(t.ticket_number ilike $${params.length} or t.subject ilike $${params.length} or u.display_name ilike $${params.length} or u.phone ilike $${params.length} or sr.request_number ilike $${params.length})`);
+    }
+    const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+    const count = await pool.query(`select count(*)::int as total
+     from zigo.assistant_support_tickets t
+     join zigo.assistants a on a.id = t.assistant_id
+     join zigo.users u on u.id = a.user_id
+     left join zigo.service_requests sr on sr.id = t.booking_id
+     ${where}`, params);
+    params.push(pageSize, (page - 1) * pageSize);
+    const rows = await pool.query(`${assistantTicketSelect} ${where}
+     order by case t.priority_code when 'urgent' then 1 when 'high' then 2 else 3 end,
+       coalesce(lm.created_at, t.last_message_at, t.created_at) desc, t.created_at desc, t.id desc
+     limit $${params.length - 1} offset $${params.length}`, params);
+    const total = Number(count.rows[0]?.total || 0);
+    return { rows: rows.rows, pagination: { page, pageSize, totalRecords: total, totalPages: Math.max(1, Math.ceil(total / pageSize)) } };
+}
+export async function getAdminAssistantSupportTicket(ticketId) {
+    return { ticket: await getAssistantTicket(ticketId), messages: await listAssistantSupportMessages(ticketId) };
+}
+export async function addAdminAssistantSupportMessage(adminUserId, ticketId, message) {
+    await getAssistantTicket(ticketId);
+    await pool.query(`with inserted_message as (
+       insert into zigo.assistant_support_messages (ticket_id, sender_type, sender_user_id, message)
+       values ($1::uuid, 'admin', $2::uuid, $3)
+       returning created_at
+     )
+     update zigo.assistant_support_tickets
+     set assigned_admin_user_id = coalesce(assigned_admin_user_id, $2::uuid), status_code = 'waiting_assistant',
+         last_message_at = (select created_at from inserted_message), updated_at = now()
+     where id = $1::uuid`, [ticketId, adminUserId, message]);
+    return getAdminAssistantSupportTicket(ticketId);
+}
+export async function updateAdminAssistantSupportTicket(adminUserId, ticketId, input) {
+    await getAssistantTicket(ticketId);
+    const result = await pool.query(`update zigo.assistant_support_tickets
+     set status_code = coalesce($2, status_code),
+         priority_code = coalesce($3, priority_code),
+         assigned_admin_user_id = case when $4::boolean then $1::uuid else assigned_admin_user_id end,
+         closed_at = case when coalesce($2, status_code) in ('closed','resolved') then coalesce(closed_at, now()) else null end,
+         updated_at = now()
+     where id = $5::uuid
+     returning id`, [adminUserId, input.statusCode || null, input.priorityCode || null, Boolean(input.assignToMe), ticketId]);
+    if (!result.rows[0])
+        throw new HttpError(404, "Assistant support chat not found.");
+    return getAdminAssistantSupportTicket(ticketId);
 }

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { isSuperAdmin, requirePermission } from "../../http/auth.js";
 import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
-import { getAssistantMasterSetting, getBookingCartMixSetting, getBookingEngineSetting, getBookingLiveSyncSetting, getBookingTypeAutomationSetting, getMediaPaths, getOtpProviderSettings, saveDocumentUpload, saveImageUpload, updateAssistantMasterSetting, updateBookingCartMixSetting, updateBookingEngineSetting, updateBookingLiveSyncSetting, updateBookingTypeAutomationSetting, updateMediaPaths, updateOtpProviderSettings } from "./settings.repository.js";
+import { getAssistantMasterSetting, getBookingCartMixSetting, getBookingEngineSetting, getBookingExtensionPolicy, getBookingLiveSyncSetting, getBookingTypeAutomationSetting, getMediaPaths, getOtpProviderSettings, saveDocumentUpload, saveImageUpload, updateAssistantMasterSetting, updateBookingCartMixSetting, updateBookingEngineSetting, updateBookingExtensionPolicy, updateBookingLiveSyncSetting, updateBookingTypeAutomationSetting, updateMediaPaths, updateOtpProviderSettings } from "./settings.repository.js";
 import { validateAssistantDistanceSlabs } from "./assistantMasterSettings.js";
 
 export const settingsRouter = Router();
@@ -36,6 +36,10 @@ const bookingTypeAutomationBodySchema = z.object({
   maxReachMinutes: z.coerce.number().int().min(1).max(240).default(30),
   freeSoonMinutes: z.coerce.number().int().min(1).max(240).default(15),
   averageReachMinutes: z.coerce.number().int().min(1).max(240).default(20)
+});
+const bookingExtensionPolicyBodySchema = z.object({
+  disableExtendBeforeEndEnabled: z.boolean().default(false),
+  disableExtendBeforeEndMinutes: z.coerce.number().int().min(1).max(1440).default(10)
 });
 const bookingLiveSyncBodySchema = z.object({
   isEnabled: z.boolean().default(true),
@@ -110,6 +114,8 @@ const bookingEngineBodySchema = z.object({
   manualAssignBeforeStartMinutes: z.coerce.number().int().min(0).max(1440).default(15),
   instantAutoMaxWaitMinutes: z.coerce.number().int().min(1).max(240).default(45),
   defaultWaitWindowMinutes: z.coerce.number().int().min(0).max(240).default(0),
+  disableExtendBeforeEndEnabled: z.boolean().default(false),
+  disableExtendBeforeEndMinutes: z.coerce.number().int().min(1).max(1440).default(10),
   customerCancelInstantMinutes: z.coerce.number().int().min(1).max(240).default(5),
   customerCancelScheduleMinutes: z.coerce.number().int().min(1).max(240).default(30),
   customerAssistantDelayCancelOpenMinutes: z.coerce.number().int().min(1).max(240).default(10),
@@ -153,6 +159,7 @@ const assistantMasterBodySchema = z.object({
   broadcastTimeSeconds: z.coerce.number().int().min(5).max(600),
   autoArrivedRadiusMeters: z.coerce.number().int().min(10).max(5000),
   dryRunDistanceKm: z.coerce.number().min(0).max(500),
+  travelCostBasePaise: z.coerce.number().int().min(0).max(100_000_000).default(3000),
   travelCostSlabs: z.array(assistantDistanceSlabSchema).min(1).max(20),
   assistantTravelPayoutSlabs: z.array(assistantDistanceSlabSchema).min(1).max(20)
 }).superRefine((value, context) => {
@@ -286,6 +293,28 @@ settingsRouter.put("/booking-live-sync", requirePermission("settings.edit"), asy
   }
 });
 
+settingsRouter.get("/booking-extension-policy", requireAnyPermission(["settings.view", "service_requests.view"]), async (_req, res, next) => {
+  try {
+    res.json({ data: await getBookingExtensionPolicy() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+settingsRouter.put("/booking-extension-policy", requireAnyPermission(["settings.edit", "service_requests.edit"]), async (req, res, next) => {
+  try {
+    const body = bookingExtensionPolicyBodySchema.parse(req.body);
+    res.json({
+      data: await updateBookingExtensionPolicy({
+        ...body,
+        actorUserId: req.auth!.sub
+      })
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 settingsRouter.get("/booking-engine", requirePermission("settings.view"), async (_req, res, next) => {
   try {
     res.json({ data: await getBookingEngineSetting() });
@@ -352,7 +381,7 @@ settingsRouter.put("/otp-providers", requirePermission("settings.edit"), async (
   }
 });
 
-settingsRouter.post("/media-images", requireAnyPermission(["service_requests.view", "tasks.assign", "services.edit", "stores.edit", "verification.edit"]), async (req, res, next) => {
+settingsRouter.post("/media-images", requireAnyPermission(["customers.edit", "service_requests.view", "tasks.assign", "services.edit", "stores.edit", "verification.edit"]), async (req, res, next) => {
   try {
     res.status(201).json({
       data: await saveImageUpload({

@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { assertCanAssignRole, assertCanManageUser, blockedRoleCodesForActor, isSuperAdmin, requirePermission } from "../../http/auth.js";
 import { HttpError } from "../../http/errors.js";
-import { actorCanGrantPermission, assignPermissionToUser, createUser, getUserById, listAssignableRoles, listUserPermissions, listUsers, removePermissionFromUser, resetOwnPassword, resetUserPasswordWithSuperAdminConfirmation, resetAndShareUserPasswordWithSuperAdminConfirmation, sendUserOtpChallenge, setUserActiveState, softDeleteUser, updateOwnProfilePicture, updateUser, verifyUserOtpChallenge } from "./users.repository.js";
+import { actorCanGrantPermission, assignPermissionToUser, createUser, getUserById, listAssignableRoles, listUserPermissions, listUsers, removePermissionFromUser, resetOwnPassword, resetUserPasswordWithSuperAdminConfirmation, resetAndShareUserPasswordWithSuperAdminConfirmation, sendUserOtpChallenge, setUserActiveState, softDeleteUser, updateOwnProfilePicture, updateOwnBookingBellPreferences, updateUser, verifyUserOtpChallenge } from "./users.repository.js";
 export const usersRouter = Router();
 const listUsersQuerySchema = z.object({
     page: z.coerce.number().int().min(1).default(1),
@@ -52,6 +52,10 @@ const superAdminPasswordResetBodySchema = z.object({
 const ownProfilePictureBodySchema = z.object({
     profilePictureUrl: z.string().min(1, "Profile picture is required.")
 });
+const ownBookingBellPreferencesBodySchema = z.object({
+    muted: z.boolean(),
+    volume: z.number().finite().min(0.05).max(1)
+});
 const ownPasswordResetBodySchema = z.object({
     currentPassword: z.string().min(1, "Current password is required."),
     newPassword: z.string().min(8, "New password must be at least 8 characters.")
@@ -87,6 +91,18 @@ usersRouter.patch("/me/profile-picture", async (req, res, next) => {
         if (!user)
             throw new HttpError(404, "User not found");
         res.json({ data: user });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+usersRouter.patch("/me/booking-bell-preferences", async (req, res, next) => {
+    try {
+        const body = ownBookingBellPreferencesBodySchema.parse(req.body);
+        const preferences = await updateOwnBookingBellPreferences({ userId: req.auth.sub, ...body });
+        if (!preferences)
+            throw new HttpError(404, "User not found");
+        res.json({ data: preferences });
     }
     catch (error) {
         next(error);

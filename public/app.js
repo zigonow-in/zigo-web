@@ -35,9 +35,19 @@ const signedInAvatar = $("#signedInAvatar");
 const bookingBellButton = $("#bookingBellButton");
 const bookingBellCount = $("#bookingBellCount");
 const pendingAssignmentCount = $("#pendingAssignmentCount");
+const defaultBookingBellPreferences = Object.freeze({ muted: false, volume: 0.9 });
+function normalizeBookingBellPreferences(value = {}) {
+  const volume = Number(value?.volume);
+  return {
+    muted: value?.muted === true,
+    volume: Number.isFinite(volume) ? Math.max(0.05, Math.min(1, Math.round(volume * 100) / 100)) : defaultBookingBellPreferences.volume
+  };
+}
+let bookingBellPreferences = normalizeBookingBellPreferences(state.user?.metadata?.adminBookingBellPreferences);
 const bookingAlertAudio = new Audio(assetUrl("/assets/order-ring.mpeg"));
 bookingAlertAudio.preload = "auto";
 bookingAlertAudio.loop = true;
+bookingAlertAudio.volume = bookingBellPreferences.volume;
 const cache = {
   modules: [],
   roles: [],
@@ -68,6 +78,9 @@ const cache = {
   supportTickets: [],
   supportTicketsPagination: null,
   supportTicketDetail: null,
+  assistantSupportTickets: [],
+  assistantSupportPagination: null,
+  assistantSupportDetail: null,
   bookingTypes: [],
   clusterServices: [],
   clusterCategories: [],
@@ -101,6 +114,8 @@ let bookingEngineFilters = { search: "", scopeType: "", stateId: "", cityId: "",
 let bookingEngineQuickReplyFilters = { search: "", actor: "", bookingStage: "", actionType: "", status: "" };
 let customerDisputeFilters = { status: "open", search: "", page: 1, pageSize: 20 };
 let supportTicketFilters = { status: "all", search: "", page: 1, pageSize: 20 };
+let assistantSupportFilters = { status: "all", search: "", page: 1, pageSize: 50 };
+let assistantSupportLoadGeneration = 0;
 let paymentFilters = { status: "all", search: "", page: 1, pageSize: 20 };
 let assistantReportFilters = { search: "", stateId: "", cityId: "", zoneId: "", clusterId: "" };
 let assistantReportSearchTimer = null;
@@ -159,6 +174,7 @@ let bookingMasterClusterServices = [];
 let bookingMasterClusterCategories = [];
 let bookingMasterPriceRules = [];
 let bookingMasterCartMixSetting = { personalAssistantServiceId: null, allowedWithMode: "none", allowedServiceIds: [] };
+let bookingEngineExtensionPolicy = { disableExtendBeforeEndEnabled: false, disableExtendBeforeEndMinutes: 10, updatedAt: null };
 let bookingMasterSelectedServiceId = "";
 let bookingMasterSelectedCategoryId = "";
 let bookingMasterCategorySearchText = "";
@@ -239,12 +255,18 @@ let bookingRealtimeLastSeenAt = null;
 let bookingRealtimeLastEventId = localStorage.getItem("zigoBookingRealtimeLastEventId") || "";
 let bookingRealtimeCatchupBusy = false;
 let bookingRealtimeAuthRefreshAttempted = false;
+let bookingRealtimeAlertedEventIds = new Set();
+let bookingBellPreferenceSaveTimer = null;
+let bookingBellPreferenceSaveBusy = false;
+let bookingBellPreferenceSavePending = false;
+let bookingPendingEntryAlerted = false;
+let bookingPendingEntryAlertPromise = null;
 let bookingKnownIds = new Set();
 let bookingNotificationKnownIds = new Set();
 let bookingNotificationSeeded = false;
-let bookingNewNotificationCount = 0;
 let bookingPendingAssignmentCount = 0;
 let bookingPendingAssignmentRefreshTimer = null;
+let bookingPendingAssignmentRefreshRequestId = 0;
 let bookingWorkingCountdownTimer = null;
 let adminRefreshPromise = null;
 
@@ -279,9 +301,16 @@ function clearAdminSession(message = "") {
   bookingRealtimeLastEventId = '';
   stopBookingRealtime();
   stopNewBookingRingtone();
+  if (bookingBellPreferenceSaveTimer) clearTimeout(bookingBellPreferenceSaveTimer);
+  bookingBellPreferenceSaveTimer = null;
+  bookingBellPreferenceSavePending = false;
+  bookingPendingEntryAlerted = false;
+  bookingPendingEntryAlertPromise = null;
+  bookingBellPreferences = { ...defaultBookingBellPreferences };
+  bookingAlertAudio.volume = bookingBellPreferences.volume;
   if (bookingPendingAssignmentRefreshTimer) clearTimeout(bookingPendingAssignmentRefreshTimer);
   bookingPendingAssignmentRefreshTimer = null;
-  updatePendingAssignmentBadge(0);
+  syncPendingBookingAlarm(0);
   state.token = "";
   state.refreshToken = "";
   state.user = null;
@@ -747,8 +776,11 @@ function syncSignedInUser(user) {
     email: user.email,
     phone: user.phone,
     displayName: user.displayName,
-    profilePictureUrl: user.profilePictureUrl
+    profilePictureUrl: user.profilePictureUrl,
+    metadata: user.metadata || state.user?.metadata || {}
   };
+  bookingBellPreferences = normalizeBookingBellPreferences(state.user.metadata?.adminBookingBellPreferences);
+  applyBookingBellPreferences();
   localStorage.setItem("zigoAdminUser", JSON.stringify(state.user));
   renderSignedInProfile();
 }
@@ -7554,8 +7586,8 @@ async function loadPayments() {
 
 function supportTicketStatusCapsule(status = "open") {
   const value = String(status || "open").toLowerCase();
-  const tone = ["resolved", "closed"].includes(value) ? "success" : value === "waiting_customer" ? "warning" : value === "in_progress" ? "info" : "primary";
-  const label = ({ open: "Open", in_progress: "In progress", waiting_customer: "Waiting customer", resolved: "Resolved", closed: "Closed" })[value] || value;
+  const tone = ["resolved", "closed"].includes(value) ? "success" : ["waiting_customer", "waiting_assistant"].includes(value) ? "warning" : value === "in_progress" ? "info" : "primary";
+  const label = ({ open: "Open", in_progress: "In progress", waiting_customer: "Waiting customer", waiting_assistant: "Waiting assistant", resolved: "Resolved", closed: "Closed" })[value] || value;
   return `<span class="status-badge ${tone}">${escapeHtml(label)}</span>`;
 }
 
@@ -7628,6 +7660,106 @@ async function openAdminSupportTicket(ticketId) {
   requestAnimationFrame(() => { const list = $("[data-admin-support-messages]"); if (list) list.scrollTop = list.scrollHeight; });
 }
 
+function assistantSupportToolbarHtml() {
+  const statusOptions = ["all", "open", "in_progress", "waiting_assistant", "resolved", "closed"];
+  return `<div class="assistant-support-toolbar">
+    <input id="assistantSupportSearch" class="form-control" type="search" autocomplete="off" value="${escapeHtml(assistantSupportFilters.search)}" placeholder="Search assistant, phone, booking or ticket">
+    <select id="assistantSupportStatus" class="form-select">${statusOptions.map((value) => `<option value="${value}" ${assistantSupportFilters.status === value ? "selected" : ""}>${escapeHtml(value === "all" ? "All statuses" : value.replace(/_/g, " "))}</option>`).join("")}</select>
+    <button class="btn btn-primary" data-action="assistant-support-apply" type="button">Apply</button>
+  </div>`;
+}
+
+function assistantSupportAvatarHtml(ticket = {}) {
+  const picture = assetUrl(String(ticket.assistantProfilePictureUrl || ""));
+  if (picture) return `<span class="assistant-support-avatar"><img src="${escapeHtml(picture)}" alt=""></span>`;
+  return `<span class="assistant-support-avatar">${escapeHtml(String(ticket.assistantName || "A").slice(0, 1).toUpperCase())}</span>`;
+}
+
+function assistantSupportConversationListHtml() {
+  const rows = cache.assistantSupportTickets || [];
+  const selectedId = String(cache.assistantSupportDetail?.ticket?.id || "");
+  if (!rows.length) return `<div class="assistant-support-admin-empty"><b>No assistant chats</b><span>New help requests will appear here in real time.</span></div>`;
+  return rows.map((ticket) => `<button class="assistant-support-thread ${String(ticket.id) === selectedId ? "active" : ""}" data-action="open-assistant-support-ticket" data-id="${escapeHtml(ticket.id)}" type="button">
+    ${assistantSupportAvatarHtml(ticket)}
+    <span class="assistant-support-thread-copy"><b>${escapeHtml(ticket.assistantName || "Assistant")}</b><small>${escapeHtml(ticket.bookingNumber ? `Booking ${ticket.bookingNumber}` : ticket.ticketNumber || "Support")}</small><p>${escapeHtml(ticket.lastMessage || "Support chat opened")}</p></span>
+    <span class="assistant-support-thread-meta">${supportTicketStatusCapsule(ticket.statusCode)}<time>${escapeHtml(formatDate(ticket.lastMessageAt || ticket.createdAt))}</time></span>
+  </button>`).join("");
+}
+
+function assistantSupportDetailHtml() {
+  const detail = cache.assistantSupportDetail || {};
+  const ticket = detail.ticket;
+  if (!ticket) return `<div class="assistant-support-admin-placeholder"><b>Select a conversation</b><span>Choose an assistant from the left to view and reply.</span></div>`;
+  const messages = detail.messages || [];
+  const closed = ["closed", "resolved"].includes(String(ticket.statusCode || "").toLowerCase());
+  return `<div class="assistant-support-admin-detail">
+    <header>
+      <div class="assistant-support-admin-person">${assistantSupportAvatarHtml(ticket)}<span><b>${escapeHtml(ticket.assistantName || "Assistant")}</b><small>${escapeHtml(reportMobileNumber(ticket.assistantPhone))}${ticket.bookingNumber ? ` | Booking ${escapeHtml(ticket.bookingNumber)}` : ""}</small></span></div>
+      <div class="assistant-support-admin-controls">
+        <label>Status<select id="assistantSupportDetailStatus" class="form-select">${["open", "in_progress", "waiting_assistant", "resolved", "closed"].map((value) => `<option value="${value}" ${ticket.statusCode === value ? "selected" : ""}>${escapeHtml(value.replace(/_/g, " "))}</option>`).join("")}</select></label>
+        <label>Priority<select id="assistantSupportDetailPriority" class="form-select">${["low", "normal", "high", "urgent"].map((value) => `<option value="${value}" ${ticket.priorityCode === value ? "selected" : ""}>${value}</option>`).join("")}</select></label>
+        <button class="btn btn-outline-primary" data-action="update-assistant-support-ticket" data-id="${escapeHtml(ticket.id)}" type="button">Update</button>
+      </div>
+    </header>
+    <div class="assistant-support-admin-subject"><span><b>${escapeHtml(ticket.subject || "Task support")}</b><small>${escapeHtml(ticket.ticketNumber || "")}</small></span>${supportTicketStatusCapsule(ticket.statusCode)}</div>
+    <section class="assistant-support-admin-messages" data-admin-assistant-support-messages>
+      ${messages.length ? messages.map((message) => `<article class="${message.senderType === "admin" ? "admin" : "assistant"}"><b>${escapeHtml(message.senderType === "admin" ? message.senderName || "Support" : ticket.assistantName || "Assistant")}</b><p>${escapeHtml(message.message || "")}</p><time>${escapeHtml(formatDate(message.createdAt))}</time></article>`).join("") : `<div class="assistant-support-admin-empty"><b>No messages yet</b><span>The assistant opened this chat but has not sent a message.</span></div>`}
+    </section>
+    ${closed ? `<p class="assistant-support-admin-closed">Reopen this chat to send another response.</p>` : `<form class="assistant-support-admin-composer" data-admin-assistant-support-message-form data-id="${escapeHtml(ticket.id)}"><input class="form-control" name="message" maxlength="4000" autocomplete="off" placeholder="Reply to assistant" required><button class="btn btn-primary" type="submit">Send</button></form>`}
+  </div>`;
+}
+
+function renderAssistantSupportWorkspace() {
+  const pagination = cache.assistantSupportPagination || { page: 1, totalPages: 1, totalRecords: 0 };
+  const section = $("#assistantSupportSection");
+  if (!section) return;
+  section.innerHTML = pageTitleBlock("Assistant Support", "Real-time task help conversations between assistants and the support team") +
+    assistantSupportToolbarHtml() +
+    `<div class="assistant-support-workspace">
+      <aside><header><b>Conversations</b><span>${escapeHtml(pagination.totalRecords || 0)}</span></header><div class="assistant-support-thread-list">${assistantSupportConversationListHtml()}</div>${supportTicketPaginationHtml({ ...pagination, assistantSupport: true }).replaceAll("support-ticket-page", "assistant-support-page")}</aside>
+      <main>${assistantSupportDetailHtml()}</main>
+    </div>`;
+  requestAnimationFrame(() => {
+    const messages = $("[data-admin-assistant-support-messages]");
+    if (messages) messages.scrollTop = messages.scrollHeight;
+  });
+}
+
+async function openAdminAssistantSupportTicket(ticketId, { render = true } = {}) {
+  if (!ticketId) return;
+  const payload = await api(`/support/assistant/tickets/${encodeURIComponent(ticketId)}`);
+  cache.assistantSupportDetail = payload.data || null;
+  if (render) renderAssistantSupportWorkspace();
+}
+
+async function loadAssistantSupport(options = {}) {
+  const generation = ++assistantSupportLoadGeneration;
+  const params = new URLSearchParams({
+    search: assistantSupportFilters.search,
+    status: assistantSupportFilters.status,
+    page: String(assistantSupportFilters.page),
+    pageSize: String(assistantSupportFilters.pageSize)
+  });
+  const payload = await safeApi(`/support/assistant/tickets?${params.toString()}`);
+  if (generation !== assistantSupportLoadGeneration) return;
+  const data = payload.data || {};
+  cache.assistantSupportTickets = data.rows || [];
+  cache.assistantSupportPagination = data.pagination || { page: 1, pageSize: 50, totalRecords: 0, totalPages: 1 };
+  const preferredId = String(options.ticketId || cache.assistantSupportDetail?.ticket?.id || "");
+  const requestedId = String(cache.assistantSupportTickets.some((ticket) => String(ticket.id) === preferredId)
+    ? preferredId
+    : cache.assistantSupportTickets[0]?.id || "");
+  if (requestedId) {
+    try { await openAdminAssistantSupportTicket(requestedId, { render: false }); }
+    catch (error) {
+      cache.assistantSupportDetail = null;
+      if (options.ticketId) showAlert(error.message || "Unable to open assistant support chat.");
+    }
+  } else cache.assistantSupportDetail = null;
+  if (generation !== assistantSupportLoadGeneration) return;
+  renderAssistantSupportWorkspace();
+}
+
 const adminReportBookingTabs = ["pending_assign", "assigned", "working", "success", "rejected", "cancelled", "hold"];
 
 const adminReportPageSizes = [50, 100, 200, 500, 1000, "all"];
@@ -7640,11 +7772,20 @@ function getAdminReportFilter(reportKey) {
   return adminReportFilters[reportKey];
 }
 
+const adminReportDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Kolkata",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+});
+
 function adminReportRecordDate(value) {
-  const date = value ? new Date(value) : null;
+  const text = String(value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const date = text ? new Date(text) : null;
   if (!date || Number.isNaN(date.getTime())) return "";
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-  return local.toISOString().slice(0, 10);
+  const parts = Object.fromEntries(adminReportDateFormatter.formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 function adminReportSearchText(row) {
@@ -7830,7 +7971,7 @@ function bookingReportExtensions(booking = {}) {
 }
 
 function bookingReportFilterDate(booking = {}) {
-  return booking.serviceSortAt || booking.serviceDate || booking.bookingStartAt || booking.scheduledAt || booking.createdAt;
+  return booking.serviceDate || booking.serviceSortAt || booking.bookingStartAt || booking.scheduledAt || booking.createdAt;
 }
 
 function bookingReportTime(value) {
@@ -7940,11 +8081,15 @@ function renderBookingsReport() {
 function customerReportRows(items = []) {
   return items
     .map((customer) => `<tr>
-      <td><b>${escapeHtml(customer.displayName || customer.customerName || "-")}</b>${reportCellNote(customer.customerCode || customer.id || "")}</td>
+      <td><div class="customer-report-person">${profileAvatar(customer.profilePictureUrl, customer.displayName || customer.customerName)}<div><b>${escapeHtml(customer.displayName || customer.customerName || "-")}</b>${reportCellNote(customer.customerCode || customer.id || "")}</div></div></td>
       <td>${escapeHtml(customer.phone || "-")}${reportCellNote(customer.email || "")}</td>
       <td><b>${escapeHtml(customer.address || "No default address")}</b>${reportCellNote([customer.clusterName, customer.zoneName, customer.cityName].filter(Boolean).join(" / "))}</td>
       <td>${status(customer.status || customer.statusCode || (customer.isActive === false ? "inactive" : "active"))}</td>
-      <td>${escapeHtml(formatDate(customer.createdAt || customer.updatedAt))}</td>
+      <td>${escapeHtml(formatDate(customer.updatedAt || customer.createdAt))}${customer.createdAt && customer.updatedAt !== customer.createdAt ? reportCellNote(`Created ${formatDate(customer.createdAt)}`) : ""}</td>
+      <td class="text-end"><div class="customer-report-row-actions">
+        <button class="icon-action-btn" data-action="edit-admin-customer" data-id="${escapeHtml(customer.id)}" type="button" title="Edit customer" aria-label="Edit ${escapeHtml(customer.displayName || customer.customerCode || "customer")}">${iconSvg("edit")}</button>
+        <button class="icon-action-btn danger" data-action="delete-customer-report" data-id="${escapeHtml(customer.id)}" type="button" title="Delete customer" aria-label="Delete ${escapeHtml(customer.displayName || customer.customerCode || "customer")}">${iconSvg("trash")}</button>
+      </div></td>
     </tr>`)
     .join("");
 }
@@ -7962,12 +8107,173 @@ function renderCustomerReport() {
     title: "Customer Report",
     subtitle: "Customer records, contact details, and default service location",
     panelSubtitle: "Registered customers with contact, status, and location details",
-    headers: ["Customer", "Contact", "Default Location", "Status", "Created / Updated"],
+    headers: ["Customer", "Contact", "Default Location", "Status", "Created / Updated", "Actions"],
     rows: cache.customerReport || [],
     rowRenderer: customerReportRows,
-    dateAccessor: (customer) => customer.createdAt || customer.updatedAt,
+    dateAccessor: (customer) => customer.updatedAt || customer.createdAt,
     searchPlaceholder: "Search customer, phone, email, location, status"
   });
+}
+
+function customerReportModal(kind, title, body) {
+  bookingInfoModal(kind, title, body);
+  $("#bookingInfoModal")?.classList.add("customer-report-modal-open");
+}
+
+function setCustomerReportModalAlert(message = "", tone = "danger") {
+  const alert = $("#customerReportModalAlert");
+  if (!alert) return;
+  alert.textContent = message;
+  alert.className = `alert alert-${tone}${message ? "" : " d-none"}`;
+}
+
+function customerReportEditorHtml(customer = {}) {
+  const isActive = String(customer.status || "active").toLowerCase() === "active";
+  return `<form id="customerReportEditForm" class="customer-report-editor" novalidate>
+    <input type="hidden" name="customerId" value="${escapeHtml(customer.id || "")}">
+    <div id="customerReportModalAlert" class="alert alert-danger d-none"></div>
+    <div class="customer-report-editor-header">
+      ${profileAvatar(customer.profilePictureUrl, customer.displayName)}
+      <div>
+        <b>${escapeHtml(customer.displayName || "Customer")}</b>
+        <span>${escapeHtml(customer.customerCode || customer.id || "")}</span>
+      </div>
+      ${status(isActive ? "active" : "inactive")}
+    </div>
+    <div class="customer-report-editor-layout">
+      <section class="customer-report-editor-photo" aria-labelledby="customerReportPhotoTitle">
+        <div><h3 id="customerReportPhotoTitle">Profile picture</h3><p>Upload a clear customer profile image.</p></div>
+        ${uploadControl("customerReportProfilePicture", customer.profilePictureUrl || "")}
+      </section>
+      <section class="customer-report-editor-fields" aria-labelledby="customerReportDetailsTitle">
+        <div><h3 id="customerReportDetailsTitle">Customer details</h3><p>Update contact and account availability.</p></div>
+        <div class="customer-report-field-grid">
+          <label class="form-label">Full name<input class="form-control" name="displayName" value="${escapeHtml(customer.displayName || "")}" maxlength="150" autocomplete="name" required></label>
+          <label class="form-label">Mobile number<input class="form-control" name="phone" type="tel" value="${escapeHtml(customer.phone || "")}" maxlength="30" autocomplete="tel"></label>
+          <label class="form-label customer-report-email-field">Email address<input class="form-control" name="email" type="email" value="${escapeHtml(customer.email || "")}" maxlength="320" autocomplete="email"></label>
+        </div>
+        <label class="customer-report-status-control">
+          <span><b>Active customer</b><small>Inactive customers cannot sign in or use the customer app.</small></span>
+          <input class="form-check-input" name="isActive" type="checkbox" ${isActive ? "checked" : ""} aria-label="Active customer">
+        </label>
+        <div class="customer-report-location-summary">
+          <span>Default location</span>
+          <b>${escapeHtml(customer.address || "No default address")}</b>
+          <small>${escapeHtml([customer.clusterName, customer.zoneName, customer.cityName].filter(Boolean).join(" / ") || "No market assigned")}</small>
+        </div>
+      </section>
+    </div>
+    <div class="customer-report-modal-actions">
+      <button class="btn btn-light" data-action="close-booking-info-modal" type="button">Cancel</button>
+      <button id="customerReportSaveButton" class="btn btn-primary" type="submit">Update Customer</button>
+    </div>
+  </form>`;
+}
+
+async function openCustomerReportEditor(customerId) {
+  const cached = (cache.customerReport || []).find((item) => String(item.id) === String(customerId))
+    || customerRows.find((item) => String(item.id) === String(customerId));
+  customerReportModal("Customer", cached?.displayName || cached?.customerCode || "Edit Customer", `<div class="booking-report-detail-loading">Loading customer details...</div>`);
+  try {
+    const payload = await api(`/admin-customers/${encodeURIComponent(customerId)}`);
+    const customer = payload.data || cached;
+    if (!customer) throw new Error("Customer not found.");
+    customerReportModal("Edit Customer", customer.displayName || customer.customerCode || "Customer", customerReportEditorHtml(customer));
+    requestAnimationFrame(() => $("#customerReportEditForm input[name='displayName']")?.focus());
+  } catch (error) {
+    customerReportModal("Edit Customer", cached?.displayName || "Customer", `<div id="customerReportModalAlert" class="alert alert-danger">${escapeHtml(error.message || "Unable to load customer details.")}</div>`);
+  }
+}
+
+async function saveCustomerReportEditor(form) {
+  const data = formObject(form);
+  const displayName = String(data.displayName || "").trim();
+  const phone = String(data.phone || "").trim();
+  const email = String(data.email || "").trim();
+  if (!displayName) {
+    setCustomerReportModalAlert("Customer name is required.");
+    form.elements.displayName?.focus();
+    return;
+  }
+  if (!phone && !email) {
+    setCustomerReportModalAlert("Enter a mobile number or email address.");
+    form.elements.phone?.focus();
+    return;
+  }
+  if (!form.checkValidity()) {
+    form.reportValidity();
+    return;
+  }
+  const submit = $("#customerReportSaveButton");
+  const originalText = submit?.textContent || "Update Customer";
+  if (submit) {
+    submit.disabled = true;
+    submit.textContent = "Updating...";
+  }
+  setCustomerReportModalAlert("Updating customer...", "warning");
+  try {
+    await api(`/admin-customers/${encodeURIComponent(data.customerId)}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        displayName,
+        phone: phone || null,
+        email: email || null,
+        status: form.elements.isActive.checked ? "active" : "inactive",
+        profilePictureUrl: String(data.imageUrl || "").trim() || null
+      })
+    });
+    closeBookingInfoModal();
+    showAlert("Customer updated successfully.", "success");
+    if (state.section === "customers") await loadCustomers();
+    else await loadCustomerReport();
+  } catch (error) {
+    setCustomerReportModalAlert(error.message || "Unable to update customer.");
+  } finally {
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = originalText;
+    }
+  }
+}
+
+async function openCustomerReportDeleteConfirm(customerId) {
+  const cached = (cache.customerReport || []).find((item) => String(item.id) === String(customerId))
+    || customerRows.find((item) => String(item.id) === String(customerId));
+  let customer = cached;
+  if (!customer) customer = (await api(`/admin-customers/${encodeURIComponent(customerId)}`)).data;
+  const name = customer?.displayName || customer?.customerCode || "this customer";
+  customerReportModal("Delete Customer", name, `<div class="customer-report-delete-confirm">
+    <div id="customerReportModalAlert" class="alert alert-danger d-none"></div>
+    <div class="customer-report-delete-icon" aria-hidden="true">${iconSvg("trash")}</div>
+    <h3>Delete this customer?</h3>
+    <p><b>${escapeHtml(name)}</b> will be removed from active customer records and will no longer be able to sign in. Existing booking history remains available for audit.</p>
+    <div class="customer-report-modal-actions">
+      <button class="btn btn-light" data-action="close-booking-info-modal" type="button">Cancel</button>
+      <button id="customerReportDeleteButton" class="btn btn-outline-danger" data-action="confirm-delete-customer-report" data-id="${escapeHtml(customerId)}" type="button">Delete Customer</button>
+    </div>
+  </div>`);
+}
+
+async function deleteCustomerFromReport(customerId) {
+  const button = $("#customerReportDeleteButton");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Deleting...";
+  }
+  setCustomerReportModalAlert("Deleting customer...", "warning");
+  try {
+    await api(`/admin-customers/${encodeURIComponent(customerId)}`, { method: "DELETE" });
+    closeBookingInfoModal();
+    showAlert("Customer deleted successfully.", "success");
+    if (state.section === "customers") await loadCustomers();
+    else await loadCustomerReport();
+  } catch (error) {
+    setCustomerReportModalAlert(error.message || "Unable to delete customer.");
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Delete Customer";
+    }
+  }
 }
 
 function assistantReportStateId(assistant = {}) { const city = (cache.cities || []).find((item) => item.id === assistant.cityId); return assistant.stateId || city?.stateId || city?.state_id || ""; }
@@ -8357,10 +8663,10 @@ function adminReportDefinition(reportKey) {
   if (reportKey === "customerReport") {
     return {
       rows: cache.customerReport || [],
-      dateAccessor: (customer) => customer.createdAt || customer.updatedAt,
+      dateAccessor: (customer) => customer.updatedAt || customer.createdAt,
       render: renderCustomerReport,
       headers: ["Customer", "Customer Code", "Phone", "Email", "Default Location", "Cluster", "Zone", "City", "Status", "Created / Updated"],
-      exportRow: (customer) => [customer.displayName || customer.customerName, customer.customerCode || customer.id, customer.phone, customer.email, customer.address, customer.clusterName, customer.zoneName, customer.cityName, customer.status || customer.statusCode || (customer.isActive === false ? "inactive" : "active"), formatDate(customer.createdAt || customer.updatedAt)]
+      exportRow: (customer) => [customer.displayName || customer.customerName, customer.customerCode || customer.id, customer.phone, customer.email, customer.address, customer.clusterName, customer.zoneName, customer.cityName, customer.status || customer.statusCode || (customer.isActive === false ? "inactive" : "active"), formatDate(customer.updatedAt || customer.createdAt)]
     };
   }
   if (reportKey === "assistantReport") {
@@ -8510,28 +8816,176 @@ function updateBookingBell() {
     return;
   }
   bookingBellButton.classList.remove("d-none");
-  bookingBellButton.classList.toggle("has-new", bookingNewNotificationCount > 0);
-  bookingBellCount.textContent = String(bookingNewNotificationCount);
-  bookingBellCount.classList.toggle("d-none", bookingNewNotificationCount <= 0);
+  bookingBellButton.classList.toggle("is-muted", bookingBellPreferences.muted);
+  const pendingLabel = `${bookingPendingAssignmentCount} booking${bookingPendingAssignmentCount === 1 ? "" : "s"} awaiting assignment`;
+  bookingBellButton.title = bookingBellPreferences.muted
+    ? `${pendingLabel} - sound muted`
+    : bookingPendingAssignmentCount > 0
+      ? `${pendingLabel} - ringing until assigned`
+      : "Live booking notifications";
+  bookingBellButton.setAttribute("aria-label", bookingBellButton.title);
+  bookingBellButton.classList.toggle("has-new", bookingPendingAssignmentCount > 0);
+  bookingBellCount.textContent = String(bookingPendingAssignmentCount);
+  bookingBellCount.classList.toggle("d-none", bookingPendingAssignmentCount <= 0);
+}
+
+function bookingBellSoundEnabled() {
+  return bookingRealtimeSettings?.playSound !== false && !bookingBellPreferences.muted && bookingBellPreferences.volume >= 0.05;
+}
+
+function pendingBookingAlarmShouldPlay(count = bookingPendingAssignmentCount) {
+  return Number(count || 0) > 0 && bookingBellSoundEnabled();
+}
+
+function bookingBellPreferenceControls() {
+  const volumePercent = Math.round(bookingBellPreferences.volume * 100);
+  const disabled = bookingBellPreferences.muted ? " disabled" : "";
+  return `<div class="booking-bell-preferences${bookingBellPreferences.muted ? " is-muted" : ""}" data-booking-bell-preferences>
+    <strong>Booking bell</strong>
+    <label class="form-check form-switch booking-bell-mute-toggle">
+      <input class="form-check-input" data-booking-bell-muted type="checkbox" role="switch" ${bookingBellPreferences.muted ? "checked" : ""}>
+      <span>Mute</span>
+    </label>
+    <div class="booking-bell-volume" aria-label="Booking bell volume">
+      <button data-booking-bell-volume-step="-0.05" type="button" title="Volume down" aria-label="Volume down"${disabled}>-</button>
+      <input data-booking-bell-volume type="range" min="5" max="100" step="5" value="${volumePercent}" aria-label="Bell volume" aria-valuetext="${volumePercent} percent"${disabled}>
+      <button data-booking-bell-volume-step="0.05" type="button" title="Volume up" aria-label="Volume up"${disabled}>+</button>
+      <output data-booking-bell-volume-output>${volumePercent}%</output>
+    </div>
+    <span class="visually-hidden" data-booking-bell-save-status aria-live="polite"></span>
+  </div>`;
+}
+
+function syncBookingBellPreferenceControls() {
+  document.querySelectorAll("[data-booking-bell-preferences]").forEach((control) => {
+    const volumePercent = Math.round(bookingBellPreferences.volume * 100);
+    control.classList.toggle("is-muted", bookingBellPreferences.muted);
+    const mute = control.querySelector("[data-booking-bell-muted]");
+    const range = control.querySelector("[data-booking-bell-volume]");
+    const output = control.querySelector("[data-booking-bell-volume-output]");
+    if (mute) mute.checked = bookingBellPreferences.muted;
+    if (range) {
+      range.disabled = bookingBellPreferences.muted;
+      range.value = String(volumePercent);
+      range.setAttribute("aria-valuetext", `${volumePercent} percent`);
+    }
+    control.querySelectorAll("[data-booking-bell-volume-step]").forEach((button) => {
+      button.disabled = bookingBellPreferences.muted;
+    });
+    if (output) output.value = `${volumePercent}%`;
+  });
+}
+
+function applyBookingBellPreferences() {
+  bookingAlertAudio.volume = bookingBellPreferences.volume;
+  if (pendingBookingAlarmShouldPlay()) playNewBookingRingtone();
+  else stopNewBookingRingtone();
+  syncBookingBellPreferenceControls();
+  updateBookingBell();
+}
+
+function updateBookingBellPreferences(patch = {}, options = {}) {
+  bookingBellPreferences = normalizeBookingBellPreferences({ ...bookingBellPreferences, ...patch });
+  if (state.user) {
+    state.user.metadata = {
+      ...(state.user.metadata || {}),
+      adminBookingBellPreferences: { ...bookingBellPreferences }
+    };
+    localStorage.setItem("zigoAdminUser", JSON.stringify(state.user));
+  }
+  applyBookingBellPreferences();
+  if (options.persist !== false) scheduleBookingBellPreferenceSave(options.immediate === true ? 0 : 280);
+}
+
+function scheduleBookingBellPreferenceSave(delayMs = 280) {
+  if (bookingBellPreferenceSaveTimer) clearTimeout(bookingBellPreferenceSaveTimer);
+  bookingBellPreferenceSaveTimer = setTimeout(() => {
+    bookingBellPreferenceSaveTimer = null;
+    void persistBookingBellPreferences();
+  }, Math.max(0, Number(delayMs || 0)));
+}
+
+async function persistBookingBellPreferences() {
+  if (!state.token) return;
+  if (bookingBellPreferenceSaveBusy) {
+    bookingBellPreferenceSavePending = true;
+    return;
+  }
+  bookingBellPreferenceSaveBusy = true;
+  const sessionGeneration = adminSessionGeneration;
+  try {
+    do {
+      bookingBellPreferenceSavePending = false;
+      const snapshot = { ...bookingBellPreferences };
+      await api("/users/me/booking-bell-preferences", {
+        method: "PATCH",
+        body: JSON.stringify(snapshot)
+      });
+      if (sessionGeneration !== adminSessionGeneration) return;
+      document.querySelectorAll("[data-booking-bell-save-status]").forEach((status) => { status.textContent = "Bell preference saved"; });
+    } while (bookingBellPreferenceSavePending);
+  } catch (error) {
+    if (sessionGeneration === adminSessionGeneration) showAlert(error.message || "Unable to save booking bell preference.");
+  } finally {
+    bookingBellPreferenceSaveBusy = false;
+    if (bookingBellPreferenceSavePending && sessionGeneration === adminSessionGeneration) scheduleBookingBellPreferenceSave(0);
+  }
 }
 
 function updatePendingAssignmentBadge(count = bookingPendingAssignmentCount) {
-  bookingPendingAssignmentCount = Math.max(0, Number(count || 0));
+  const numericCount = Number(count);
+  bookingPendingAssignmentCount = Number.isFinite(numericCount) ? Math.max(0, Math.trunc(numericCount)) : 0;
   if (!pendingAssignmentCount) return;
-  pendingAssignmentCount.textContent = bookingPendingAssignmentCount > 99 ? "99+" : String(bookingPendingAssignmentCount);
+  pendingAssignmentCount.textContent = String(bookingPendingAssignmentCount);
   pendingAssignmentCount.classList.toggle("d-none", bookingPendingAssignmentCount <= 0);
   pendingAssignmentCount.setAttribute("aria-label", `${bookingPendingAssignmentCount} booking${bookingPendingAssignmentCount === 1 ? "" : "s"} awaiting assignment`);
 }
 
+function syncPendingBookingAlarm(count = bookingPendingAssignmentCount, options = {}) {
+  updatePendingAssignmentBadge(count);
+  updateBookingBell();
+  if (!pendingBookingAlarmShouldPlay()) {
+    stopNewBookingRingtone();
+    return bookingPendingAssignmentCount;
+  }
+  if (options.animate) {
+    bookingBellButton?.classList.remove("ring");
+    void bookingBellButton?.offsetWidth;
+    bookingBellButton?.classList.add("ring");
+  }
+  playNewBookingRingtone();
+  return bookingPendingAssignmentCount;
+}
+
 async function refreshPendingAssignmentCount() {
   if (!state.token) {
-    updatePendingAssignmentBadge(0);
+    syncPendingBookingAlarm(0);
     return 0;
   }
+  const requestId = ++bookingPendingAssignmentRefreshRequestId;
+  const sessionGeneration = adminSessionGeneration;
   const payload = await api("/operations/bookings?tab=pending_assign&page=1&pageSize=10&datePreset=all");
+  if (requestId !== bookingPendingAssignmentRefreshRequestId || sessionGeneration !== adminSessionGeneration) {
+    return bookingPendingAssignmentCount;
+  }
   const count = Number(payload.pagination?.totalRecords ?? payload.data?.length ?? 0);
-  updatePendingAssignmentBadge(count);
-  return count;
+  return syncPendingBookingAlarm(count, { animate: count > bookingPendingAssignmentCount });
+}
+
+function announcePendingBookingsOnAdminEntry() {
+  if (bookingPendingEntryAlerted) return Promise.resolve(bookingPendingAssignmentCount);
+  if (bookingPendingEntryAlertPromise) return bookingPendingEntryAlertPromise;
+  const sessionGeneration = adminSessionGeneration;
+  bookingPendingEntryAlertPromise = (async () => {
+    await ensureBookingRealtimeSettings();
+    const count = await refreshPendingAssignmentCount();
+    if (sessionGeneration !== adminSessionGeneration) return 0;
+    bookingPendingEntryAlerted = true;
+    return count;
+  })().finally(() => {
+    bookingPendingEntryAlertPromise = null;
+  });
+  return bookingPendingEntryAlertPromise;
 }
 
 function schedulePendingAssignmentCountRefresh(delayMs = 120) {
@@ -8543,10 +8997,10 @@ function schedulePendingAssignmentCountRefresh(delayMs = 120) {
 }
 
 function playNewBookingRingtone() {
-  if (bookingRealtimeSettings?.playSound === false) return;
+  if (!pendingBookingAlarmShouldPlay()) return;
   try {
     if (!bookingAlertAudio.paused) return;
-    bookingAlertAudio.volume = 0.9;
+    bookingAlertAudio.volume = bookingBellPreferences.volume;
     bookingAlertAudio.play().catch(() => {
       // Browser sound policy may require an Admin interaction first.
     });
@@ -8564,36 +9018,27 @@ function stopNewBookingRingtone() {
   }
 }
 
-function acknowledgeNewBookingAlert() {
-  stopNewBookingRingtone();
-  bookingNewNotificationCount = 0;
-  updateBookingBell();
-}
-
 function unlockBookingAlertAudio() {
+  if (bookingBellPreferences.muted) return;
   const previousVolume = bookingAlertAudio.volume;
   bookingAlertAudio.volume = 0;
   bookingAlertAudio.play()
     .then(() => {
       bookingAlertAudio.pause();
       bookingAlertAudio.currentTime = 0;
-      bookingAlertAudio.volume = previousVolume || 0.9;
+      bookingAlertAudio.volume = Number.isFinite(previousVolume) ? previousVolume : bookingBellPreferences.volume;
+      if (pendingBookingAlarmShouldPlay()) playNewBookingRingtone();
     })
     .catch(() => {
-      bookingAlertAudio.volume = previousVolume || 0.9;
+      bookingAlertAudio.volume = Number.isFinite(previousVolume) ? previousVolume : bookingBellPreferences.volume;
     });
 }
 
 document.addEventListener("pointerdown", unlockBookingAlertAudio, { capture: true, once: true });
 
 function ringBookingBell(count = 1) {
-  if (bookingRealtimeSettings?.showBell === false) return;
-  bookingNewNotificationCount += count;
-  updateBookingBell();
-  bookingBellButton?.classList.remove("ring");
-  void bookingBellButton?.offsetWidth;
-  bookingBellButton?.classList.add("ring");
-  playNewBookingRingtone();
+  const increment = Math.max(1, Math.trunc(Number(count) || 1));
+  syncPendingBookingAlarm(bookingPendingAssignmentCount + increment, { animate: true });
 }
 
 function handleBookingNotificationRows(rows = [], notify = true) {
@@ -8615,7 +9060,7 @@ function handleBookingNotificationRows(rows = [], notify = true) {
 
 function handleBookingRealtimeRows(rows = [], options = {}) {
   const rowIds = rows.map((booking) => booking.id).filter(Boolean);
-  if (options.realtime && bookingActiveTab === "pending_assign") {
+  if (options.realtime && options.source !== "event" && bookingActiveTab === "pending_assign") {
     const newRows = rows.filter((booking) => booking.id && !bookingKnownIds.has(booking.id));
     if (newRows.length) {
       ringBookingBell(newRows.length);
@@ -8659,7 +9104,7 @@ async function loadBookings(tab = bookingActiveTab, options = {}) {
         <div class="booking-queue-list">${rows || `<div class="empty-state">No bookings found.</div>`}</div>
       </div>
       ${bookingPaginationControls(pagination)}`,
-      ""
+      bookingBellPreferenceControls()
     );
   updateBookingBell();
   startBookingWorkingCountdown();
@@ -8713,11 +9158,12 @@ function startBookingRealtimeFallbackPolling(seconds = 60) {
     bookingRealtimeBusy = true;
     try {
       if (state.section === "bookings") {
-        await loadBookings(bookingActiveTab, { realtime: true });
+        await loadBookings(bookingActiveTab, { realtime: true, source: "polling" });
       } else {
         const payload = await api("/operations/bookings?tab=pending_assign&page=1&pageSize=10&datePreset=today");
         handleBookingNotificationRows(payload.data || [], true);
       }
+      await refreshPendingAssignmentCount();
     } catch {
       // Keep live refresh quiet; manual refresh still reports errors.
     } finally {
@@ -8752,6 +9198,49 @@ function mergeAssistantRealtimePayload(event = {}) {
   return true;
 }
 
+function bookingRealtimeAssignmentStatus(event = {}) {
+  return String(event.payload?.assignmentStatus || event.payload?.status || "").trim().toLowerCase();
+}
+
+function bookingRealtimeAdminBellAlert(event = {}) {
+  if (event.replayed === true) return null;
+  if (String(event.type || "") === "booking.created") {
+    return { kind: "created", message: event.message || "New booking received." };
+  }
+  const payload = event.payload || {};
+  const assignmentStatus = bookingRealtimeAssignmentStatus(event);
+  const returnedStatus = ["rejected", "expired", "dropped", "drop"].includes(assignmentStatus);
+  const hasAssignment = Boolean(payload.assignmentId) && Boolean(event.assistantId || payload.assistantId);
+  const returnedToPending = payload.returnedToPending === true
+    || (String(event.type || "") === "booking.updated" && returnedStatus && hasAssignment);
+  if (!returnedToPending || !returnedStatus) return null;
+  const dropped = ["expired", "dropped", "drop"].includes(assignmentStatus);
+  return {
+    kind: dropped ? "dropped" : "rejected",
+    message: dropped
+      ? "Booking returned to Pending Assign because the assistant offer expired."
+      : "Booking returned to Pending Assign after assistant rejection."
+  };
+}
+
+function rememberBookingRealtimeAdminBellEvent(event = {}) {
+  const payload = event.payload || {};
+  const key = String(event.id || [
+    event.type,
+    event.bookingId || payload.bookingId,
+    payload.assignmentId,
+    bookingRealtimeAssignmentStatus(event),
+    event.createdAt
+  ].filter(Boolean).join(":"));
+  if (!key || bookingRealtimeAlertedEventIds.has(key)) return false;
+  bookingRealtimeAlertedEventIds.add(key);
+  if (bookingRealtimeAlertedEventIds.size > 500) {
+    const oldest = bookingRealtimeAlertedEventIds.values().next().value;
+    if (oldest) bookingRealtimeAlertedEventIds.delete(oldest);
+  }
+  return true;
+}
+
 function handleBookingRealtimeEvent(event = {}) {
   const eventType = String(event.type || "");
   if (eventType === 'user.session.revoked' && event.payload?.userId === state.user?.id) { clearAdminSession('Unable to sign in. Please contact support.'); return; }
@@ -8767,13 +9256,18 @@ function handleBookingRealtimeEvent(event = {}) {
     return;
   }
   if (eventType.startsWith("support.")) {
-    if (state.section === "supportTickets") void loadSupportTickets();
-    const openTicketId = cache.supportTicketDetail?.ticket?.id;
-    if (openTicketId && String(event.payload?.ticketId || "") === String(openTicketId)) void openAdminSupportTicket(openTicketId);
+    if (event.payload?.requesterType === "assistant") {
+      const openAssistantTicketId = cache.assistantSupportDetail?.ticket?.id;
+      const eventTicketId = String(event.payload?.ticketId || "");
+      if (state.section === "assistantSupport") void loadAssistantSupport({ ticketId: openAssistantTicketId || eventTicketId });
+    } else {
+      if (state.section === "supportTickets") void loadSupportTickets();
+      const openTicketId = cache.supportTicketDetail?.ticket?.id;
+      if (openTicketId && String(event.payload?.ticketId || "") === String(openTicketId)) void openAdminSupportTicket(openTicketId);
+    }
   }
   const isAssistantEvent = eventType.startsWith("assistant.");
   const isBookingEvent = eventType.startsWith("booking.");
-  const isNewBookingEvent = eventType === "booking.created";
   const affectsAssignmentCount = isBookingEvent || eventType === "assistant.assignment.changed";
   const assistantUpdated = isAssistantEvent ? mergeAssistantRealtimePayload(event) : false;
   if (event.id) {
@@ -8789,20 +9283,21 @@ function handleBookingRealtimeEvent(event = {}) {
     message: event.message || "Booking event received."
   };
   updateBookingRealtimePill();
-  if (isNewBookingEvent && event.replayed !== true) {
+  const adminBellAlert = bookingRealtimeAdminBellAlert(event);
+  if (adminBellAlert && rememberBookingRealtimeAdminBellEvent(event)) {
     const bookingId = String(event.bookingId || event.payload?.bookingId || "");
     if (bookingId) {
       bookingKnownIds.add(bookingId);
       bookingNotificationKnownIds.add(bookingId);
     }
     ringBookingBell(1);
-    if (bookingRealtimeSettings?.showToast !== false) showAlert(event.message || "New booking received.", "warning");
+    if (bookingRealtimeSettings?.showToast !== false) showAlert(adminBellAlert.message, "warning");
   }
   if (state.section === "assistantAvailable" && (isAssistantEvent || isBookingEvent)) {
     scheduleAssistantAvailabilityBoardRealtimeRefresh();
   }  if (affectsAssignmentCount) schedulePendingAssignmentCountRefresh();
   if (affectsAssignmentCount && bookingRealtimeSettings?.refreshOnEvent !== false) {
-    if (state.section === "bookings") loadBookings(bookingActiveTab, { realtime: true }).catch(() => {});
+    if (state.section === "bookings") loadBookings(bookingActiveTab, { realtime: true, source: "event" }).catch(() => {});
   }
   if (assistantUpdated) {
     if (state.section === "assistant") renderAssistantRecords();
@@ -9035,7 +9530,7 @@ function bookingQueueRow(booking, tab) {
     ${tab === "working" ? bookingReportWorkingCell(booking) : tab === "assigned" ? bookingReportAssistantCell(booking) : bookingReportServiceCell(booking)}
     ${tab === "assigned" ? bookingReportServiceCell(booking) : tab === "working" ? bookingReportTaskStatusCell(booking) : bookingReportLocationsCell(booking)}
     ${["pending_assign", "hold"].includes(tab) ? bookingReportUploadsNoteCell(booking) : tab === "assigned" ? bookingReportLocationsCell(booking) : bookingReportPaymentCell(booking)}
-    ${["pending_assign", "hold"].includes(tab) ? bookingReportPaymentCell(booking) : tab === "assigned" ? bookingReportPaymentCell(booking) : bookingReportAssistantCell(booking)}
+    ${["pending_assign", "hold"].includes(tab) ? bookingReportPaymentCell(booking) : tab === "assigned" ? bookingReportPaymentCell(booking) : bookingReportAssistantCell(booking, tab)}
     ${bookingReportActionsCell(booking, tab)}
   </article>`;
 }
@@ -9082,9 +9577,13 @@ function bookingReportCustomerCell(booking = {}) {
   </div>`;
 }
 
-function bookingReportAssistantCell(booking = {}) {
+function bookingReportAssistantCell(booking = {}, tab = "") {
   if (!booking.assistantId) return `<div class="booking-report-cell"><span class="text-secondary">-</span></div>`;
-  return `<div class="booking-report-cell booking-report-assistant">${bookingAssignedAssistantMiniCard(booking)}</div>`;
+  const rejectedAt = booking.assignmentRespondedAt || booking.assignmentMetadata?.rejectedAt || booking.assignmentAssignedAt || booking.updatedAt;
+  return `<div class="booking-report-cell booking-report-assistant">
+    ${bookingAssignedAssistantMiniCard(booking)}
+    ${tab === "rejected" ? `<div class="booking-report-rejection"><span class="mini-badge danger">Rejected by assistant</span><small>${escapeHtml(formatDate(rejectedAt))}</small></div>` : ""}
+  </div>`;
 }
 
 function bookingReportServiceCell(booking = {}) {
@@ -9546,6 +10045,7 @@ function bookingUploadPreviewHtml(upload = {}) {
 }
 
 function bookingInfoModal(kind, title, body) {
+  $("#bookingInfoModal")?.classList.remove("customer-report-modal-open");
   $("#bookingInfoModalKind").textContent = kind;
   $("#bookingInfoModalTitle").textContent = title;
   $("#bookingInfoModalBody").innerHTML = body;
@@ -9553,7 +10053,9 @@ function bookingInfoModal(kind, title, body) {
 }
 
 function closeBookingInfoModal() {
-  $("#bookingInfoModal")?.classList.add("d-none");
+  const modal = $("#bookingInfoModal");
+  modal?.classList.add("d-none");
+  modal?.classList.remove("customer-report-modal-open");
 }
 
 function bookingById(id) {
@@ -14265,6 +14767,39 @@ async function initializeBookingMasterLocationMap() {
   });
 }
 
+function bookingEngineExtensionPolicyHtml() {
+  const enabled = bookingEngineExtensionPolicy.disableExtendBeforeEndEnabled === true;
+  const minutes = Math.max(1, Math.min(1440, Math.round(Number(bookingEngineExtensionPolicy.disableExtendBeforeEndMinutes || 10))));
+  return `<section class="booking-engine-extension-policy${enabled ? " is-enabled" : ""}">
+    <div class="booking-engine-extension-policy-copy">
+      <span>Customer Track Booking</span>
+      <strong>Extend Control</strong>
+      <small>Disable new service extensions when the running task reaches the configured remaining time.</small>
+    </div>
+    <form class="booking-engine-extension-policy-form" data-form="booking-extension-policy">
+      <label class="form-check booking-engine-extension-policy-toggle">
+        <input class="form-check-input" type="checkbox" name="disableExtendBeforeEndEnabled" data-booking-extension-policy-toggle ${enabled ? "checked" : ""}>
+        Disable Extend
+      </label>
+      <label class="booking-engine-extension-policy-minutes">
+        <span>before</span>
+        <input class="form-control" name="disableExtendBeforeEndMinutes" type="number" inputmode="numeric" min="1" max="1440" step="1" value="${escapeHtml(minutes)}" ${enabled ? "" : "disabled"} required>
+        <span>minutes</span>
+      </label>
+      <button class="btn btn-primary btn-sm" type="submit">Save</button>
+    </form>
+  </section>`;
+}
+
+function syncBookingEngineExtensionPolicyControl(form = document.querySelector('[data-form="booking-extension-policy"]')) {
+  if (!form) return;
+  const toggle = form.elements.disableExtendBeforeEndEnabled;
+  const minutes = form.elements.disableExtendBeforeEndMinutes;
+  const enabled = Boolean(toggle?.checked);
+  if (minutes) minutes.disabled = !enabled;
+  form.closest(".booking-engine-extension-policy")?.classList.toggle("is-enabled", enabled);
+}
+
 async function loadBookingMaster() {
   $("#bookingMasterSection").innerHTML =
     `<div class="booking-master-page">
@@ -14738,24 +15273,7 @@ function addCustomerAddress() {
 }
 
 async function editAdminCustomer(customerId) {
-  const customer = customerRows.find((item) => String(item.id) === String(customerId)) || (await api(`/admin-customers/${customerId}`)).data;
-  const displayName = prompt("Customer name", customer.displayName || "");
-  if (displayName == null) return;
-  const phone = prompt("Contact number", customer.phone || "");
-  if (phone == null) return;
-  const email = prompt("Email", customer.email || "");
-  if (email == null) return;
-  await api(`/admin-customers/${customerId}`, {
-    method: "PUT",
-    body: JSON.stringify({
-      displayName: displayName.trim() || null,
-      phone: phone.trim() || null,
-      email: email.trim() || null,
-      status: customer.status || "active"
-    })
-  });
-  showAlert("Customer updated.", "success");
-  await loadCustomers();
+  await openCustomerReportEditor(customerId);
 }
 
 async function editCustomerAddress(addressId) {
@@ -15789,14 +16307,15 @@ async function loadPaymentModeMaster() {
 }
 
 async function loadBookingEngine() {
-  const [rules, quickReplies, categories, states, cities, zones, clusters] = await Promise.all([
+  const [rules, quickReplies, categories, states, cities, zones, clusters, extensionPolicy] = await Promise.all([
     safeApi("/masters/booking-engine"),
     safeApi("/masters/booking-engine/quick-replies"),
     safeApi("/masters/categories"),
     safeApi("/masters/states"),
     safeApi("/masters/cities"),
     safeApi("/masters/zones"),
-    safeApi("/masters/clusters")
+    safeApi("/masters/clusters"),
+    safeApi("/settings/booking-extension-policy")
   ]);
   cache.bookingEngineRules = rules.data || [];
   cache.bookingEngineQuickReplies = quickReplies.data || [];
@@ -15805,6 +16324,7 @@ async function loadBookingEngine() {
   cache.cities = cities.data || [];
   cache.zones = zones.data || [];
   cache.clusters = clusters.data || [];
+  if (extensionPolicy.data) bookingEngineExtensionPolicy = { ...bookingEngineExtensionPolicy, ...extensionPolicy.data };
   const bookingEngineFormHtml = `<form class="master-form stack" data-form="booking-engine" id="bookingEngineForm">
     <input type="hidden" name="id">
     <div class="control-title"><div><p>Rule Scope</p><h3>Booking Engine Rule</h3></div><span>Demand & supply</span></div>
@@ -15892,6 +16412,7 @@ async function loadBookingEngine() {
   </form>`;
   $("#bookingEngineSection").innerHTML =
     pageTitleBlock("Booking Engine", "Scoped booking timing, service calendar, and assistant assignment rules") +
+    bookingEngineExtensionPolicyHtml() +
     `<div class="master-grid single-column">
       ${panel("Rules", "Scope, service start/stop calendar, instant timing, schedule timing, and assignment mode", bookingEngineFormHtml)}
       ${panel("Availability Controls", "ETA, wrap-up buffer, travel buffer, SLA grace, and capacity behavior are resolved by scoped rules and system settings.", `<div class="empty-state compact"><b>Smart availability engine</b><span>Cluster, service, address, assistant eligibility, ETA, wrap-up, travel, reservations, and scheduled overlaps are validated by backend availability APIs.</span></div>`)}
@@ -15902,6 +16423,7 @@ async function loadBookingEngine() {
     </div>`;
   refreshBookingEngineLocationCascade("scope");
   toggleBookingEngineCalendarFields();
+  syncBookingEngineExtensionPolicyControl();
   renderBookingEngineReport();
   renderBookingEngineQuickReplyReport();
 }
@@ -16320,6 +16842,7 @@ const assistantMasterFallbackSlabs = [
   { fromKm: 10, toKm: 15, rateType: "per_km", ratePaise: 800 },
   { fromKm: 15, toKm: 20, rateType: "per_km", ratePaise: 700 }
 ];
+const assistantMasterDefaultTravelCostBasePaise = 3000;
 
 function assistantMasterDecimal(value) {
   const numeric = Number(value);
@@ -16353,6 +16876,21 @@ function assistantMasterSlabRow(slab = {}, kind = "travelCostSlabs", index = 0) 
   </tr>`;
 }
 
+function assistantMasterBasePriceRow(kind, basePaise) {
+  return `<tr class="assistant-master-base-row" data-assistant-master-base-row="${escapeHtml(kind)}">
+    <td><div class="assistant-master-base-copy"><b>Base price</b><small>No distance range</small></div></td>
+    <td>
+      <div class="assistant-master-rate-inputs">
+        <span class="assistant-master-fixed-rate">Fixed</span>
+        <label><span>INR</span><input class="form-control form-control-sm" type="number" min="0" max="1000000" step="0.01" value="${escapeHtml(assistantMasterDecimal(Number(basePaise || 0) / 100))}" data-assistant-master-base="${escapeHtml(kind)}" required></label>
+      </div>
+    </td>
+    <td>Applied before distance slabs</td>
+    <td><strong data-assistant-master-base-charge="${escapeHtml(kind)}">${money(basePaise)}</strong></td>
+    <td></td>
+  </tr>`;
+}
+
 function assistantMasterCollectSlabs(form, kind) {
   return [...form.querySelectorAll(`[data-assistant-master-slab][data-slab-kind="${kind}"]`)].map((row) => {
     const fromValue = row.querySelector('[data-slab-field="fromKm"]')?.value ?? "";
@@ -16367,6 +16905,24 @@ function assistantMasterCollectSlabs(form, kind) {
   });
 }
 
+function assistantMasterCollectBasePaise(form, kind) {
+  const input = form.querySelector(`[data-assistant-master-base="${kind}"]`);
+  if (!input) return 0;
+  const amount = Number(input.value);
+  return Number.isFinite(amount) ? Math.round(amount * 100) : Number.NaN;
+}
+
+function assistantMasterSlabBillableFromKm(slabs, index) {
+  const slab = slabs[index];
+  const previousToKm = index > 0 ? slabs[index - 1]?.toKm : null;
+  if (!slab || previousToKm === null || !Number.isFinite(previousToKm)) return slab?.fromKm ?? 0;
+  const startsAtBoundary = Math.abs(previousToKm - slab.fromKm) <= 0.0001;
+  const startsAtNextWholeKm = Number.isInteger(previousToKm)
+    && Number.isInteger(slab.fromKm)
+    && Math.abs(previousToKm + 1 - slab.fromKm) <= 0.0001;
+  return startsAtBoundary || startsAtNextWholeKm ? previousToKm : slab.fromKm;
+}
+
 function validateAssistantMasterSlabs(slabs, label) {
   if (!slabs.length) throw new Error(`Add at least one ${label} slab.`);
   if (slabs.length > 20) throw new Error(`${label} supports a maximum of 20 slabs.`);
@@ -16379,7 +16935,12 @@ function validateAssistantMasterSlabs(slabs, label) {
     if (index === 0 && Math.abs(slab.fromKm) > tolerance) throw new Error(`${label}: the first slab must start at 0 km.`);
     if (index > 0) {
       const previous = slabs[index - 1];
-      if (previous.toKm === null || Math.abs(previous.toKm - slab.fromKm) > tolerance) throw new Error(`${label} slab ${index + 1} must start where slab ${index} ends.`);
+      const startsAtBoundary = previous.toKm !== null && Math.abs(previous.toKm - slab.fromKm) <= tolerance;
+      const startsAtNextWholeKm = previous.toKm !== null
+        && Number.isInteger(previous.toKm)
+        && Number.isInteger(slab.fromKm)
+        && Math.abs(previous.toKm + 1 - slab.fromKm) <= tolerance;
+      if (!startsAtBoundary && !startsAtNextWholeKm) throw new Error(`${label} slab ${index + 1} must start at the previous boundary or the next whole kilometre.`);
     }
   });
 }
@@ -16390,13 +16951,18 @@ function updateAssistantMasterSlabPreview(kind) {
   const distanceInput = form.querySelector(`[data-assistant-master-preview="${kind}"]`);
   const distanceKm = Math.max(0, Number(distanceInput?.value || 0));
   const slabs = assistantMasterCollectSlabs(form, kind);
-  let totalPaise = 0;
+  const collectedBasePaise = assistantMasterCollectBasePaise(form, kind);
+  const basePaise = Number.isInteger(collectedBasePaise) && collectedBasePaise >= 0 ? collectedBasePaise : 0;
+  let totalPaise = basePaise;
+  const baseCharge = form.querySelector(`[data-assistant-master-base-charge="${kind}"]`);
+  if (baseCharge) baseCharge.textContent = money(basePaise);
   const rows = [...form.querySelectorAll(`[data-assistant-master-slab][data-slab-kind="${kind}"]`)];
   rows.forEach((row, index) => {
     const slab = slabs[index];
     const upperBound = slab?.toKm == null ? distanceKm : slab.toKm;
+    const billableFromKm = assistantMasterSlabBillableFromKm(slabs, index);
     const billableKm = slab && Number.isFinite(slab.fromKm) && Number.isFinite(upperBound)
-      ? Math.max(0, Math.min(distanceKm, upperBound) - slab.fromKm)
+      ? Math.max(0, Math.min(distanceKm, upperBound) - billableFromKm)
       : 0;
     const amountPaise = billableKm <= 0 || !Number.isFinite(slab?.ratePaise)
       ? 0
@@ -16409,7 +16975,7 @@ function updateAssistantMasterSlabPreview(kind) {
     if (calculation) calculation.textContent = billableKm <= 0
       ? "Not reached"
       : slab.rateType === "fixed"
-        ? "Base fare"
+        ? "Fixed slab"
         : `${assistantMasterDecimal(billableKm)} km x ${money(slab.ratePaise)}`;
     if (charge) charge.textContent = money(amountPaise);
   });
@@ -16422,10 +16988,10 @@ function updateAssistantMasterSlabPreview(kind) {
   const finalToKm = slabs.at(-1)?.toKm;
   if (coverage) coverage.textContent = finalToKm !== null && Number.isFinite(finalToKm) && distanceKm > finalToKm
     ? `Distance above ${assistantMasterDecimal(finalToKm)} km is not covered by these slabs.`
-    : "Leave the final To distance blank to make that slab open-ended.";
+    : "The final To value may be bounded or left blank. Whole-kilometre bands can continue as 0-3, 4-8, 9-12.";
 }
 
-function assistantMasterSlabEditor(kind, title, description, slabs) {
+function assistantMasterSlabEditor(kind, title, description, slabs, { basePaise = null } = {}) {
   return `<section class="assistant-master-slab-section" data-assistant-master-slab-section="${escapeHtml(kind)}">
     <div class="assistant-master-section-head">
       <div><p>Distance Pricing</p><h2>${escapeHtml(title)}</h2><span>${escapeHtml(description)}</span></div>
@@ -16436,7 +17002,7 @@ function assistantMasterSlabEditor(kind, title, description, slabs) {
     <div class="table-responsive assistant-master-slab-table-wrap">
       <table class="table assistant-master-slab-table">
         <thead><tr><th>Distance slab</th><th>Rate</th><th>Calculation for <span data-assistant-master-preview-label="${escapeHtml(kind)}">20 km</span></th><th>Charge</th><th></th></tr></thead>
-        <tbody data-assistant-master-slab-list="${escapeHtml(kind)}">${slabs.map((slab, index) => assistantMasterSlabRow(slab, kind, index)).join("")}</tbody>
+        <tbody data-assistant-master-slab-list="${escapeHtml(kind)}">${basePaise === null ? "" : assistantMasterBasePriceRow(kind, basePaise)}${slabs.map((slab, index) => assistantMasterSlabRow(slab, kind, index)).join("")}</tbody>
         <tfoot><tr><td colspan="3"><strong>Total for <span data-assistant-master-preview-label="${escapeHtml(kind)}">20 km</span></strong></td><td><strong data-assistant-master-total="${escapeHtml(kind)}">${money(0)}</strong></td><td></td></tr></tfoot>
       </table>
     </div>
@@ -16479,7 +17045,7 @@ async function loadAssistantMasterValues() {
           </label>
         </div>
       </section>
-      ${assistantMasterSlabEditor("travelCostSlabs", "Travel Cost Slabs", "Progressive amount charged across each covered distance band.", travelCostSlabs)}
+      ${assistantMasterSlabEditor("travelCostSlabs", "Travel Cost Slabs", "Base price plus progressive amounts across each covered distance band.", travelCostSlabs, { basePaise: Number(settings.travelCostBasePaise ?? assistantMasterDefaultTravelCostBasePaise) })}
       ${assistantMasterSlabEditor("assistantTravelPayoutSlabs", "Assistant Travel Payout Slabs", "Independent progressive payout payable to the assistant.", payoutSlabs)}
       <div class="assistant-master-save-bar">
         <p>Rates are stored in paise and calculated progressively to avoid rounding drift.</p>
@@ -16794,7 +17360,7 @@ async function loadBookingEngineSettings() {
   $("#bookingEngineSettingsSection").innerHTML = `<div class="booking-engine-settings-grid">
     <div class="module-form-card">
       <div class="control-title"><div><p>Booking Engine</p><h3>Demand & Supply Control</h3></div><span>${escapeHtml(engine.isEnabled ? "ON" : "OFF")}</span></div>
-      <form class="module-form" data-form="booking-engine-settings">
+      <form class="module-form" data-form="booking-engine-settings" data-disable-extend-before-end-enabled="${engine.disableExtendBeforeEndEnabled === true ? "true" : "false"}" data-disable-extend-before-end-minutes="${escapeHtml(engine.disableExtendBeforeEndMinutes || 10)}">
         <label class="form-check"><input class="form-check-input" type="checkbox" name="isEnabled" ${engine.isEnabled !== false ? "checked" : ""}> Enable booking engine</label>
         <label class="form-check"><input class="form-check-input" type="checkbox" name="orchestrationWorkerEnabled" ${engine.orchestrationWorkerEnabled !== false ? "checked" : ""}> Enable orchestration worker</label>
         <label class="form-label">Business Model
@@ -16920,6 +17486,7 @@ const loaders = {
   payments: loadPayments,
   offerMaster: loadOfferMaster,
   assistantAvailable: loadAssistantAvailabilityBoard,
+  assistantSupport: loadAssistantSupport,
   bookingsReport: loadBookingsReport,
   customerReport: loadCustomerReport,
   assistantReport: loadAssistantReport,
@@ -16928,7 +17495,6 @@ const loaders = {
   unserviceableLocationsReport: loadUnserviceableLocationsReport,
   customerDisputes: loadCustomerDisputes,
   supportTickets: loadSupportTickets,
-  bookingMaster: loadBookingMaster,
   customers: loadCustomers,
   customerAddresses: loadCustomerAddressesScreen,
   masters: loadMasters,
@@ -16970,6 +17536,7 @@ const titles = {
   payments: "Payments",
   offerMaster: "Offer Master",
   assistantAvailable: "Assistant Available",
+  assistantSupport: "Assistant Support",
   bookingsReport: "Bookings Report",
   customerReport: "Customer Report",
   assistantReport: "Assistant Report",
@@ -16978,7 +17545,6 @@ const titles = {
   unserviceableLocationsReport: "Not Serviceable Locations",
   customerDisputes: "Customer Disputes",
   supportTickets: "Customer Support",
-  bookingMaster: "Booking Master",
   customers: "Customers",
   customerAddresses: "Customer Addresses",
   masters: "Masters",
@@ -17026,7 +17592,6 @@ async function showSection(section) {
   clearAlert();
   const nextSection = loaders[section] && $(`#${section}Section`) ? section : "dashboard";
   if (!locationHierarchyPages[nextSection]) { locationMapEditor?.destroy(); locationMapEditor = null; }
-  if (nextSection === "bookings") acknowledgeNewBookingAlert();
   state.section = nextSection;
   pageTitle.textContent = titles[nextSection] || nextSection;
   document.querySelectorAll(".page-section").forEach((sectionEl) => sectionEl.classList.add("d-none"));
@@ -17047,6 +17612,8 @@ function saveSession(data) {
   state.token = data.token;
   state.refreshToken = data.refreshToken || state.refreshToken || "";
   state.user = data.user;
+  bookingBellPreferences = normalizeBookingBellPreferences(state.user?.metadata?.adminBookingBellPreferences);
+  applyBookingBellPreferences();
   state.roles = data.roles || [];
   localStorage.setItem("zigoAdminToken", data.token);
   if (state.refreshToken) localStorage.setItem("zigoAdminRefreshToken", state.refreshToken);
@@ -17517,12 +18084,12 @@ function resetUserForm() {
   $("#cancelUserEditButton").classList.add("d-none");
 }
 
-function showAdmin() {
+function showAdmin(options = {}) {
   $("#loginView").classList.add("d-none");
   $("#adminView").classList.remove("d-none");
   renderSignedInProfile();
   startBookingRealtime();
-  refreshPendingAssignmentCount().catch(() => {});
+  if (options.announcePending !== false) announcePendingBookingsOnAdminEntry().catch(() => {});
 }
 
 $("#loginForm").addEventListener("submit", async (event) => {
@@ -17541,6 +18108,27 @@ $("#loginForm").addEventListener("submit", async (event) => {
 
 document.addEventListener("submit", async (event) => {
   const form = event.target;
+  if (form instanceof HTMLFormElement && form.id === "customerReportEditForm") {
+    event.preventDefault();
+    await saveCustomerReportEditor(form);
+    return;
+  }
+  if (form instanceof HTMLFormElement && form.matches("[data-admin-assistant-support-message-form]")) {
+    event.preventDefault();
+    const ticketId = form.dataset.id || "";
+    const data = formObject(form);
+    const submit = form.querySelector("button[type='submit']");
+    if (submit) submit.disabled = true;
+    try {
+      const payload = await api(`/support/assistant/tickets/${encodeURIComponent(ticketId)}/messages`, { method: "POST", body: JSON.stringify({ message: data.message }) });
+      cache.assistantSupportDetail = payload.data || cache.assistantSupportDetail;
+      await loadAssistantSupport({ ticketId });
+    } catch (error) {
+      showAlert(error.message || "Unable to send assistant support reply.");
+      if (submit) submit.disabled = false;
+    }
+    return;
+  }
   if (form instanceof HTMLFormElement && form.matches("[data-admin-support-message-form]")) {
     event.preventDefault();
     const ticketId = form.dataset.id || "";
@@ -17599,6 +18187,7 @@ document.addEventListener("submit", async (event) => {
           mode: form.dataset.assignmentMode || 'offer'
         })
       });
+      schedulePendingAssignmentCountRefresh(0);
       $("#assignBookingModal").classList.add("d-none");
       await loadBookings("assigned");
     } catch (error) {
@@ -17787,9 +18376,30 @@ document.addEventListener("submit", async (event) => {
   try {
     const data = formObject(form);
     const formName = form.dataset.form;
+    if (formName === "booking-extension-policy") {
+      const disableExtendBeforeEndMinutes = Math.round(Number(data.disableExtendBeforeEndMinutes || bookingEngineExtensionPolicy.disableExtendBeforeEndMinutes || 10));
+      if (!Number.isInteger(disableExtendBeforeEndMinutes) || disableExtendBeforeEndMinutes < 1 || disableExtendBeforeEndMinutes > 1440) {
+        throw new Error("Enter Disable Extend minutes between 1 and 1440.");
+      }
+      const payload = await api("/settings/booking-extension-policy", {
+        method: "PUT",
+        body: JSON.stringify({
+          disableExtendBeforeEndEnabled: Boolean(data.disableExtendBeforeEndEnabled),
+          disableExtendBeforeEndMinutes
+        })
+      });
+      bookingEngineExtensionPolicy = { ...bookingEngineExtensionPolicy, ...(payload.data || {}) };
+      syncBookingEngineExtensionPolicyControl(form);
+      showAlert("Extend control saved successfully.", "success");
+      return;
+    }
     if (formName === "assistant-master-values") {
       const travelCostSlabs = assistantMasterCollectSlabs(form, "travelCostSlabs");
       const assistantTravelPayoutSlabs = assistantMasterCollectSlabs(form, "assistantTravelPayoutSlabs");
+      const travelCostBasePaise = assistantMasterCollectBasePaise(form, "travelCostSlabs");
+      if (!Number.isInteger(travelCostBasePaise) || travelCostBasePaise < 0 || travelCostBasePaise > 100_000_000) {
+        throw new Error("Travel Cost: enter a valid base price.");
+      }
       validateAssistantMasterSlabs(travelCostSlabs, "Travel Cost");
       validateAssistantMasterSlabs(assistantTravelPayoutSlabs, "Assistant Travel Payout");
       await api("/settings/assistant-master", {
@@ -17798,6 +18408,7 @@ document.addEventListener("submit", async (event) => {
           broadcastTimeSeconds: Number(data.broadcastTimeSeconds),
           autoArrivedRadiusMeters: Number(data.autoArrivedRadiusMeters),
           dryRunDistanceKm: Number(data.dryRunDistanceKm),
+          travelCostBasePaise,
           travelCostSlabs,
           assistantTravelPayoutSlabs
         })
@@ -18593,6 +19204,7 @@ document.addEventListener("submit", async (event) => {
         method: "POST",
         body: JSON.stringify({ assistantId: data.assistantId, reason: data.reason,mode:mode === 'assign' ? 'offer' : 'confirm' })
       });
+      schedulePendingAssignmentCountRefresh(0);
     }
     if (formName === "media-paths") {
       await api("/settings/media-paths", {
@@ -18672,6 +19284,8 @@ document.addEventListener("submit", async (event) => {
           manualAssignBeforeStartMinutes: Number(data.manualAssignBeforeStartMinutes || 15),
           instantAutoMaxWaitMinutes: Number(data.instantAutoMaxWaitMinutes || 45),
           defaultWaitWindowMinutes: Number(data.defaultWaitWindowMinutes || 0),
+          disableExtendBeforeEndEnabled: form.dataset.disableExtendBeforeEndEnabled === "true",
+          disableExtendBeforeEndMinutes: Number(form.dataset.disableExtendBeforeEndMinutes || 10),
           customerAssistantDelayCancelOpenMinutes: Number(data.customerAssistantDelayCancelOpenMinutes || 10),
           customerAssistantDelayAutoCancelMinutes: Number(data.customerAssistantDelayAutoCancelMinutes || 30),
           capacityHoldMinutes: Number(data.capacityHoldMinutes || 10),
@@ -18928,6 +19542,10 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   const input = event.target;
+  if (input instanceof HTMLInputElement && input.matches("[data-booking-extension-policy-toggle]")) {
+    syncBookingEngineExtensionPolicyControl(input.closest("form"));
+    return;
+  }
   const assistantMasterSlabSection = input.closest?.("[data-assistant-master-slab-section]");
   if (assistantMasterSlabSection) {
     updateAssistantMasterSlabPreview(assistantMasterSlabSection.dataset.assistantMasterSlabSection);
@@ -19436,7 +20054,13 @@ document.addEventListener("change", async (event) => {
       showAlert(`${files.length} image${files.length === 1 ? "" : "s"} uploaded.`, "success");
       return;
     }
+    if (input.dataset.imageUpload === "customerReportProfilePicture") {
+      setCustomerReportModalAlert("Uploading profile picture...", "warning");
+    }
     const uploaded = await uploadImageFile(file, input.dataset.imageUpload);
+    if (input.dataset.imageUpload === "customerReportProfilePicture") {
+      setCustomerReportModalAlert("Profile picture uploaded. Update the customer to save it.", "success");
+    }
     if (input.dataset.imageUpload === "bookingMasterDetailImage") {
       bookingMasterDetailImageUrl = uploaded.imageUrl || "";
     }
@@ -19462,7 +20086,8 @@ document.addEventListener("change", async (event) => {
       $("#damageProofGallery").innerHTML = imageUrlGallery(urls, "remove-damage-proof-url");
     }
   } catch (error) {
-    showAlert(error.message);
+    if (input.dataset.imageUpload === "customerReportProfilePicture") setCustomerReportModalAlert(error.message);
+    else showAlert(error.message);
   } finally {
     input.value = "";
   }
@@ -19649,7 +20274,8 @@ document.addEventListener("click", async (event) => {
       if (slabs.length >= 20) throw new Error("A maximum of 20 distance slabs is allowed.");
       const last = slabs.at(-1);
       if (last?.toKm == null && slabs.length) throw new Error("Enter the final To distance before adding another slab.");
-      const fromKm = last?.toKm ?? 0;
+      const useWholeKmBands = last?.toKm != null && Number.isInteger(last.fromKm) && Number.isInteger(last.toKm);
+      const fromKm = last?.toKm == null ? 0 : last.toKm + (useWholeKmBands ? 1 : 0);
       const previousWidth = last?.toKm != null && Number.isFinite(last.fromKm) ? Math.max(1, last.toKm - last.fromKm) : 5;
       const list = form.querySelector(`[data-assistant-master-slab-list="${kind}"]`);
       list?.insertAdjacentHTML("beforeend", assistantMasterSlabRow({ fromKm, toKm: fromKm + previousWidth, rateType: "per_km", ratePaise: last?.ratePaise ?? 0 }, kind, slabs.length));
@@ -20051,6 +20677,37 @@ document.addEventListener("click", async (event) => {
     await loadCustomerDisputes();
     return;
   }
+  if (action === "assistant-support-apply") {
+    assistantSupportFilters.search = $("#assistantSupportSearch")?.value || "";
+    assistantSupportFilters.status = $("#assistantSupportStatus")?.value || "all";
+    assistantSupportFilters.page = 1;
+    await loadAssistantSupport();
+    return;
+  }
+  if (action === "assistant-support-page") {
+    assistantSupportFilters.page = Math.max(1, Number(button.dataset.page || 1));
+    await loadAssistantSupport();
+    return;
+  }
+  if (action === "open-assistant-support-ticket") {
+    await openAdminAssistantSupportTicket(id || button.closest("[data-id]")?.dataset.id || "");
+    return;
+  }
+  if (action === "update-assistant-support-ticket") {
+    const ticketId = id || "";
+    const payload = await api(`/support/assistant/tickets/${encodeURIComponent(ticketId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        statusCode: $("#assistantSupportDetailStatus")?.value,
+        priorityCode: $("#assistantSupportDetailPriority")?.value,
+        assignToMe: true
+      })
+    });
+    cache.assistantSupportDetail = payload.data || cache.assistantSupportDetail;
+    await loadAssistantSupport({ ticketId });
+    showAlert("Assistant support chat updated.", "success");
+    return;
+  }
   if (action === "support-ticket-apply") {
     supportTicketFilters.search = $("#supportTicketSearch")?.value || "";
     supportTicketFilters.status = $("#supportTicketStatus")?.value || "all";
@@ -20336,6 +20993,14 @@ document.addEventListener("click", async (event) => {
     }
     if (action === "edit-admin-customer") {
       await editAdminCustomer(id);
+      return;
+    }
+    if (action === "delete-customer-report") {
+      await openCustomerReportDeleteConfirm(id);
+      return;
+    }
+    if (action === "confirm-delete-customer-report") {
+      await deleteCustomerFromReport(id);
       return;
     }
     if (action === "select-customer-address-location") {
@@ -22098,9 +22763,28 @@ document.addEventListener("click", async (event) => {
   await loadDashboard();
 });
 bookingBellButton?.addEventListener("click", () => {
-  acknowledgeNewBookingAlert();
   if (state.section === "bookings") loadBookings(bookingActiveTab).catch((error) => showAlert(error.message));
   else showSection("bookings").catch((error) => showAlert(error.message));
+});
+document.addEventListener("input", (event) => {
+  const input = event.target.closest?.("[data-booking-bell-volume]");
+  if (!input || input.disabled) return;
+  updateBookingBellPreferences({ volume: Number(input.value) / 100 });
+});
+document.addEventListener("change", (event) => {
+  const mute = event.target.closest?.("[data-booking-bell-muted]");
+  if (mute) {
+    updateBookingBellPreferences({ muted: mute.checked }, { immediate: true });
+    return;
+  }
+  const range = event.target.closest?.("[data-booking-bell-volume]");
+  if (range && !range.disabled) scheduleBookingBellPreferenceSave(0);
+});
+document.addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-booking-bell-volume-step]");
+  if (!button || button.disabled) return;
+  const step = Number(button.dataset.bookingBellVolumeStep || 0);
+  updateBookingBellPreferences({ volume: bookingBellPreferences.volume + step }, { immediate: true });
 });
 $("#profileChipButton").addEventListener("click", openProfileModal);
 $("#closeProfileModalButton").addEventListener("click", closeProfileModal);
@@ -22303,8 +22987,9 @@ if (state.token || state.refreshToken) {
       try { await refreshAdminSession(); }
       catch (error) { if ([400,401,403].includes(Number(error.status))) { clearAdminSession(); return; } }
     }
-    showAdmin();
+    showAdmin({ announcePending: false });
     await refreshSignedInUser().catch(() => {});
+    announcePendingBookingsOnAdminEntry().catch(() => {});
     if (state.token) showSection('dashboard');
   })();
 }

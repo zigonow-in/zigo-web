@@ -692,8 +692,18 @@ operationsRouter.post("/bookings/:id/cancel", requirePermission("service_request
                 assistantId: audience.assistantId ?? undefined,
                 clusterId: audience.clusterId ?? undefined,
                 tab: "cancelled",
-                message: "Booking cancelled",
-                payload: { bookingId: id, customerUserId: audience.customerUserId }
+                message: "Booking cancelled by admin",
+                payload: {
+                    bookingId: id,
+                    customerUserId: audience.customerUserId,
+                    statusCode: "cancelled",
+                    assignmentStatus: "cancelled",
+                    reason,
+                    reasonCode: "admin_cancelled_booking",
+                    cancelledBy: "admin",
+                    cancellationSource: "admin_panel",
+                    autoCancelled: false
+                }
             });
             await emitBookingAssistantsAssignmentRealtimeChange(id);
         }

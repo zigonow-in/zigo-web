@@ -1677,6 +1677,16 @@ h1, h2, h3, h4, h5, h6 {
   color: #15803d;
 }
 
+.assistant-online-toggle.is-online.has-gps-warning {
+  background: #fef3c7;
+  color: #a16207;
+}
+
+.assistant-online-toggle:disabled {
+  cursor: wait;
+  opacity: .72;
+}
+
 .assistant-online-toggle.is-offline {
   background: #fee2e2;
   color: #b91c1c;
@@ -3902,6 +3912,31 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .assistant-confirm-pin:focus {
+  border-color: var(--zigo-blue);
+  box-shadow: 0 0 0 3px rgba(7, 94, 234, 0.12);
+}
+
+.assistant-confirm-reason {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  min-height: 88px;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px 12px;
+  color: #0b1736;
+  background: #fff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0;
+  resize: vertical;
+  outline: none;
+}
+
+.assistant-confirm-reason:focus {
   border-color: var(--zigo-blue);
   box-shadow: 0 0 0 3px rgba(7, 94, 234, 0.12);
 }
@@ -7906,6 +7941,11 @@ body.portal-customer .customer-review-notification-stack > .portal-toast.is-revi
   animation: customerLocationPickerSlideIn 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+.customer-location-picker-overlay.is-stable,
+.customer-location-picker-overlay.is-stable .customer-location-picker-panel {
+  animation: none;
+}
+
 @keyframes customerLocationPickerFadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -7928,6 +7968,7 @@ body.portal-customer .customer-review-notification-stack > .portal-toast.is-revi
   background: #f5f7fc;
   box-shadow: 0 -18px 40px rgba(15, 23, 42, 0.18);
   -webkit-overflow-scrolling: touch;
+  overflow-anchor: none;
 }
 
 .customer-location-picker-close {
@@ -8246,6 +8287,10 @@ body.portal-customer .customer-review-notification-stack > .portal-toast.is-revi
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.16);
 }
 
+.customer-location-search-clear[hidden] {
+  display: none;
+}
+
 .customer-location-search-clear .customer-lucide {
   width: 13px;
   height: 13px;
@@ -8256,6 +8301,55 @@ body.portal-customer .customer-review-notification-stack > .portal-toast.is-revi
 .customer-location-search-results {
   display: grid;
   gap: 10px;
+}
+
+.customer-location-search-group-head {
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.customer-location-search-group-head h3 {
+  flex: 1 1 auto;
+}
+
+.customer-location-search-progress {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  border: 2px solid #d7e3f8;
+  border-top-color: var(--zigo-blue);
+  border-radius: 50%;
+  opacity: 0;
+  visibility: hidden;
+}
+
+.customer-location-search-results.is-loading .customer-location-search-progress {
+  opacity: 1;
+  visibility: visible;
+  animation: customerLocationSearchSpin 700ms linear infinite;
+}
+
+.customer-location-search-results.is-loading [data-location-search-list] {
+  pointer-events: none;
+}
+
+.customer-location-search-list {
+  display: grid;
+  gap: 10px;
+  min-height: 42px;
+}
+
+@keyframes customerLocationSearchSpin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .customer-location-search-results.is-loading .customer-location-search-progress {
+    animation: none;
+  }
 }
 
 .customer-location-search-group {
@@ -21567,13 +21661,44 @@ body.portal-customer .customer-route-boundary {
 }
 
 body.portal-customer .customer-route-summary-card.current-only {
-  grid-template-columns: 12px minmax(0, 1fr);
+  grid-template-columns: 12px minmax(0, 1fr) 30px;
   min-height: 46px;
 }
 
 body.portal-customer .customer-route-summary-card.single-location {
   align-items: start;
   padding: 0;
+}
+
+body.portal-customer .customer-route-location-action,
+body.portal-customer .customer-route-detail-actions button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+}
+
+body.portal-customer .customer-route-location-action.edit,
+body.portal-customer .customer-route-detail-actions button.edit {
+  background: #edf5ff;
+  color: var(--zigo-blue);
+}
+
+body.portal-customer .customer-route-detail-actions button.delete {
+  background: #fff0f1;
+  color: #dc2626;
+}
+
+body.portal-customer .customer-route-location-action .customer-lucide,
+body.portal-customer .customer-route-detail-actions .customer-lucide {
+  width: 15px;
+  height: 15px;
+  stroke-width: 2.4;
 }
 
 body.portal-customer .customer-route-dot.start {
@@ -21731,13 +21856,12 @@ body.portal-customer .customer-cart-locations.is-expanded .customer-route-detail
 body.portal-customer .customer-route-detail-row {
   position: relative;
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) 30px;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   gap: 8px;
   min-height: 68px;
   align-items: center;
   color: #263043;
   touch-action: none;
-  cursor: pointer;
   transition: transform 160ms ease, background 160ms ease, box-shadow 160ms ease;
 }
 
@@ -21827,17 +21951,13 @@ body.portal-customer .customer-route-detail-copy small {
   overflow-wrap: anywhere;
 }
 
-body.portal-customer .customer-route-detail-row > button {
-  width: 28px;
-  height: 28px;
-  display: grid;
+body.portal-customer .customer-route-detail-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
   align-self: center;
-  place-items: center;
   margin: 0;
-  border: 0;
-  border-radius: 999px;
-  background: #fff0f1;
-  color: #dc2626;
 }
 
 body.portal-customer .customer-route-delete-card {
@@ -24448,13 +24568,24 @@ body.portal-customer .customer-login-gallery-track.reverse {
   bottom: auto;
 }
 /* Track Booking: one clear service-extension action inside the category card. */
-.portal-customer .customer-track-extend-service {
+.portal-customer .customer-track-extension-control {
   width: min(100%, 320px);
+  display: grid;
+  gap: 6px;
+  margin: 12px auto 2px;
+}
+
+.portal-customer .customer-track-extension-control[hidden] {
+  display: none;
+}
+
+.portal-customer .customer-track-extend-service {
+  width: 100%;
   min-height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 12px auto 2px;
+  margin: 0;
   padding: 11px 20px;
   border: 0;
   border-radius: 12px;
@@ -24470,6 +24601,15 @@ body.portal-customer .customer-login-gallery-track.reverse {
 .portal-customer .customer-track-extend-service:active {
   transform: translateY(1px);
 }
+
+.portal-customer .customer-track-extend-service:disabled {
+  cursor: not-allowed;
+  background: #e2e8f0;
+  color: #64748b;
+  box-shadow: none;
+  transform: none;
+}
+
 /* Track Booking extension duration selector and fixed payment action. */
 body.portal-customer .customer-track-extension-sheet {
   display: flex;
@@ -24774,10 +24914,15 @@ body.portal-customer .customer-track-extension-loading.is-error {
   }
 }
 
+.portal-customer .customer-track-working-countdown .customer-track-extension-control {
+  width: 100%;
+  margin: 2px 0 0;
+}
+
 .portal-customer .customer-track-working-countdown .customer-track-extend-service {
   width: 100%;
   min-height: 44px;
-  margin: 2px 0 0;
+  margin: 0;
   border-radius: 10px;
   background: #075eea;
   box-shadow: none;
@@ -25307,8 +25452,9 @@ body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-tas
 .assistant-dashboard-actions button { display:flex; gap:8px; align-items:center; width:100%; background:#fff; color:#0754c9; border:1px solid #d2e3ff; border-radius:8px; padding:12px; font-size:13px; font-weight:700; }
 .assistant-dashboard-actions svg { width:18px; height:18px; }
 .assistant-dashboard-actions b { margin-left:auto; }
-.assistant-processing-tabs { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:4px; padding:12px 0; }
-.assistant-processing-tabs button { min-width:0; border:1px solid #d2e3ff; background:white; border-radius:6px; padding:8px 2px; font-size:10px; white-space:nowrap; color:#475569; }
+.assistant-processing-tabs { display:flex; gap:6px; padding:12px 0; overflow-x:auto; overscroll-behavior-inline:contain; scrollbar-width:none; }
+.assistant-processing-tabs::-webkit-scrollbar { display:none; }
+.assistant-processing-tabs button { display:inline-flex; flex:0 0 auto; align-items:center; justify-content:center; width:max-content; min-width:max-content; border:1px solid #d2e3ff; background:white; border-radius:6px; padding:8px 10px; font-size:10px; white-space:nowrap; color:#475569; }
 .assistant-processing-tabs button.active { background:#0754c9; color:white; }
 .assistant-bottom-nav.assistant-main-nav { grid-template-columns:repeat(4,minmax(0,1fr)); }
 .assistant-main-nav button { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; min-width:0; }
@@ -25483,10 +25629,265 @@ body.portal-customer .customer-cart-bar .customer-ongoing-task-card.has-live-tas
 .customer-track-sdk-map { height:300px; min-height:240px; border-radius:8px; touch-action:none; }
 .customer-stop-sdk-map { height:360px; min-height:240px; border-radius:8px; }
 .customer-track-map-sheet { max-height:90dvh; overflow:auto; }
-.customer-track-location-row > button[data-customer-stop-map] { width:32px; height:32px; border:1px solid #dce5ef; background:#fff; color:#0754c9; border-radius:6px; flex-shrink:0; }
+.customer-track-location-row > button[data-customer-stop-map] {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: start;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #dce5ef;
+  border-radius: 6px;
+  background: #fff;
+  color: #0754c9;
+  flex-shrink: 0;
+}
 .customer-track-location-row > button[data-customer-stop-map] svg { width:16px; height:16px; }
+
+/* Keep every route point, connector and navigation action on one axis. */
+.portal-customer .customer-track-page .customer-track-location-card::before,
+.portal-customer .customer-track-page .customer-track-location-card::after {
+  display: none !important;
+}
+
+.portal-customer .customer-track-page .customer-track-location-row-static {
+  position: relative;
+  grid-template-columns: 18px minmax(0, 1fr) 32px !important;
+  align-items: start;
+  gap: 8px;
+  padding: 4px 0 10px;
+}
+
+.portal-customer .customer-track-page .customer-track-location-row-static:last-child {
+  padding-bottom: 4px;
+}
+
+.portal-customer .customer-track-page .customer-track-location-row-static:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  left: 8px;
+  top: 14px;
+  bottom: -14px;
+  width: 1px;
+  background: #b8c4d4;
+}
+
+.portal-customer .customer-track-page .customer-track-location-row-static .customer-track-location-pin {
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border: 1px solid #93b7ff;
+  border-radius: 999px;
+  background: #edf4ff;
+  color: #075eea;
+}
+
+.portal-customer .customer-track-page .customer-track-location-row-static.start .customer-track-location-pin {
+  border-color: #83d4a8;
+  background: #eaf8f0;
+  color: #119653;
+}
+
+.portal-customer .customer-track-page .customer-track-location-row-static.end .customer-track-location-pin {
+  border-color: #f3a6ab;
+  background: #fff0f1;
+  color: #dc3040;
+}
+
+.portal-customer .customer-track-page .customer-track-location-row-static .customer-track-location-pin .customer-track-svg {
+  width: 10px;
+  height: 10px;
+}
+
+body.portal-customer .customer-route-dot.start,
+body.portal-customer .customer-route-detail-row.start .customer-route-detail-marker {
+  border-color: #b7e4c9;
+  background: #16a05d;
+}
+
+body.portal-customer .customer-route-detail-row.middle .customer-route-detail-marker {
+  background: #075eea;
+}
+
+.assistant-track-page .assistant-stop-preview.start i,
+.assistant-track-page .assistant-stop-list .start .assistant-stop-number {
+  border-color: #ffffff;
+  outline-color: #9bd9b8;
+  background: #16a05d;
+}
+
+.assistant-track-page .assistant-stop-list .intermediate .assistant-stop-number {
+  background: #075eea;
+}
+
+.assistant-track-page .assistant-stop-preview.destination i,
+.assistant-track-page .assistant-stop-list .destination .assistant-stop-number {
+  outline-color: #ffbcbc;
+  background: #ef3d36;
+}
 .location-map-loading button, .zigo-live-map-status button { display:block; margin:8px auto 0; padding:8px 12px; border:1px solid #bdd2f0; border-radius:6px; background:white; color:#0754c9; font-size:12px; }
 body.portal-customer .location-map-pick-screen .customer-location-real-map { position:absolute; inset:0; width:100%; height:100%; min-height:100%; }
+
+/* Customer destination picker: stable forward/reverse geocoding feedback over Ola Maps. */
+body.portal-customer .location-map-pick-screen .customer-location-map-address {
+  position: absolute;
+  top: 10px;
+  left: 70px;
+  right: 16px;
+  z-index: 11;
+  min-width: 0;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid rgba(218, 226, 236, 0.96);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 8px 24px rgba(24, 39, 63, 0.14);
+  pointer-events: none;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-address-icon {
+  display: none;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-address-copy {
+  min-width: 0;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-address-copy b,
+body.portal-customer .location-map-pick-screen .customer-location-map-address-copy small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-address-copy b {
+  color: #243244;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-address-copy small {
+  margin-top: 2px;
+  color: #6b7788;
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-geocode-spinner {
+  width: 17px;
+  height: 17px;
+  border: 2px solid #d7e3f8;
+  border-top-color: #075eea;
+  border-radius: 50%;
+  opacity: 0;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-address.is-loading .customer-location-geocode-spinner {
+  opacity: 1;
+  animation: customer-geocode-spin 680ms linear infinite;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-address.is-moving {
+  border-color: #bfd3f4;
+}
+
+body.portal-customer .location-map-pick-screen .location-map-zoom-controls {
+  top: 74px !important;
+}
+
+body.portal-customer .location-map-pick-screen .location-current-btn {
+  bottom: 38px;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-pin {
+  width: 38px;
+  height: 38px;
+  border: 2px solid #064fc7;
+  background:
+    radial-gradient(circle at 34% 24%, rgba(255, 255, 255, 0.42) 0 7%, transparent 25%),
+    linear-gradient(145deg, #3a8cff 0%, var(--zigo-blue) 54%, #0348b9 100%);
+  box-shadow:
+    0 9px 20px rgba(7, 94, 234, 0.36),
+    inset 0 1px 1px rgba(255, 255, 255, 0.3);
+  transform: translate(-50%, -68%);
+  transition: transform 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-pin::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  margin: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(3, 42, 103, 0.32);
+  transform: none;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-pin::after {
+  content: "";
+  bottom: -10px;
+  border-width: 10px 9px 0;
+  border-top-color: #0452cf;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-pin > svg {
+  display: none;
+}
+
+body.portal-customer .location-map-pick-screen .customer-location-map-pin.is-moving {
+  transform: translate(-50%, -84%);
+  box-shadow:
+    0 14px 26px rgba(7, 94, 234, 0.42),
+    inset 0 1px 1px rgba(255, 255, 255, 0.3);
+}
+
+body.portal-customer .customer-location-search-result-card.is-resolving {
+  position: relative;
+  padding-right: 44px;
+  cursor: wait;
+  opacity: 0.74;
+}
+
+body.portal-customer .customer-location-search-result-card.is-resolving::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 9px);
+  right: 14px;
+  width: 17px;
+  height: 17px;
+  border: 2px solid #d7e3f8;
+  border-top-color: #075eea;
+  border-radius: 50%;
+  animation: customer-geocode-spin 680ms linear infinite;
+}
+
+@keyframes customer-geocode-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 360px) {
+  body.portal-customer .location-map-pick-screen .customer-location-map-address {
+    left: 66px;
+    right: 12px;
+    padding-inline: 10px;
+  }
+}
 .assistant-track-page .assistant-stops-header { gap:6px; align-items:center; }
 .assistant-track-page .assistant-stops-overview { flex:1; min-width:0; gap:6px; margin:0; }
 .assistant-stop-preview { display:flex; align-items:center; gap:6px; flex:1; min-width:0; }
@@ -25576,6 +25977,16 @@ body.portal-customer .location-map-pick-screen .customer-location-real-map { pos
 .zigo-navigation-rider { width:38px; height:38px; border:3px solid white; border-radius:50%; background:#0dab5b; color:white; box-shadow:0 2px 8px #0004; display:grid; place-items:center; }
 .zigo-navigation-rider::before { content:""; position:absolute; top:-12px; left:11px; border-left:8px solid transparent; border-right:8px solid transparent; border-bottom:12px solid #0dab5b; }
 .zigo-navigation-rider svg { width:25px; height:25px; }
+.zigo-navigation-rider.uses-bike-image { width:54px; height:54px; border:0; border-radius:0; background:transparent; color:transparent; box-shadow:none; }
+.zigo-navigation-rider.uses-bike-image::before { display:none; }
+.zigo-navigation-rider.uses-bike-image img { width:100%; height:100%; display:block; object-fit:contain; pointer-events:none; user-select:none; filter:drop-shadow(0 3px 3px #001a4d59); }
+.zigo-navigation-rider.uses-assistant-avatar { width:50px; height:58px; border:0; border-radius:0; background:transparent; color:white; box-shadow:none; display:flex; align-items:flex-start; justify-content:center; }
+.zigo-navigation-rider.uses-assistant-avatar::before { display:none; }
+.zigo-assistant-map-avatar { position:relative; z-index:2; display:grid; place-items:center; width:42px; height:42px; overflow:hidden; border:3px solid white; border-radius:50%; outline:2px solid #075eea; background:#075eea; box-shadow:0 3px 9px #001a4d4d; color:white; font:700 13px Arial,sans-serif; }
+.zigo-assistant-map-avatar > span { grid-area:1 / 1; }
+.zigo-assistant-map-avatar img { grid-area:1 / 1; width:100%; height:100%; object-fit:cover; opacity:0; }
+.zigo-assistant-map-avatar.has-image img { opacity:1; }
+.zigo-assistant-map-pin { position:absolute; z-index:1; top:39px; left:50%; width:13px; height:13px; border-right:2px solid white; border-bottom:2px solid white; border-radius:0 0 3px 0; background:#075eea; transform:translateX(-50%) rotate(45deg); box-shadow:2px 2px 4px #001a4d33; }
 .zigo-navigation-rider[hidden] { display:none; }
 .is-navigation .zigo-live-map-status { top:auto; bottom:4px; left:12px; font-size:10px; }
 .assistant-arrival-status { grid-column:1 / -1; font-size:11px; line-height:1.4; color:#536176; }
@@ -25597,6 +26008,52 @@ body.portal-customer .location-map-pick-screen .customer-location-real-map { pos
 .assistant-offer-actions button { border:0; border-radius:6px; min-height:44px; font-size:13px; font-weight:700; background:#fff0ef; color:#ce2531; }
 .assistant-offer-actions button[data-assistant-offer-response="accepted"] { background:#075eea; color:white; }
 .assistant-offer-actions button:disabled { opacity:.5; }
+.assistant-mobile-task .task-actions [data-open-assistant-help],
+.assistant-track-page .task-chat-footer [data-open-assistant-help] { display:flex; align-items:center; justify-content:center; gap:6px; }
+.assistant-mobile-task .task-actions [data-open-assistant-help] svg,
+.assistant-track-page .task-chat-footer [data-open-assistant-help] svg { width:16px; height:16px; }
+.assistant-support-backdrop { position:fixed; inset:0; z-index:1400; display:flex; align-items:flex-end; justify-content:center; background:rgba(12,22,39,.5); }
+.assistant-support-sheet { width:min(100%,480px); max-height:min(720px,92dvh); display:flex; flex-direction:column; overflow:hidden; border-radius:8px 8px 0 0; background:#fff; color:#142139; font-family:Arial,Helvetica,sans-serif; box-shadow:0 -10px 32px rgba(15,23,42,.16); }
+.assistant-support-sheet > header { min-height:62px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid #e7ecf3; box-sizing:border-box; }
+.assistant-support-sheet > header small { display:block; margin-bottom:3px; color:#66738a; font-size:9px; font-weight:700; }
+.assistant-support-sheet > header h2 { margin:0; font-size:17px; line-height:1.25; }
+.assistant-support-sheet > header button { width:36px; height:36px; display:grid; place-items:center; flex-shrink:0; border:1px solid #dfe6ef; border-radius:8px; background:#fff; color:#27364d; }
+.assistant-support-sheet > header button svg { width:18px; height:18px; }
+.assistant-support-error { margin:10px 16px 0; padding:9px 10px; border-radius:6px; background:#fff0f1; color:#bd1d32; font-size:11px; line-height:1.4; }
+.assistant-support-options { display:grid; gap:10px; padding:18px 16px max(18px,var(--safe-bottom)); }
+.assistant-support-options > p { margin:0 0 4px; color:#657187; font-size:12px; line-height:1.5; }
+.assistant-support-options > a,
+.assistant-support-options > button { width:100%; min-height:62px; display:grid; grid-template-columns:38px minmax(0,1fr) auto; align-items:center; gap:10px; box-sizing:border-box; border:1px solid #dce5f2; border-radius:8px; padding:10px 12px; background:#fff; color:#142139; text-align:left; text-decoration:none; }
+.assistant-support-options > a > svg,
+.assistant-support-options > button > svg:first-child { width:22px; height:22px; color:#075eea; }
+.assistant-support-options > button > svg:last-child { width:16px; height:16px; color:#6a7890; }
+.assistant-support-options span { min-width:0; display:grid; gap:3px; }
+.assistant-support-options small { color:#6b778d; font-size:9px; }
+.assistant-support-options b { font-size:13px; overflow-wrap:anywhere; }
+.assistant-support-options > button:disabled { opacity:.55; }
+.assistant-support-chat { min-height:360px; height:min(610px,78dvh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; overflow:hidden; }
+.assistant-support-contact { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 16px; border-bottom:1px solid #edf1f6; }
+.assistant-support-contact > span { min-width:0; display:grid; gap:3px; }
+.assistant-support-contact b { font-size:11px; color:#0754c9; }
+.assistant-support-contact small { max-width:280px; overflow:hidden; color:#68758a; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.assistant-support-contact > a { width:34px; height:34px; display:grid; place-items:center; flex-shrink:0; border:1px solid #dbe5f2; border-radius:50%; color:#075eea; }
+.assistant-support-contact > a svg { width:16px; height:16px; }
+.assistant-support-messages { min-height:0; display:flex; flex-direction:column; gap:8px; overflow-y:auto; padding:14px 16px; background:#f7f9fc; }
+.assistant-support-messages article { max-width:82%; align-self:flex-start; border:1px solid #e0e6ef; border-radius:8px 8px 8px 2px; padding:9px 10px; background:#fff; }
+.assistant-support-messages article.own { align-self:flex-end; border-color:#cfe0fb; border-radius:8px 8px 2px 8px; background:#eaf2ff; }
+.assistant-support-messages article b { display:block; color:#0754c9; font-size:9px; }
+.assistant-support-messages article p { margin:3px 0; font-size:11px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; }
+.assistant-support-messages article time { display:block; color:#778399; font-size:8px; text-align:right; }
+.assistant-support-empty { min-height:100%; display:grid; place-content:center; justify-items:center; gap:8px; color:#738096; text-align:center; }
+.assistant-support-empty span { width:38px; height:38px; display:grid; place-items:center; border-radius:50%; background:#e8f1ff; color:#075eea; }
+.assistant-support-empty svg { width:19px; height:19px; }
+.assistant-support-empty p { max-width:230px; margin:0; font-size:11px; line-height:1.5; }
+.assistant-support-composer { min-height:58px; display:grid; grid-template-columns:minmax(0,1fr) 42px; align-items:center; gap:8px; padding:7px 12px max(7px,var(--safe-bottom)); border-top:1px solid #e3e9f1; background:#fff; }
+.assistant-support-composer input { width:100%; min-width:0; min-height:42px; box-sizing:border-box; border:1px solid #dce4ef; border-radius:8px; padding:9px 11px; outline:none; color:#17233a; font:400 12px Arial,Helvetica,sans-serif; }
+.assistant-support-composer input:focus { border-color:#075eea; box-shadow:0 0 0 2px rgba(7,94,234,.1); }
+.assistant-support-composer button { width:42px; height:42px; display:grid; place-items:center; border:0; border-radius:50%; background:#075eea; color:#fff; }
+.assistant-support-composer button svg { width:20px; height:20px; }
+.assistant-support-closed { margin:0; padding:12px; background:#f2f5f9; color:#657086; text-align:center; font-size:10px; }
 @media (max-width:380px) {
   .assistant-track-page .assistant-chat-dock { padding-left:10px; padding-right:10px; }
   .assistant-track-page .assistant-chat-name-status b { max-width:90px; }

@@ -3,9 +3,13 @@ import { z } from "zod";
 import { requirePermission } from "../../http/auth.js";
 import { emitBookingRealtimeEvent } from "../operations/bookingRealtime.js";
 import {
+  addAdminAssistantSupportMessage,
   addAdminSupportMessage,
+  getAdminAssistantSupportTicket,
   getAdminSupportTicket,
+  listAdminAssistantSupportTickets,
   listAdminSupportTickets,
+  updateAdminAssistantSupportTicket,
   updateAdminSupportTicket
 } from "./support.repository.js";
 
@@ -23,6 +27,49 @@ const updateSchema = z.object({
   statusCode: z.enum(["open", "in_progress", "waiting_customer", "resolved", "closed"]).optional(),
   priorityCode: z.enum(["low", "normal", "high", "urgent"]).optional(),
   assignToMe: z.boolean().optional()
+});
+const assistantUpdateSchema = z.object({
+  statusCode: z.enum(["open", "in_progress", "waiting_assistant", "resolved", "closed"]).optional(),
+  priorityCode: z.enum(["low", "normal", "high", "urgent"]).optional(),
+  assignToMe: z.boolean().optional()
+});
+
+supportRouter.get("/assistant/tickets", requirePermission("assistants.view"), async (req, res, next) => {
+  try { res.json({ data: await listAdminAssistantSupportTickets(listSchema.parse(req.query)) }); } catch (error) { next(error); }
+});
+
+supportRouter.get("/assistant/tickets/:ticketId", requirePermission("assistants.view"), async (req, res, next) => {
+  try { res.json({ data: await getAdminAssistantSupportTicket(idSchema.parse(req.params).ticketId) }); } catch (error) { next(error); }
+});
+
+supportRouter.post("/assistant/tickets/:ticketId/messages", requirePermission("assistants.edit"), async (req, res, next) => {
+  try {
+    const { ticketId } = idSchema.parse(req.params);
+    const result = await addAdminAssistantSupportMessage(req.auth!.sub, ticketId, messageSchema.parse(req.body).message);
+    await emitBookingRealtimeEvent({
+      type: "support.message.created",
+      bookingId: result.ticket.bookingId || undefined,
+      assistantId: result.ticket.assistantId,
+      message: "ZIGO Support replied to the assistant.",
+      payload: { ticketId, assistantId: result.ticket.assistantId, assistantUserId: result.ticket.assistantUserId, requesterType: "assistant" }
+    });
+    res.status(201).json({ data: result });
+  } catch (error) { next(error); }
+});
+
+supportRouter.patch("/assistant/tickets/:ticketId", requirePermission("assistants.edit"), async (req, res, next) => {
+  try {
+    const { ticketId } = idSchema.parse(req.params);
+    const result = await updateAdminAssistantSupportTicket(req.auth!.sub, ticketId, assistantUpdateSchema.parse(req.body));
+    await emitBookingRealtimeEvent({
+      type: "support.ticket.updated",
+      bookingId: result.ticket.bookingId || undefined,
+      assistantId: result.ticket.assistantId,
+      message: "Assistant support chat updated.",
+      payload: { ticketId, assistantId: result.ticket.assistantId, assistantUserId: result.ticket.assistantUserId, requesterType: "assistant" }
+    });
+    res.json({ data: result });
+  } catch (error) { next(error); }
 });
 
 supportRouter.get("/tickets", requirePermission("customers.view"), async (req, res, next) => {

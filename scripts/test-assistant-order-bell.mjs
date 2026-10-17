@@ -21,12 +21,13 @@ const context = vm.createContext({
   assistantOrderAudioRinging: false, assistantOrderAudioStopTimer: null,
   assistantOrderRingAssignmentId: '', assistantOrderRingEventType: '',
   assistantOrderAlertedIds: new Set(), withBasePath: value => value,
+  portalServerNowMs: () => Date.now(),
   setTimeout: (callback, delay) => { timerDelays.push(delay); stopTimer = callback; return 1; },
   clearTimeout: () => { stopTimer = null; },
   document: { addEventListener: (name, listener) => { listeners[name] = listener; } }
 });
 vm.runInContext(section, context);
-context.alertAssistantRealtimeOrder('booking.offered', { assignmentId: 'realtime-offer', expiresAt: new Date(Date.now() + 30000).toISOString() });
+context.alertAssistantRealtimeOrder('booking.offered', { assignmentId: 'realtime-offer', assignmentStatus: 'offered', expiresAt: new Date(Date.now() + 30000).toISOString() });
 await Promise.resolve();
 assert.equal(plays, 1, 'Realtime broadcast must ring before task refresh');
 assert.ok(timerDelays.at(-1) > 29000 && timerDelays.at(-1) <= 30000, 'Offer bell must stop when its server expiry is reached');
@@ -38,22 +39,26 @@ context.stopAssistantOrderBellForRealtime('booking.assigned', { assignmentId: 'r
 assert.equal(context.assistantOrderAudioRinging, false, 'Accepting a broadcast must stop its repeating bell');
 context.alertAssistantRealtimeOrder('booking.assigned', { assignmentId: 'realtime-confirm', broadcastTimeSeconds: 45 });
 await Promise.resolve();
-assert.equal(plays, 2, 'Realtime direct confirmation must ring');
-assert.equal(timerDelays.at(-1), 45000, 'Direct confirmation must use configured Broadcast Time');
-const offer = { assignmentId: 'offer', assignmentStatus: 'offered', assignmentExpiresAt: new Date(Date.now() + 30000).toISOString() };
+assert.equal(plays, 1, 'A directly confirmed Pending booking must stay silent');
+const offer = { assignmentId: 'offer', assignmentStatus: 'offered', assignmentExpiresAt: new Date(Date.now() + 30000).toISOString(), assignmentMetadata: { adminOffer: true } };
 context.alertNewAssistantOrders([], [offer]);
 await Promise.resolve();
-assert.equal(plays, 3, 'New offer discovered during task sync must ring');
+assert.equal(plays, 2, 'New broadcast discovered during task sync must ring');
 context.alertNewAssistantOrders([], [offer]);
 context.alertNewAssistantOrders([offer], [{ ...offer, assignmentStatus: 'accepted' }]);
-assert.equal(plays, 3, 'Duplicate events and accepting an offer must not ring again');
+assert.equal(plays, 2, 'Duplicate events and accepting an offer must not ring again');
 context.alertNewAssistantOrders([offer], [offer, { assignmentId: 'confirm', assignmentStatus: 'accepted' }]);
 await Promise.resolve();
-assert.equal(plays, 4, 'Directly confirmed booking must ring');
+assert.equal(plays, 2, 'A new Pending task discovered during sync must stay silent');
 context.alertNewAssistantOrders([], [{ ...offer, assignmentId: 'expired', assignmentExpiresAt: new Date(Date.now() - 1000).toISOString() }]);
-assert.equal(plays, 4, 'Expired offers must not ring');
+assert.equal(plays, 2, 'Expired Drop offers must not ring');
+for (const [index, assignmentStatus] of ['accepted', 'assigned', 'in_progress', 'completed', 'success', 'cancelled', 'rejected', 'expired'].entries()) {
+  context.alertNewAssistantOrders([], [{ ...offer, assignmentId: `silent-${index}`, assignmentStatus }]);
+}
+assert.equal(plays, 2, 'Pending, Processing, Success, Cancelled, Rejected and Drop tasks must stay silent');
 blocked = true;
-context.alertNewAssistantOrders([], [{ assignmentId: 'blocked', assignmentStatus: 'accepted' }]);
+const blockedOffer = { ...offer, assignmentId: 'blocked', assignmentExpiresAt: new Date(Date.now() + 30000).toISOString() };
+context.alertNewAssistantOrders([], [blockedOffer]);
 await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal(context.assistantOrderAudioPending, true);
 blocked = false;
@@ -64,14 +69,22 @@ assert.equal(context.assistantOrderAudio.volume, 0.9);
 assert.equal(context.assistantOrderAudioRinging, true);
 listeners.pointerdown();
 assert.equal(context.assistantOrderAudioRinging, false, 'The next assistant interaction must acknowledge the bell');
-context.alertAssistantRealtimeOrder('booking.assigned', { assignmentId: 'safety-stop' });
+context.alertAssistantRealtimeOrder('booking.offered', { assignmentId: 'safety-stop', assignmentStatus: 'offered', expiresAt: new Date(Date.now() + 30000).toISOString() });
 await Promise.resolve();
 assert.equal(typeof stopTimer, 'function');
 stopTimer();
 assert.equal(context.assistantOrderAudioRinging, false, 'The safety timer must stop a repeating bell');
+context.alertAssistantRealtimeOrder('booking.offered', { assignmentId: 'processing-stop', assignmentStatus: 'offered', expiresAt: new Date(Date.now() + 30000).toISOString() });
+await Promise.resolve();
+context.stopAssistantOrderBellForRealtime('booking.updated', { assignmentId: 'processing-stop', assignmentStatus: 'in_progress' });
+assert.equal(context.assistantOrderAudioRinging, false, 'Processing a broadcast must stop its bell');
+context.alertNewAssistantOrders([], [{ ...offer, assignmentId: 'sync-stop' }]);
+await Promise.resolve();
+context.syncAssistantOrderBellWithTasks([{ ...offer, assignmentId: 'sync-stop', assignmentStatus: 'accepted' }]);
+assert.equal(context.assistantOrderAudioRinging, false, 'Task synchronization must stop a bell after the offer leaves broadcast status');
 assert.ok(pauses > 0);
 context.state.token = '';
 const before = plays;
 context.playAssistantOrderBell();
 assert.equal(plays, before, 'Logged-out app must not ring');
-console.log('Assistant order bell: offers, direct confirmation, deduplication, expiry, autoplay recovery and logout passed');
+console.log('Assistant order bell: broadcast-only ringing, silent task statuses, deduplication, expiry, autoplay recovery and logout passed');

@@ -2,6 +2,8 @@ import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { detectMediaMimeType, extensionForMediaMimeType } from "../../utils/mediaMime.js";
 import { DEFAULT_ASSISTANT_MASTER_SETTINGS, normalizeAssistantMasterSettings } from "./assistantMasterSettings.js";
 export const MEDIA_PATH_SETTING_KEYS = {
     image: "media.image_save_path",
@@ -51,6 +53,8 @@ export const DEFAULT_BOOKING_ENGINE_SETTINGS = {
     manualAssignBeforeStartMinutes: 15,
     instantAutoMaxWaitMinutes: 45,
     defaultWaitWindowMinutes: 0,
+    disableExtendBeforeEndEnabled: false,
+    disableExtendBeforeEndMinutes: 10,
     customerCancelInstantMinutes: 5,
     customerCancelScheduleMinutes: 30,
     customerAssistantDelayCancelOpenMinutes: 10,
@@ -499,6 +503,8 @@ function normalizeBookingEngineSettings(parsed = {}) {
         manualAssignBeforeStartMinutes: nonNegativeInt(parsed.manualAssignBeforeStartMinutes, DEFAULT_BOOKING_ENGINE_SETTINGS.manualAssignBeforeStartMinutes),
         instantAutoMaxWaitMinutes: boundedInt(parsed.instantAutoMaxWaitMinutes, DEFAULT_BOOKING_ENGINE_SETTINGS.instantAutoMaxWaitMinutes, 1, 240),
         defaultWaitWindowMinutes: nonNegativeInt(parsed.defaultWaitWindowMinutes, DEFAULT_BOOKING_ENGINE_SETTINGS.defaultWaitWindowMinutes),
+        disableExtendBeforeEndEnabled: boolValue(parsed.disableExtendBeforeEndEnabled, DEFAULT_BOOKING_ENGINE_SETTINGS.disableExtendBeforeEndEnabled),
+        disableExtendBeforeEndMinutes: boundedInt(parsed.disableExtendBeforeEndMinutes, DEFAULT_BOOKING_ENGINE_SETTINGS.disableExtendBeforeEndMinutes, 1, 1440),
         customerCancelInstantMinutes: boundedInt(parsed.customerCancelInstantMinutes, DEFAULT_BOOKING_ENGINE_SETTINGS.customerCancelInstantMinutes, 1, 240),
         customerCancelScheduleMinutes: boundedInt(parsed.customerCancelScheduleMinutes, DEFAULT_BOOKING_ENGINE_SETTINGS.customerCancelScheduleMinutes, 1, 240),
         customerAssistantDelayCancelOpenMinutes: boundedInt(parsed.customerAssistantDelayCancelOpenMinutes, DEFAULT_BOOKING_ENGINE_SETTINGS.customerAssistantDelayCancelOpenMinutes, 1, 240),
@@ -618,6 +624,56 @@ export async function updateBookingEngineSetting(input) {
       where "key" = $1
     `, [BOOKING_ENGINE_SETTING_KEY, JSON.stringify(value), input.actorUserId]);
     return getBookingEngineSetting();
+}
+export async function getBookingExtensionPolicy(client = pool) {
+    const settings = await getBookingEngineSetting(client);
+    return {
+        disableExtendBeforeEndEnabled: settings.disableExtendBeforeEndEnabled,
+        disableExtendBeforeEndMinutes: settings.disableExtendBeforeEndMinutes,
+        updatedAt: settings.updatedAt ?? null
+    };
+}
+export async function updateBookingExtensionPolicy(input) {
+    const client = await pool.connect();
+    try {
+        await client.query("begin");
+        await ensureBookingEngineSetting(client, input.actorUserId);
+        const current = await client.query(`select value from zigo.app_settings where "key" = $1 for update`, [BOOKING_ENGINE_SETTING_KEY]);
+        let parsed = {};
+        try {
+            parsed = JSON.parse(current.rows[0]?.value || "{}");
+        }
+        catch {
+            parsed = {};
+        }
+        const value = normalizeBookingEngineSettings({
+            ...parsed,
+            disableExtendBeforeEndEnabled: input.disableExtendBeforeEndEnabled,
+            disableExtendBeforeEndMinutes: input.disableExtendBeforeEndMinutes
+        });
+        const updated = await client.query(`
+        update zigo.app_settings
+        set value = $2,
+            updated_by = $3,
+            updated_at = now(),
+            is_active = true
+        where "key" = $1
+        returning updated_at as "updatedAt"
+      `, [BOOKING_ENGINE_SETTING_KEY, JSON.stringify(value), input.actorUserId]);
+        await client.query("commit");
+        return {
+            disableExtendBeforeEndEnabled: value.disableExtendBeforeEndEnabled,
+            disableExtendBeforeEndMinutes: value.disableExtendBeforeEndMinutes,
+            updatedAt: updated.rows[0]?.updatedAt ?? null
+        };
+    }
+    catch (error) {
+        await client.query("rollback");
+        throw error;
+    }
+    finally {
+        client.release();
+    }
 }
 export async function getAssistantMasterSetting(client = pool) {
     const canUseCache = client === pool;
@@ -779,6 +835,7 @@ function documentFallbackExtension(mimeType) {
         "image/png": ".png",
         "image/webp": ".webp",
         "image/gif": ".gif",
+        "image/svg+xml": ".svg",
         "application/pdf": ".pdf",
         "video/mp4": ".mp4",
         "video/webm": ".webm",
@@ -801,8 +858,9 @@ function documentFallbackExtension(mimeType) {
 function publicPathFromSetting(savePath, fileName) {
     const normalized = savePath.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\.\./g, "");
     const publicUrlBase = `/${normalized}`.replace(/\/+$/g, "");
+    const publicDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../public");
     return {
-        directory: path.resolve(process.cwd(), "public", normalized),
+        directory: path.resolve(publicDirectory, normalized),
         publicUrl: `${publicUrlBase}/${fileName}`
     };
 }
@@ -833,12 +891,20 @@ export async function saveImageUpload(input) {
     };
 }
 export async function saveDocumentUpload(input) {
-    const mimeType = inferDocumentMimeType(input.originalName, input.mimeType);
+    const declaredMimeType = inferDocumentMimeType(input.originalName, input.mimeType);
+    const buffer = decodeBase64Data(input.dataBase64);
+    if (!buffer.length)
+        throw new HttpError(400, "Document file content is required.");
+    const detectedMimeType = detectMediaMimeType(buffer);
+    const mimeType = detectedMimeType === "video/webm" && declaredMimeType === "audio/webm"
+        ? declaredMimeType
+        : (detectedMimeType || declaredMimeType);
     const allowedMimeTypes = new Set([
         "image/jpeg",
         "image/png",
         "image/webp",
         "image/gif",
+        "image/svg+xml",
         "application/pdf",
         "video/mp4",
         "video/webm",
@@ -859,16 +925,18 @@ export async function saveDocumentUpload(input) {
     if (!allowedMimeTypes.has(mimeType)) {
         throw new HttpError(400, "Only PDF, image, audio, video, and Office document files are allowed.");
     }
-    const buffer = decodeBase64Data(input.dataBase64);
-    if (!buffer.length)
-        throw new HttpError(400, "Document file content is required.");
+    if (declaredMimeType.startsWith("image/") && !detectedMimeType) {
+        throw new HttpError(400, "The selected image content is invalid or unsupported.");
+    }
     const maxBytes = Math.max(1, Number(input.maxBytes || 25 * 1024 * 1024));
     const maxSizeLabel = String(input.maxSizeLabel || "25 MB");
     if (buffer.length > maxBytes)
         throw new HttpError(400, `Document file must be ${maxSizeLabel} or smaller.`);
     const savePath = await getMediaPathValue(MEDIA_PATH_SETTING_KEYS.document);
-    const fallbackExtension = documentFallbackExtension(mimeType);
-    const fileName = safeFileName(input.originalName, fallbackExtension, "document");
+    const fallbackExtension = extensionForMediaMimeType(mimeType) || documentFallbackExtension(mimeType);
+    const parsedOriginalName = path.parse(input.originalName || "document");
+    const normalizedOriginalName = `${parsedOriginalName.name || "document"}${fallbackExtension}`;
+    const fileName = safeFileName(normalizedOriginalName, fallbackExtension, "document");
     const target = publicPathFromSetting(savePath, fileName);
     await fs.mkdir(target.directory, { recursive: true });
     await fs.writeFile(path.join(target.directory, fileName), buffer);

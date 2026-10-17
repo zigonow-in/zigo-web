@@ -16,7 +16,8 @@ const customerBodySchema = z.object({
     displayName: z.string().nullable().optional(),
     email: z.string().email().nullable().optional(),
     phone: z.string().nullable().optional(),
-    status: z.string().nullable().optional()
+    status: z.enum(["active", "inactive"]).nullable().optional(),
+    profilePictureUrl: z.string().trim().max(2048).nullable().optional()
 });
 const customerAddressBodySchema = z.object({
     label: z.string().trim().min(2).max(80).default("Home"),

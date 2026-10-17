@@ -64,7 +64,10 @@ function adminSessionPayload(user: LoginUser, roles: RoleSummary[]) {
       email: user.email,
       phone: user.phone,
       displayName: user.displayName,
-      profilePictureUrl: user.profilePictureUrl
+      profilePictureUrl: user.profilePictureUrl,
+      metadata: {
+        adminBookingBellPreferences: user.metadata?.adminBookingBellPreferences ?? null
+      }
     },
     roles: adminRoles
   };

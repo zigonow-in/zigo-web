@@ -14,7 +14,63 @@ import { navigationProgress, metersBetween } from './navigation-progress.js';
       center: point(initial.assistantLocation) || point(initial.destinationLocation) || [77.2167, 28.6315], zoom: 14 });
     let destroyed = false, ready = false, follow = initial.followLocation !== false, route = initial, fitted = false, animation = 0, displayed = null, latestStamp = 0;
     const navigation = initial.mode === 'navigation';
-    let rider = null, lastPosition = null, riderHeading = 0;
+    const showRiderMarker = navigation || String(initial.travelMode || '').toLowerCase() === 'bike';
+    let rider = null, riderAppearanceKey = '', lastPosition = null, riderHeading = 0, displayedHeading = 0;
+    const riderMode = () => !navigation && String(route.markerMode || '').toLowerCase() === 'assistant' ? 'assistant' : 'bike';
+    function syncRiderAppearance() {
+      if (!rider) return;
+      const element = rider.getElement();
+      const mode = riderMode();
+      const imageUrl = String(mode === 'assistant' ? route.assistantImageUrl || '' : route.riderImageUrl || '').trim();
+      const initials = String(route.assistantInitials || 'A').trim().slice(0, 2).toUpperCase() || 'A';
+      const key = `${mode}|${imageUrl}|${initials}`;
+      if (key === riderAppearanceKey) return;
+      riderAppearanceKey = key;
+      element.replaceChildren();
+      element.classList.remove('uses-bike-image', 'uses-assistant-avatar');
+      element.classList.add('zigo-navigation-rider');
+      if (mode === 'assistant') {
+        const avatar = document.createElement('span');
+        avatar.className = 'zigo-assistant-map-avatar';
+        const fallback = document.createElement('span');
+        fallback.textContent = initials;
+        avatar.append(fallback);
+        if (imageUrl) {
+          const image = document.createElement('img');
+          image.alt = '';
+          image.draggable = false;
+          image.addEventListener('load', () => avatar.classList.add('has-image'), { once: true });
+          image.addEventListener('error', () => image.remove(), { once: true });
+          image.src = imageUrl;
+          avatar.append(image);
+        }
+        const pin = document.createElement('span');
+        pin.className = 'zigo-assistant-map-pin';
+        pin.setAttribute('aria-hidden', 'true');
+        element.classList.add('uses-assistant-avatar');
+        element.setAttribute('aria-label', `${String(route.assistantName || 'Assistant').trim() || 'Assistant'} live location`);
+        element.append(avatar, pin);
+        rider.setRotation(0);
+        return;
+      }
+      element.setAttribute('aria-label', 'Assistant bike position');
+      if (imageUrl) {
+        const image = document.createElement('img');
+        element.classList.add('uses-bike-image');
+        image.alt = '';
+        image.draggable = false;
+        image.src = imageUrl;
+        element.append(image);
+      } else {
+        element.innerHTML = '<i data-lucide="motorbike"></i>';
+        createIcons({ icons: { Motorbike }, root: element });
+      }
+    }
+    const routeHeading = (path, target) => {
+      if (!target || path.length < 2) return null;
+      const progress = navigationProgress(path, target, route.routeSteps || [], route.assistantLocation?.accuracy);
+      return Number.isFinite(Number(progress?.heading)) ? Number(progress.heading) : null;
+    };
     const guidance = document.createElement('div'); guidance.className = 'zigo-navigation-guidance';
     guidance.innerHTML = '<span data-navigation-turn></span><div><strong data-navigation-distance></strong><p data-navigation-instruction></p></div>';
     const trip = document.createElement('div'); trip.className = 'zigo-navigation-trip';
@@ -86,14 +142,26 @@ import { navigationProgress, metersBetween } from './navigation-progress.js';
       const target = point(route.assistantLocation);
       guide(path, target);
       if (target) {
+        const deviceHeading = Number(route.assistantLocation?.heading);
+        const pathHeading = routeHeading(path, target);
+        if (!navigation && pathHeading != null) riderHeading = pathHeading;
+        else if (Number.isFinite(deviceHeading)) riderHeading = deviceHeading;
+        else if (pathHeading != null) riderHeading = pathHeading;
         cancelAnimationFrame(animation);
         const from = displayed || target, started = performance.now();
+        const configuredDuration = Number(route.markerAnimationMs);
+        const movementDuration = displayed && Number.isFinite(configuredDuration)
+          ? Math.max(250, Math.min(10000, configuredDuration))
+          : 0;
+        const fromHeading = displayedHeading;
+        const headingDelta = ((riderHeading - fromHeading + 540) % 360) - 180;
         const animate = now => {
           if (destroyed) return;
-          const t = Math.min(1, (now - started) / 700);
+          const t = movementDuration ? Math.min(1, (now - started) / movementDuration) : 1;
           displayed = [from[0] + (target[0] - from[0]) * t, from[1] + (target[1] - from[1]) * t];
+          displayedHeading = (fromHeading + headingDelta * t + 360) % 360;
           map.getSource('tracking-assistant').setData({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: displayed } });
-          if (rider) { rider.getElement().hidden = false; rider.setLngLat(displayed).setRotation(riderHeading); }
+          if (rider) { rider.getElement().hidden = false; rider.setLngLat(displayed).setRotation(riderMode() === 'assistant' ? 0 : displayedHeading); }
           if (t < 1) animation = requestAnimationFrame(animate);
         };
         animation = requestAnimationFrame(animate);
@@ -105,7 +173,7 @@ import { navigationProgress, metersBetween } from './navigation-progress.js';
       const stamp = Date.parse(next.assistantLocation?.capturedAt || '');
       if (Number.isFinite(stamp) && stamp < latestStamp) return;
       if (Number.isFinite(stamp)) latestStamp = stamp;
-      route = next; draw(); refreshStatus();
+      route = next; syncRiderAppearance(); draw(); refreshStatus();
     }
     function refreshStatus() {
       if (!ready) return;
@@ -123,12 +191,12 @@ import { navigationProgress, metersBetween } from './navigation-progress.js';
       map.addLayer({ id: 'tracking-road', type: 'line', source: 'tracking-route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': navigation ? '#10aa5b' : '#075eea', 'line-width': navigation ? 7 : 5 } });
       map.addLayer({ id: 'tracking-stop-points', type: 'circle', source: 'tracking-stops', paint: { 'circle-radius': 12, 'circle-color': '#fff', 'circle-stroke-color': '#075eea', 'circle-stroke-width': 3 } });
       map.addLayer({ id: 'tracking-stop-labels', type: 'symbol', source: 'tracking-stops', layout: { 'text-field': ['get', 'label'], 'text-size': 12 }, paint: { 'text-color': '#111827' } });
-      map.addLayer({ id: 'tracking-gps', type: 'circle', source: 'tracking-assistant', paint: { 'circle-radius': navigation ? 0 : 9, 'circle-color': '#16a34a', 'circle-stroke-color': '#fff', 'circle-stroke-width': navigation ? 0 : 3 } });
-      if (navigation) {
+      map.addLayer({ id: 'tracking-gps', type: 'circle', source: 'tracking-assistant', paint: { 'circle-radius': showRiderMarker ? 0 : 9, 'circle-color': '#16a34a', 'circle-stroke-color': '#fff', 'circle-stroke-width': showRiderMarker ? 0 : 3 } });
+      if (showRiderMarker) {
         const element = document.createElement('div'); element.className = 'zigo-navigation-rider'; element.setAttribute('aria-label', 'Assistant bike position');
         element.hidden = !point(route.assistantLocation);
-        element.innerHTML = '<i data-lucide="motorbike"></i>'; createIcons({ icons: { Motorbike }, root: element });
         rider = sdk.addMarker({ element, rotationAlignment: 'map', pitchAlignment: 'map' }).setLngLat(point(route.assistantLocation) || [77.2167, 28.6315]).addTo(map);
+        syncRiderAppearance();
       }
       ready = true; draw(); refreshStatus();
     });

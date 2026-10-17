@@ -9,8 +9,10 @@ assert.equal(assistantStartEligibility({...fix,latitude:28.60108},stop,now,125).
 assert.equal(assistantStartEligibility({...fix,latitude:28.60117},stop,now,125).eligible,false);
 assert.equal(assistantStartEligibility({...fix,capturedAt:new Date(now-31000).toISOString()},stop,now).eligible,false);
 assert.equal(assistantStartEligibility({...fix,capturedAt:new Date(now+11000).toISOString()},stop,now).eligible,false);
-assert.equal(assistantStartEligibility({...fix,accuracy:51},stop,now).eligible,false);
+assert.equal(assistantStartEligibility({...fix,accuracy:51},stop,now).eligible,true);
+assert.equal(assistantStartEligibility({...fix,accuracy:500},stop,now).eligible,true);
+assert.equal(assistantStartEligibility({...fix,accuracy:501},stop,now).eligible,false);
 assert.equal(assistantStartEligibility({...fix,accuracy:null},stop,now).eligible,false);
 assert.equal(assistantStartEligibility(fix,null,now).eligible,false);
 assert.equal(assistantStartEligibility({...fix,latitude:NaN},stop,now).eligible,false);
-console.log('Arrival: default/configured radius, stale/future GPS, accuracy, missing location and invalid coordinates passed');
+console.log('Arrival: default/configured radius, fresh usable GPS, missing location and invalid coordinates passed');

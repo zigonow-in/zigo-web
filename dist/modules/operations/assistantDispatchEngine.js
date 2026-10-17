@@ -152,6 +152,7 @@ export async function goAssistantOffline(input) {
         work_status = case when zigo.assistant_availability.work_status in ('WORKING', 'ASSIGNED', 'TRAVELLING', 'WRAP_UP', 'HELD')
           then zigo.assistant_availability.work_status else 'FREE' end,
         availability_confidence = 'UNKNOWN',
+        heartbeat_at = null,
         online_started_at = null,
         updated_at = now(),
         status_updated_at = now()
@@ -162,7 +163,7 @@ export async function goAssistantOffline(input) {
 export async function recordAssistantHeartbeat(input) {
     await ensureAssistantDispatchSchema();
     const point = parseCoordinate(input.location ?? {});
-    await pool.query(`
+    const accepted = await pool.query(`
       update zigo.assistant_availability
       set presence_status = 'ONLINE',
           heartbeat_at = now(),
@@ -172,8 +173,11 @@ export async function recordAssistantHeartbeat(input) {
           updated_at = now(),
           status_updated_at = now()
       where assistant_id = $1::uuid
+        and lower(status_code) in ('available', 'online', 'active', 'working')
+      returning assistant_id as "assistantId"
     `, [input.assistantId, point?.latitude ?? null, point?.longitude ?? null]);
-    await writePresenceCache(input.assistantId, "ONLINE", point ?? undefined);
+    if (accepted.rows[0])
+        await writePresenceCache(input.assistantId, "ONLINE", point ?? undefined);
     return refreshAssistantAvailabilityCache(input.assistantId);
 }
 export async function recordAssistantLocationUpdate(input) {
@@ -182,10 +186,26 @@ export async function recordAssistantLocationUpdate(input) {
     if (!point)
         throw new HttpError(400, "Latitude and longitude are required.");
     const capturedAt = validDate(input.location.capturedAt) ?? new Date();
-    await pool.query(`
+    const accepted = await pool.query(`
+      with accepted as (
+        update zigo.assistant_availability
+        set latitude = $3,
+            longitude = $4,
+            gps_captured_at = $6,
+            heartbeat_at = now(),
+            presence_status = 'ONLINE',
+            updated_at = now(),
+            status_updated_at = now()
+        where assistant_id = $1::uuid
+          and lower(status_code) in ('available', 'online', 'active', 'working')
+          and (gps_captured_at is null or gps_captured_at < $6)
+        returning assistant_id
+      )
       insert into zigo.assistant_location_pings
         (assistant_id, request_id, service_request_id, latitude, longitude, accuracy_meters, captured_at, metadata)
-      values ($1::uuid, $2::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb)
+      select accepted.assistant_id, $2::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb
+      from accepted
+      returning id
     `, [
         input.assistantId,
         input.bookingId ?? null,
@@ -195,18 +215,8 @@ export async function recordAssistantLocationUpdate(input) {
         capturedAt,
         JSON.stringify({ source: "dispatch_engine", assignmentId: input.assignmentId ?? null })
     ]);
-    await pool.query(`
-      update zigo.assistant_availability
-      set latitude = $2,
-          longitude = $3,
-          gps_captured_at = $4,
-          heartbeat_at = coalesce(heartbeat_at, now()),
-          presence_status = case when presence_status = 'OFFLINE' then 'ONLINE' else presence_status end,
-          updated_at = now(),
-          status_updated_at = now()
-      where assistant_id = $1::uuid
-    `, [input.assistantId, point.latitude, point.longitude, capturedAt]);
-    await writePresenceCache(input.assistantId, "ONLINE", point);
+    if (accepted.rows[0])
+        await writePresenceCache(input.assistantId, "ONLINE", point);
     return refreshAssistantAvailabilityCache(input.assistantId);
 }
 export async function createTemporaryHold(input) {
@@ -369,6 +379,7 @@ export async function refreshAssistantAvailabilityCache(assistantId, client = po
     `, [assistantId]);
     const result = await client.query(`
       select
+        av.status_code as "statusCode",
         av.latitude,
         av.longitude,
         av.heartbeat_at as "heartbeatAt",
@@ -383,23 +394,46 @@ export async function refreshAssistantAvailabilityCache(assistantId, client = po
       from zigo.assistants a
       left join zigo.assistant_availability av on av.assistant_id = a.id
       left join lateral (
-        select block_type, end_at, end_lat, end_lng, cluster_id
-        from zigo.assistant_calendar_blocks
-        where assistant_id = a.id
-          and status_code = 'active'
-          and block_type <> 'SHIFT'
-          and start_at <= now()
-          and end_at > now()
-        order by end_at desc
+        select busy.block_type, busy.end_at, busy.end_lat, busy.end_lng, busy.cluster_id
+        from (
+          select block_type, end_at, end_lat, end_lng, cluster_id, 0 as source_priority
+          from zigo.assistant_calendar_blocks
+          where assistant_id = a.id
+            and status_code = 'active'
+            and block_type <> 'SHIFT'
+            and start_at <= now()
+            and end_at > now()
+          union all
+          select 'BOOKING'::text, acr.reserved_until, null::numeric, null::numeric, sr.cluster_id, 1
+          from zigo.assistant_capacity_reservations acr
+          join zigo.service_requests sr on sr.id = acr.service_request_id
+          where acr.assistant_id = a.id
+            and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'accepted', 'active', 'in_progress')
+            and acr.reserved_from <= now()
+            and acr.reserved_until > now()
+            and lower(coalesce(sr.status_code, '')) not in ('completed', 'success', 'done', 'cancelled', 'canceled', 'failed', 'rejected', 'expired')
+        ) busy
+        order by busy.end_at desc, busy.source_priority
         limit 1
       ) active on true
       left join lateral (
-        select max(end_at) as end_at
-        from zigo.assistant_calendar_blocks
-        where assistant_id = a.id
-          and status_code = 'active'
-          and block_type <> 'SHIFT'
-          and end_at > now()
+        select max(busy.end_at) as end_at
+        from (
+          select end_at
+          from zigo.assistant_calendar_blocks
+          where assistant_id = a.id
+            and status_code = 'active'
+            and block_type <> 'SHIFT'
+            and end_at > now()
+          union all
+          select acr.reserved_until
+          from zigo.assistant_capacity_reservations acr
+          join zigo.service_requests sr on sr.id = acr.service_request_id
+          where acr.assistant_id = a.id
+            and acr.status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'accepted', 'active', 'in_progress')
+            and acr.reserved_until > now()
+            and lower(coalesce(sr.status_code, '')) not in ('completed', 'success', 'done', 'cancelled', 'canceled', 'failed', 'rejected', 'expired')
+        ) busy
       ) future_busy on true
       left join lateral (
         select start_at
@@ -418,11 +452,14 @@ export async function refreshAssistantAvailabilityCache(assistantId, client = po
     if (!row)
         throw new HttpError(404, "Assistant profile not found.");
     const now = new Date();
+    const onlineIntent = ["available", "online", "active", "working"].includes(String(row.statusCode || "").toLowerCase());
     const heartbeatFresh = row.heartbeatAt ? now.getTime() - row.heartbeatAt.getTime() <= config.heartbeatTimeoutSeconds * 1000 : false;
     const gpsFresh = row.gpsCapturedAt ? now.getTime() - row.gpsCapturedAt.getTime() <= config.gpsFreshnessSeconds * 1000 : false;
     const activeBlock = row.activeBlockType;
-    const workStatus = activeBlock ? workStatusForBlock(activeBlock) : "FREE";
-    const presenceStatus = heartbeatFresh ? "ONLINE" : row.heartbeatAt ? "STALE" : "OFFLINE";
+    const workStatus = activeBlock
+        ? (activeBlock === "BOOKING" && String(row.statusCode || "").toLowerCase() === "working" ? "WORKING" : workStatusForBlock(activeBlock))
+        : "FREE";
+    const presenceStatus = !onlineIntent ? "OFFLINE" : heartbeatFresh ? "ONLINE" : row.heartbeatAt ? "STALE" : "OFFLINE";
     const confidence = presenceStatus === "ONLINE" && gpsFresh ? "CONFIRMED" : row.futureShiftAt ? "EXPECTED" : "UNKNOWN";
     const nextAvailableAt = row.nextBlockEndAt && row.nextBlockEndAt > now ? row.nextBlockEndAt : now;
     const nextLat = numberOrNull(row.activeBlockEndLat) ?? numberOrNull(row.latitude);

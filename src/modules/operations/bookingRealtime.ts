@@ -36,7 +36,9 @@ export type BookingRealtimeEvent = {
 type Queryable = Pick<typeof pool, "query">;
 
 const bookingRealtimeEmitter = new EventEmitter();
-bookingRealtimeEmitter.setMaxListeners(500);
+// Each connected portal owns one listener and removes it on disconnect. Fleet
+// size is not a leak threshold, so avoid EventEmitter warnings at >500 riders.
+bookingRealtimeEmitter.setMaxListeners(0);
 const REALTIME_CHANNEL = "zigo:booking-realtime";
 const realtimeNodeId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const recentlySeenEventIds = new Set<string>();

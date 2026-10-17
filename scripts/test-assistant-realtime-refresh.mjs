@@ -25,7 +25,8 @@ const context = vm.createContext({
   assistantRealtimeLastEventId: '', assistantRealtimeHeartbeatAt: 0,
   assistantRealtimeSafetyTimer: null,
   stopAssistantRealtime() { context.assistantRealtimeSource?.close(); context.assistantRealtimeSource = null; },
-  withBasePath: value => value, syncPortalTrackingHub() {},
+  withBasePath: value => value, syncPortalTrackingHub() {}, syncAssistantAvailabilitySnapshot() {},
+  applyAssistantAvailabilitySnapshot() {},
   portalCachedGet: async () => {
     calls++;
     if (calls === 1) return new Promise(resolve => { resolveFirst = resolve; });
@@ -34,6 +35,7 @@ const context = vm.createContext({
   rebuildAssistantTaskTabIndex() {}, startAssistantLocationPings() {}, stopAssistantLocationPings() {},
   writePortalSessionCache() {}, renderAssistantTaskView() { renders++; return true; },
   alertNewAssistantOrders() {},
+  syncAssistantOrderBellWithTasks() {},
   stopAssistantOrderBellForRealtime() {},
   alertAssistantRealtimeOrder(type) { if (type === 'booking.offered') bellEvents++; },
   render() {}, renderAssistantHome() {}, notify() {}, clearPortalSession() {}, forcePortalSessionLogout() {}

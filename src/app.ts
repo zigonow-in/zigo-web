@@ -40,6 +40,7 @@ import { processRazorpayWebhook } from "./modules/payments/payments.repository.j
 import { healthRouter } from "./routes/health.js";
 import { mapsRouter } from "./modules/maps/maps.routes.js";
 import { olaBrowserConfig } from "./modules/maps/olaMaps.service.js";
+import { detectMediaMimeType } from "./utils/mediaMime.js";
 
 export function createApp() {
   const app = express();
@@ -163,9 +164,40 @@ function staticFontHeaders(res: express.Response, filePath: string) {
   }
 }
 
+const staticMediaMimeCache = new Map<string, string>();
+
+function staticMediaMimeType(filePath: string) {
+  if (staticMediaMimeCache.has(filePath)) return staticMediaMimeCache.get(filePath) || "";
+  let handle: number | undefined;
+  let detectedMimeType = "";
+  try {
+    handle = fs.openSync(filePath, "r");
+    const header = Buffer.alloc(4096);
+    const length = fs.readSync(handle, header, 0, header.length, 0);
+    detectedMimeType = detectMediaMimeType(header.subarray(0, length));
+  } catch (error) {
+    detectedMimeType = "";
+  } finally {
+    if (handle !== undefined) fs.closeSync(handle);
+  }
+  if (staticMediaMimeCache.size >= 4096) {
+    const oldestPath = staticMediaMimeCache.keys().next().value;
+    if (oldestPath) staticMediaMimeCache.delete(oldestPath);
+  }
+  staticMediaMimeCache.set(filePath, detectedMimeType);
+  return detectedMimeType;
+}
+
 function staticMediaHeaders(res: express.Response, filePath: string) {
   if (/\.(avif|gif|jpe?g|png|svg|webp|mp4|webm|mov|mp3|m4a|ogg|wav|pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) {
     res.setHeader("Cache-Control", "public, max-age=86400");
+    const detectedMimeType = staticMediaMimeType(filePath);
+    if (detectedMimeType) res.type(detectedMimeType);
+    if (detectedMimeType === "image/svg+xml") {
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+    }
   }
 }
 

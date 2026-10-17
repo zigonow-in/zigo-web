@@ -757,6 +757,27 @@ export async function updateOwnProfilePicture(input) {
     `, [input.userId, input.profilePictureUrl]);
     return result.rows[0] ? getUserById(input.userId) : null;
 }
+export async function updateOwnBookingBellPreferences(input) {
+    const volume = Math.max(0.05, Math.min(1, Number(input.volume)));
+    const result = await pool.query(`
+      update zigo.users
+      set metadata = jsonb_set(
+            coalesce(metadata, '{}'::jsonb),
+            '{adminBookingBellPreferences}',
+            jsonb_build_object(
+              'muted', $2::boolean,
+              'volume', $3::double precision,
+              'updatedAt', now()::text
+            ),
+            true
+          ),
+          updated_by = $1,
+          updated_at = now()
+      where id = $1 and deleted_at is null
+      returning metadata->'adminBookingBellPreferences' as preferences
+    `, [input.userId, input.muted, volume]);
+    return result.rows[0]?.preferences ?? null;
+}
 export async function resetOwnPassword(input) {
     const user = await pool.query("select password_hash as \"passwordHash\" from zigo.users where id = $1 and deleted_at is null limit 1", [input.userId]);
     if (!user.rows[0]?.passwordHash)
@@ -1005,6 +1026,11 @@ export async function createUser(input) {
           returning id
         `, [result.rows[0].id, assistantCode, input.accountStatus ?? "verifying"]);
             assistantId = assistant.rows[0].id;
+            await client.query(`
+          insert into zigo.assistant_availability (assistant_id, status_code, presence_status, updated_at)
+          values ($1, 'offline', 'OFFLINE', now())
+          on conflict (assistant_id) do nothing
+        `, [assistantId]);
         }
         if (assignedRoleCode === "customer") {
             await ensureCustomerProfileForUser(client, result.rows[0].id);
@@ -1119,10 +1145,16 @@ export async function updateUser(id, input) {
                 const existingAssistant = await client.query("select id from zigo.assistants where user_id = $1 limit 1", [id]);
                 if (!existingAssistant.rows[0]) {
                     const assistantCode = `AST-${id.replace(/-/g, "").slice(0, 8).toUpperCase()}`;
-                    await client.query(`
+                    const assistant = await client.query(`
               insert into zigo.assistants (user_id, assistant_code, metadata)
               values ($1, $2, jsonb_build_object('verificationStatus', $3::text))
+              returning id
             `, [id, assistantCode, input.accountStatus ?? "verifying"]);
+                    await client.query(`
+              insert into zigo.assistant_availability (assistant_id, status_code, presence_status, updated_at)
+              values ($1, 'offline', 'OFFLINE', now())
+              on conflict (assistant_id) do nothing
+            `, [assistant.rows[0].id]);
                 }
             }
             if (role.rows[0]?.code === "customer") {

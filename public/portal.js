@@ -20,8 +20,57 @@ function withBasePath(path = "") {
   return `${zigoBasePath}${value}`;
 }
 
+const uploadMediaRevision = "attachment-preview-20261013";
+
+function uploadAssetPath(path = "") {
+  const original = String(path || "").trim();
+  if (!original || /^(?:data|blob):/i.test(original)) return "";
+  const normalized = original.replace(/\\/g, "/");
+  let pathname = normalized;
+  let suffix = "";
+
+  if (/^(?:https?:)?\/\//i.test(normalized)) {
+    try {
+      const url = new URL(normalized, window.location.href);
+      const hostname = String(url.hostname || "").toLowerCase();
+      const currentHostname = String(window.location.hostname || "").toLowerCase();
+      const isApplicationHost = hostname === currentHostname
+        || ["localhost", "127.0.0.1", "::1"].includes(hostname)
+        || hostname === "zigonow.in"
+        || hostname.endsWith(".zigonow.in");
+      if (!isApplicationHost) return "";
+      pathname = url.pathname;
+      suffix = `${url.search}${url.hash}`;
+    } catch (error) {
+      return "";
+    }
+  } else {
+    const suffixIndex = normalized.search(/[?#]/);
+    if (suffixIndex >= 0) {
+      pathname = normalized.slice(0, suffixIndex);
+      suffix = normalized.slice(suffixIndex);
+    }
+  }
+
+  const lowerPath = pathname.toLowerCase();
+  const markerIndex = lowerPath.lastIndexOf("/uploads/");
+  let canonicalPath = "";
+  if (markerIndex >= 0) canonicalPath = pathname.slice(markerIndex);
+  else if (lowerPath.startsWith("uploads/")) canonicalPath = `/${pathname}`;
+  else if (lowerPath === "/uploads" || lowerPath === "uploads") canonicalPath = "/uploads";
+  if (!canonicalPath) return "";
+
+  const candidate = `${canonicalPath}${suffix}`;
+  const hashIndex = candidate.indexOf("#");
+  const beforeHash = hashIndex >= 0 ? candidate.slice(0, hashIndex) : candidate;
+  const hash = hashIndex >= 0 ? candidate.slice(hashIndex) : "";
+  if (/(?:^|[?&])zv=/.test(beforeHash)) return candidate;
+  return `${beforeHash}${beforeHash.includes("?") ? "&" : "?"}zv=${uploadMediaRevision}${hash}`;
+}
+
 function assetUrl(path = "") {
-  return withBasePath(path);
+  const normalizedUploadPath = uploadAssetPath(path);
+  return withBasePath(normalizedUploadPath || path);
 }
 
 const tokenKey = `zigoPortalToken:${actor}`;
@@ -291,6 +340,13 @@ const state = {
   assistantTaskTab: "working",
   assistantPendingType: "instant",
   assistantTaskConfirm: null,
+  assistantStartJobBusyId: "",
+  assistantSupportOpen: false,
+  assistantSupportMode: "options",
+  assistantSupportBusy: false,
+  assistantSupportError: "",
+  assistantSupportAssignmentId: "",
+  assistantSupportDetail: null,
   assistantChatTaskId: "",
   assistantChatAction: "",
   customerView: actor === "customer" && [
@@ -428,20 +484,46 @@ const state = {
   customerPaymentResult: null,
   customerPaymentResultReturnView: "cart",
   customerBookingReference: "",
-  assistantCurrentLocation: null,
+  assistantCurrentLocation: actor === "assistant" && storedToken && !tokenIsExpired(storedToken)
+    ? (cachedSession.assistantCurrentLocation || null)
+    : null,
   assistantLocationBusy: false,
-  assistantLocationError: "",
-  assistantIsOnline: false,
+  assistantLocationError: actor === "assistant" && cachedSession.assistantIsOnline ? "Restoring live GPS..." : "",
+  assistantGpsStatus: actor === "assistant" && cachedSession.assistantIsOnline ? "stale" : "idle",
+  assistantPresenceStatus: actor === "assistant" ? String(cachedSession.assistantPresenceStatus || "OFFLINE") : "OFFLINE",
+  assistantAvailabilityBusy: false,
+  assistantAvailabilityUpdatedAt: actor === "assistant" ? String(cachedSession.assistantAvailabilityUpdatedAt || "") : "",
+  assistantAvailabilityHydrated: actor === "assistant" && Boolean(cachedSession.assistantAvailabilityHydrated),
+  assistantIsOnline: actor === "assistant" && Boolean(cachedSession.assistantIsOnline),
   assistantMasterSettings: {
     broadcastTimeSeconds: 30,
     autoArrivedRadiusMeters: 100,
     dryRunDistanceKm: 3,
+    travelCostBasePaise: 3000,
     travelCostSlabs: [],
     assistantTravelPayoutSlabs: []
   },
   assistantProfileOpen: false,
   confirmedBooking: actor === "customer" ? (cachedSession.confirmedBooking || null) : null
 };
+
+let portalServerClockOffsetMs = 0;
+
+function syncPortalServerClock(serverNow) {
+  const serverNowMs = serverNow ? new Date(serverNow).getTime() : Number.NaN;
+  if (Number.isFinite(serverNowMs)) portalServerClockOffsetMs = serverNowMs - Date.now();
+}
+
+function applyPortalConfig(config, fallback = state.portalConfig) {
+  const next = config && typeof config === "object" ? config : (fallback || null);
+  state.portalConfig = next;
+  syncPortalServerClock(config?.serverNow);
+  return next;
+}
+
+function portalServerNowMs() {
+  return Date.now() + portalServerClockOffsetMs;
+}
 
 const customerHistoryMarker = "zigo-customer-view";
 let customerHistoryRestoring = false;
@@ -596,6 +678,9 @@ let customerRealtimeLastEventId = "";
 let customerRealtimeConnected = false;
 let customerTrackFallbackRefreshTimer = null;
 let customerTrackFallbackRefreshBusy = false;
+let customerTrackRouteRefreshTimer = null;
+let customerTrackRouteRefreshBookingId = "";
+let customerTrackRouteRefreshLastAt = 0;
 let trackingHubConnection = null;
 let trackingHubBookingId = "";
 let trackingHubConnected = false;
@@ -624,10 +709,9 @@ let customerLocationMapRequestId = 0;
 let customerLocationLastMapSyncKey = "";
 let customerLocationMapRenderFrame = null;
 let customerLocationMapRenderToken = 0;
-let customerLocationClusterPolygonCache = [];
-let customerLocationServiceBoundaries = [];
 let customerOlaLocationMap = null;
 let customerOlaLocationMapResolved = null;
+let customerLocationMapMoving = false;
 let customerSearchPlaceholderTimer = null;
 let customerHomeCategoryImageSliderTimer = null;
 let customerCartNoticeTimer = null;
@@ -1423,9 +1507,15 @@ function applyPortalTokenPair(data = {}) {
   const token = String(data.token || "").trim();
   const refreshToken = String(data.refreshToken || state.refreshToken || "").trim();
   if (!token) throw new Error("Portal session refresh did not return an access token.");
+  const previousToken = state.token;
   state.token = token;
   state.refreshToken = refreshToken;
   persistPortalTokens();
+  if (previousToken && previousToken !== token) setTimeout(() => {
+    if (!state.token) return;
+    if (actor === "assistant") startAssistantRealtime(true);
+    else startCustomerRealtime(true);
+  }, 0);
 }
 
 let portalSessionRefreshPromise = null;
@@ -1504,6 +1594,11 @@ function writePortalSessionCache() {
     selectedHomeSchedulePeriod: actor === "customer" ? state.selectedHomeSchedulePeriod : undefined,
     selectedHomeScheduleTime: actor === "customer" ? state.selectedHomeScheduleTime : undefined,
     confirmedBooking: actor === "customer" ? state.confirmedBooking : undefined,
+    assistantIsOnline: actor === "assistant" ? state.assistantIsOnline : undefined,
+    assistantPresenceStatus: actor === "assistant" ? state.assistantPresenceStatus : undefined,
+    assistantAvailabilityUpdatedAt: actor === "assistant" ? state.assistantAvailabilityUpdatedAt : undefined,
+    assistantAvailabilityHydrated: actor === "assistant" ? state.assistantAvailabilityHydrated : undefined,
+    assistantCurrentLocation: actor === "assistant" ? validPortalCoordinatePair(state.assistantCurrentLocation) : undefined,
     cachedAt: new Date().toISOString()
   });
 }
@@ -1517,9 +1612,23 @@ function clearPortalSession() {
   customerSdkMapInstances.clear();
   state.assistantDashboard = null;
   state.assistantDashboardError = "";
+  state.assistantIsOnline = false;
+  state.assistantPresenceStatus = "OFFLINE";
+  state.assistantGpsStatus = "idle";
+  state.assistantAvailabilityBusy = false;
+  state.assistantAvailabilityUpdatedAt = "";
+  state.assistantAvailabilityHydrated = false;
+  state.assistantLocationError = "";
   state.assistantMainTab = "home";
   state.assistantTaskTab = "working";
   state.assistantPendingType = "instant";
+  state.assistantStartJobBusyId = "";
+  state.assistantSupportOpen = false;
+  state.assistantSupportMode = "options";
+  state.assistantSupportBusy = false;
+  state.assistantSupportError = "";
+  state.assistantSupportAssignmentId = "";
+  state.assistantSupportDetail = null;
   assistantDashboardFetchedAt = 0;
   stopAssistantLocationPings();
   stopAssistantLiveMap();
@@ -1572,6 +1681,7 @@ function clearPortalSession() {
   state.customerCartVoiceTranscript = "";
   state.customerScheduleSheetOpen = false;
   state.portalConfig = null;
+  portalServerClockOffsetMs = 0;
   state.assistantTaskTabIndex = {
     byTab: { accepted: [], working: [], success: [], rejected: [], cancelled: [], drop: [], hold: [] },
     counts: { accepted: 0, working: 0, success: 0, rejected: 0, cancelled: 0, drop: 0, hold: 0 },
@@ -1657,6 +1767,14 @@ function portalLogoutConfirmHtml() {
 }
 
 function executePortalLogout() {
+  if (actor === "assistant" && state.token && state.assistantIsOnline) {
+    void fetch(withBasePath("/portal/assistant/availability"), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.token}` },
+      body: JSON.stringify({ isOnline: false, requestId: globalThis.crypto?.randomUUID?.() || `logout-${Date.now()}` }),
+      keepalive: true
+    }).catch(() => {});
+  }
   clearPortalSession();
   state.codeSent = false;
   state.loginPhone = "";
@@ -1726,7 +1844,7 @@ function desiredTrackingBookingId() {
     if (state.customerView !== "track") return "";
     const booking = state.confirmedBooking || {};
     const status = String(customerTrackStatus(booking)).toLowerCase();
-    return status === "working" ? String(booking.id || booking.bookingId || "").trim() : "";
+    return ["assigned", "working"].includes(status) ? String(booking.id || booking.bookingId || "").trim() : "";
   }
   const activeTask = normalizeArray(state.tasks).find((task) => {
     const status = String(task.statusCode || task.assignmentStatus || task.status || "").toLowerCase();
@@ -1850,6 +1968,24 @@ function syncCustomerTrackFallbackRefresh() {
   }, 30000);
 }
 
+function scheduleCustomerTrackRouteRefresh(bookingId = "", options = {}) {
+  const id = String(bookingId || "").trim();
+  const force = Boolean(options.force);
+  if (!id || actor !== "customer" || !state.token) return;
+  if (customerTrackRouteRefreshTimer && customerTrackRouteRefreshBookingId === id && !force) return;
+  if (customerTrackRouteRefreshTimer) clearTimeout(customerTrackRouteRefreshTimer);
+  if (customerTrackRouteRefreshBookingId !== id || force) customerTrackRouteRefreshLastAt = 0;
+  customerTrackRouteRefreshBookingId = id;
+  const elapsed = Date.now() - customerTrackRouteRefreshLastAt;
+  const delay = Math.max(500, 10000 - Math.max(0, elapsed));
+  customerTrackRouteRefreshTimer = setTimeout(async () => {
+    customerTrackRouteRefreshTimer = null;
+    if (state.customerView !== "track" || String(state.confirmedBooking?.id || state.confirmedBooking?.bookingId || "") !== id) return;
+    customerTrackRouteRefreshLastAt = Date.now();
+    await refreshCustomerTrackBookingRealtime(id).catch(() => null);
+  }, delay);
+}
+
 function assistantBroadcastDurationMs() {
   const seconds = Math.round(Number(state.assistantMasterSettings?.broadcastTimeSeconds || 30));
   return Math.max(5, Math.min(600, Number.isFinite(seconds) ? seconds : 30)) * 1000;
@@ -1909,13 +2045,21 @@ function rememberAssistantOrderAlert(assignmentId = "") {
   return true;
 }
 
+function assistantTaskIsActiveBroadcastOffer(task = {}, now = portalServerNowMs()) {
+  if (String(task.assignmentStatus || "").toLowerCase() !== "offered") return false;
+  if (task.assignmentMetadata?.adminOffer !== true) return false;
+  const expiresAt = Date.parse(task.assignmentExpiresAt || task.assignmentMetadata?.offerExpiresAt || "");
+  return Number.isFinite(expiresAt) && expiresAt > now;
+}
+
 function alertAssistantRealtimeOrder(type = "", payload = {}) {
   const eventType = String(type || "").toLowerCase();
-  if (!['booking.offered', 'booking.assigned'].includes(eventType)) return;
-  const expiresAt = eventType === 'booking.offered' ? Date.parse(payload.expiresAt || payload.offerExpiresAt || "") : Number.NaN;
-  if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) return;
+  const assignmentStatus = String(payload.assignmentStatus || "").toLowerCase();
+  if (eventType !== 'booking.offered' || (assignmentStatus && assignmentStatus !== 'offered')) return;
+  const expiresAt = Date.parse(payload.expiresAt || payload.offerExpiresAt || "");
+  if (Number.isFinite(expiresAt) && expiresAt <= portalServerNowMs()) return;
   const durationMs = Number.isFinite(expiresAt)
-    ? expiresAt - Date.now()
+    ? expiresAt - portalServerNowMs()
     : Number(payload.broadcastTimeSeconds || 0) * 1000 || assistantBroadcastDurationMs();
   if (rememberAssistantOrderAlert(payload.assignmentId)) playAssistantOrderBell(payload.assignmentId, eventType, durationMs);
 }
@@ -1924,10 +2068,8 @@ function stopAssistantOrderBellForRealtime(type = "", payload = {}) {
   if (!assistantOrderRingAssignmentId || String(payload.assignmentId || "") !== assistantOrderRingAssignmentId) return;
   const eventType = String(type || "").toLowerCase();
   const status = String(payload.assignmentStatus || payload.statusCode || payload.status || "").toLowerCase();
-  const terminal = ["expired", "rejected", "cancelled", "canceled", "completed", "success", "failed"].includes(status);
-  const offeredWasAccepted = assistantOrderRingEventType === "booking.offered"
-    && (eventType === "booking.assigned" || ["accepted", "assigned"].includes(status));
-  if (terminal || offeredWasAccepted) stopAssistantOrderBell();
+  const offerEnded = status && status !== "offered";
+  if (offerEnded || eventType === "booking.assigned") stopAssistantOrderBell();
 }
 
 function alertNewAssistantOrders(previousTasks, tasks) {
@@ -1935,21 +2077,23 @@ function alertNewAssistantOrders(previousTasks, tasks) {
   let alert = null;
   for (const task of tasks) {
     const id = String(task.assignmentId || '');
-    if (!id || previousIds.has(id)
-      || !['offered', 'accepted', 'assigned'].includes(String(task.assignmentStatus || '').toLowerCase())) continue;
-    if (task.assignmentStatus === 'offered' && Date.parse(task.assignmentExpiresAt || task.assignmentMetadata?.offerExpiresAt) <= Date.now()) continue;
+    if (!id || previousIds.has(id) || !assistantTaskIsActiveBroadcastOffer(task)) continue;
     if (rememberAssistantOrderAlert(id)) {
       const expiresAt = Date.parse(task.assignmentExpiresAt || task.assignmentMetadata?.offerExpiresAt || "");
       alert = {
         id,
-        type: task.assignmentStatus === 'offered' ? 'booking.offered' : 'booking.assigned',
-        durationMs: task.assignmentStatus === 'offered' && Number.isFinite(expiresAt)
-          ? expiresAt - Date.now()
-          : Number(task.assignmentMetadata?.broadcastTimeSeconds || 0) * 1000 || assistantBroadcastDurationMs()
+        type: 'booking.offered',
+        durationMs: Number.isFinite(expiresAt) ? expiresAt - portalServerNowMs() : assistantBroadcastDurationMs()
       };
     }
   }
   if (alert) playAssistantOrderBell(alert.id, alert.type, alert.durationMs);
+}
+
+function syncAssistantOrderBellWithTasks(tasks = []) {
+  if (!assistantOrderRingAssignmentId) return;
+  const activeOffer = tasks.find((task) => String(task.assignmentId || "") === assistantOrderRingAssignmentId);
+  if (!activeOffer || !assistantTaskIsActiveBroadcastOffer(activeOffer)) stopAssistantOrderBell();
 }
 
 // Browsers require an interaction before notification audio can play.
@@ -1982,6 +2126,7 @@ function scheduleAssistantTaskRefresh(message = null) {
     try {
   const tasks = await portalCachedGet("/portal/assistant/tasks", { cacheKey: "/portal/assistant/tasks", forceRefresh: true });
       alertNewAssistantOrders(state.tasks || [], tasks.data || []);
+      syncAssistantOrderBellWithTasks(tasks.data || []);
       const changed = JSON.stringify(state.tasks) !== JSON.stringify(tasks.data || []);
       state.tasks = tasks.data || [];
       rebuildAssistantTaskTabIndex();
@@ -2028,6 +2173,7 @@ async function refreshAssistantTasksRealtime(message = null, { immediate = false
   try {
     const tasks = await portalCachedGet("/portal/assistant/tasks", { cacheKey: "/portal/assistant/tasks", forceRefresh: true });
     alertNewAssistantOrders(state.tasks || [], tasks.data || []);
+    syncAssistantOrderBellWithTasks(tasks.data || []);
     const changed = JSON.stringify(state.tasks) !== JSON.stringify(tasks.data || []);
     state.tasks = tasks.data || [];
     rebuildAssistantTaskTabIndex();
@@ -2085,17 +2231,23 @@ function startAssistantRealtime(force = false) {
       stopAssistantOrderBellForRealtime(payload.type, payload.payload || {});
       alertAssistantRealtimeOrder(payload.type, payload.payload || {});
       if (payload.type === 'assistant.availability.changed') {
-        const availability = payload.payload?.assistant?.availabilityStatus;
-        const online = typeof payload.payload?.isOnline === 'boolean' ? payload.payload.isOnline
-          : availability ? ['available', 'online', 'active', 'working'].includes(String(availability).toLowerCase()) : null;
-        if (online !== null) {
-          state.assistantIsOnline = online;
-          if (online) startAssistantLocationPings(); else stopAssistantLocationPings();
-          renderAssistantHome();
-        }
+        const availability = payload.payload?.assistant || payload.payload || {};
+        if (!state.assistantAvailabilityBusy) applyAssistantAvailabilitySnapshot({
+          ...availability,
+          statusCode: availability.availabilityStatus
+            || (typeof availability.isOnline === "boolean" ? (availability.isOnline ? "available" : "offline") : ""),
+          updatedAt: availability.availabilityUpdatedAt || availability.updatedAt
+        });
       }
       if (payload.id && !String(payload.id).startsWith('volatile-')) {
         assistantRealtimeLastEventId = String(payload.id);
+      }
+      if (String(payload.type || "").startsWith("support.") && payload.payload?.requesterType === "assistant") {
+        const activeTicketId = state.assistantSupportDetail?.ticket?.id;
+        if (state.assistantSupportOpen && activeTicketId && String(payload.payload?.ticketId || "") === String(activeTicketId)) {
+          void refreshAssistantSupportChat(activeTicketId);
+        }
+        return;
       }
       if (payload.payload?.liveRoutePing || payload.type === 'assistant.location.updated') return;
       void refreshAssistantTasksRealtime(null, {
@@ -2106,6 +2258,7 @@ function startAssistantRealtime(force = false) {
     }
   });
   assistantRealtimeSource.addEventListener("connected", () => {
+    void syncAssistantAvailabilitySnapshot();
     void refreshAssistantTasksRealtime(null, { immediate: true });
   });
   assistantRealtimeSource.onerror = () => {
@@ -2147,25 +2300,53 @@ function applyCustomerTrackRealtimePatch(eventPayload = {}, eventType = "") {
   const liveRoutePing = eventPayload.liveRoutePing && typeof eventPayload.liveRoutePing === "object" ? eventPayload.liveRoutePing : null;
   const liveRoutePingPoint = liveRoutePing ? customerTrackLiveRoutePoint(liveRoutePing) : null;
   const currentLiveRoute = state.confirmedBooking?.liveRoute || state.confirmedBooking?.metadata?.liveRoute || {};
+  const trackingStarted = customerTrackJobStarted(state.confirmedBooking || {}) || Boolean(eventPayload.jobStartedAt) || isWorkingEvent;
+  if (liveRoutePing && !trackingStarted) return false;
   if (liveRoutePing && Date.parse(liveRoutePing.capturedAt || '') <= Date.parse(currentLiveRoute.assistantLocation?.capturedAt || '1970-01-01')) return false;
   const trackLocations = normalizeArray(state.confirmedBooking?.locations);
-  const currentDestination = customerTrackLiveRoutePoint(currentLiveRoute.destinationLocation || trackLocations[trackLocations.length - 1] || trackLocations[0] || {});
+  const currentTrackStatus = customerTrackStatus(state.confirmedBooking || {});
+  const effectiveTrackStatus = isWorkingEvent ? "working" : currentTrackStatus;
+  const enteringWorking = effectiveTrackStatus === "working" && currentTrackStatus !== "working";
+  const resetWorkingRoute = effectiveTrackStatus === "working" && (enteringWorking || String(currentLiveRoute.routeStage || "").toLowerCase() !== "task");
+  const taskRouteRequired = effectiveTrackStatus !== "working" || trackLocations.length > 1;
+  const fallbackDestination = effectiveTrackStatus === "assigned" ? trackLocations[0] : trackLocations[trackLocations.length - 1] || trackLocations[0];
+  const currentDestination = customerTrackLiveRoutePoint(currentLiveRoute.destinationLocation || fallbackDestination || {});
   const currentRoadRoute = normalizeArray(currentLiveRoute.routePolyline || currentLiveRoute.routePath).map(customerTrackLiveRoutePoint).filter(Boolean);
-  const liveRoutePatch = liveRoutePingPoint && currentDestination ? {
+  if (resetWorkingRoute) scheduleCustomerTrackRouteRefresh(bookingId, { force: true });
+  if (trackingStarted && liveRoutePingPoint && currentDestination && taskRouteRequired && (resetWorkingRoute || currentRoadRoute.length < 2)) scheduleCustomerTrackRouteRefresh(bookingId);
+  const liveRoutePatch = trackingStarted && liveRoutePingPoint && currentDestination ? {
     ...currentLiveRoute,
-    status: currentRoadRoute.length >= 2 ? "live" : "route_pending",
+    status: !taskRouteRequired ? "location_live" : !resetWorkingRoute && currentRoadRoute.length >= 2 ? "live" : "route_pending",
     assistantLocation: {
       ...liveRoutePingPoint,
       accuracy: liveRoutePing.accuracyMeters ?? liveRoutePing.accuracy ?? null,
+      heading: Number.isFinite(Number(liveRoutePing.heading)) ? Number(liveRoutePing.heading) : currentLiveRoute.assistantLocation?.heading ?? null,
+      speed: Number.isFinite(Number(liveRoutePing.speed)) ? Number(liveRoutePing.speed) : currentLiveRoute.assistantLocation?.speed ?? null,
       capturedAt: liveRoutePing.capturedAt || new Date().toISOString()
     },
-    destinationLocation: currentLiveRoute.destinationLocation || currentDestination,
-    routePath: currentRoadRoute.length >= 2 ? currentRoadRoute : null,
-    routePolyline: currentRoadRoute.length >= 2 ? currentRoadRoute : null,
+    destinationLocation: fallbackDestination || currentDestination,
+    stopLocations: effectiveTrackStatus === "working" ? trackLocations : currentLiveRoute.stopLocations,
+    routePath: taskRouteRequired && !resetWorkingRoute && currentRoadRoute.length >= 2 ? currentRoadRoute : null,
+    routePolyline: taskRouteRequired && !resetWorkingRoute && currentRoadRoute.length >= 2 ? currentRoadRoute : null,
+    routeStage: effectiveTrackStatus === "working" ? "task" : currentLiveRoute.routeStage || "pickup",
     updatedAt: liveRoutePing.capturedAt || new Date().toISOString()
+  } : null;
+  const workingRouteReset = resetWorkingRoute ? {
+    ...currentLiveRoute,
+    status: taskRouteRequired ? "route_pending" : "location_live",
+    destinationLocation: fallbackDestination || null,
+    stopLocations: trackLocations,
+    routePath: null,
+    routePolyline: null,
+    etaMinutes: null,
+    distanceMeters: null,
+    distanceText: "",
+    routeStage: "task",
+    updatedAt: new Date().toISOString()
   } : null;
   const patch = {
     id: bookingId,
+    assistantJobStartedAt: eventPayload.jobStartedAt || state.confirmedBooking?.assistantJobStartedAt || null,
     assignmentId: eventPayload.assignmentId || state.confirmedBooking?.assignmentId || state.confirmedBooking?.acceptedAssignmentId || "",
     assignmentStatus: isCancelledEvent ? "cancelled" : eventPayload.assignmentStatus || eventPayload.status || state.confirmedBooking?.assignmentStatus || "accepted",
     statusCode: isCancelledEvent ? "cancelled" : eventPayload.statusCode || eventPayload.status || state.confirmedBooking?.statusCode || "accepted",
@@ -2183,10 +2364,11 @@ function applyCustomerTrackRealtimePatch(eventPayload = {}, eventType = "") {
     assignedAssistantProfilePictureUrl: assistant.profilePictureUrl || eventPayload.assistantProfilePictureUrl || state.confirmedBooking?.assignedAssistantProfilePictureUrl || "",
     paymentStatus: hasPaymentStatus ? incomingPaymentStatus : state.confirmedBooking?.paymentStatus,
     isPaid: isPaidEvent ? true : incomingPaymentStatus === "due" || incomingPaymentStatus === "pending" ? false : state.confirmedBooking?.isPaid,
-    liveRoute: liveRoutePatch || state.confirmedBooking?.liveRoute,
+    liveRoute: liveRoutePatch || workingRouteReset || state.confirmedBooking?.liveRoute,
     metadata: {
       ...(state.confirmedBooking?.metadata || {}),
-      liveRoute: liveRoutePatch || state.confirmedBooking?.metadata?.liveRoute,
+      assistantJobStartedAt: eventPayload.jobStartedAt || state.confirmedBooking?.metadata?.assistantJobStartedAt || null,
+      liveRoute: liveRoutePatch || workingRouteReset || state.confirmedBooking?.metadata?.liveRoute,
       paymentStatus: hasPaymentStatus ? incomingPaymentStatus : state.confirmedBooking?.metadata?.paymentStatus,
       isPaid: isPaidEvent ? true : incomingPaymentStatus === "due" || incomingPaymentStatus === "pending" ? false : state.confirmedBooking?.metadata?.isPaid,
       chatLocked: isPaidEvent ? true : incomingPaymentStatus === "due" ? false : state.confirmedBooking?.metadata?.chatLocked,
@@ -2194,6 +2376,8 @@ function applyCustomerTrackRealtimePatch(eventPayload = {}, eventType = "") {
       autoCancelled: isCancelledEvent ? Boolean(eventPayload.autoCancelled ?? true) : state.confirmedBooking?.metadata?.autoCancelled,
       cancellationReason: isCancelledEvent ? eventPayload.reason || eventPayload.message || state.confirmedBooking?.metadata?.cancellationReason : state.confirmedBooking?.metadata?.cancellationReason,
       cancellationReasonCode: isCancelledEvent ? eventPayload.reasonCode || state.confirmedBooking?.metadata?.cancellationReasonCode : state.confirmedBooking?.metadata?.cancellationReasonCode,
+      cancelledBy: isCancelledEvent ? eventPayload.cancelledBy || state.confirmedBooking?.metadata?.cancelledBy : state.confirmedBooking?.metadata?.cancelledBy,
+      cancellationSource: isCancelledEvent ? eventPayload.cancellationSource || state.confirmedBooking?.metadata?.cancellationSource : state.confirmedBooking?.metadata?.cancellationSource,
       cancelledAt: isCancelledEvent ? eventPayload.cancelledAt || new Date().toISOString() : state.confirmedBooking?.metadata?.cancelledAt,
       assignmentId: eventPayload.assignmentId || state.confirmedBooking?.metadata?.assignmentId,
       ...(isWorkingEvent ? {
@@ -2475,7 +2659,7 @@ function startCustomerRealtime(force = false) {
       const eventPayload = payload.payload || {};
       const eventType = String(payload.type || "");
       scheduleCustomerHomeSupplyRefreshForBookingEvent(eventType, eventPayload);
-      if (eventType.startsWith("support.") && state.customerView === "support") {
+      if (eventType.startsWith("support.") && eventPayload.requesterType !== "assistant" && state.customerView === "support") {
         const activeTicketId = state.customerSupportTicket?.ticket?.id;
         if (state.customerSupportMode === "chat" && activeTicketId && String(eventPayload.ticketId || "") === String(activeTicketId)) {
           void openCustomerSupportTicket(activeTicketId);
@@ -3610,7 +3794,7 @@ function customerBookingCancelCountdown(booking = {}) {
   const autoAt = parseBookingCancelDate(eligibility.autoCancelAt);
   if (!openAt && !autoAt) return { text: "Cancel window unavailable", tone: "green", available: false, deadline: null };
 
-  const now = Date.now();
+  const now = portalServerNowMs();
   if (autoAt && now >= autoAt.getTime()) {
     return { text: "Cancel window closed", tone: "red", available: false, deadline: autoAt, phase: "closed" };
   }
@@ -3660,37 +3844,14 @@ function customerBookingCancelCountdown(booking = {}) {
 
 function customerCancelSectionHtml(booking = {}) {
   const bookingId = booking?.id || booking?.bookingId || "";
-  const eligibility = booking.customerCancelEligibility || {};
-  const reasonCode = String(eligibility.reasonCode || "");
   if (!bookingId) return "";
 
   const status = String(booking.status || booking.statusCode || booking.status_code || "").toLowerCase();
-  if (["cancelled", "completed", "success", "rejected"].includes(status)) return "";
+  if (["cancelled", "canceled", "completed", "success", "done", "failed", "rejected", "expired"].includes(status)) return "";
   const assignmentStatus = String(booking.assignmentStatus || booking.assignment_status || booking.metadata?.assignmentStatus || "").toLowerCase();
-  const assistantAssigned = Boolean(booking.assignmentId || booking.acceptedAssignmentId || booking.accepted_assignment_id || booking.assistantId || booking.assistant?.id)
-    || ["assigned", "accepted", "in_progress", "working", "approval_pending", "completed"].includes(assignmentStatus);
-  const startedAt = customerTrackDateValue(
-    booking.actualTaskStartedAt,
-    booking.assignmentActualStartedAt,
-    booking.metadata?.actualStartedAt,
-    booking.metadata?.startedAt,
-    booking.metadata?.taskTimer?.actualStartedAt,
-    booking.metadata?.taskTimer?.startedAt
-  );
-  const startAt = customerTrackPlannedStartDate(booking);
-  const assignedStartReached = assistantAssigned && !startedAt && startAt && Date.now() >= startAt.getTime();
-  if (assistantAssigned && !assignedStartReached) return "";
-
-  const hasBackendEligibility = Object.keys(eligibility).length > 0;
-  const backendCanCancel = hasBackendEligibility ? Boolean(eligibility.canCancel) : true;
-  const openAt = parseBookingCancelDate(eligibility.cancelOpensAt);
-  const autoCancelAt = parseBookingCancelDate(eligibility.autoCancelAt);
-  const isNotCancellable = reasonCode === "not_cancellable" || reasonCode === "assistant_delay_auto_cancel_closed";
-  const canCancel = (backendCanCancel || assignedStartReached) && !isNotCancellable;
-  if (!canCancel) return "";
+  if (["cancelled", "canceled", "completed", "success", "done", "failed", "rejected", "expired"].includes(assignmentStatus)) return "";
 
   return `<section class="customer-cancel-section customer-track-cancel-section">
-    <span hidden data-customer-cancel-countdown ${openAt ? `data-customer-cancel-open="${escapeHtml(openAt.toISOString())}"` : ""} ${autoCancelAt ? `data-customer-cancel-auto="${escapeHtml(autoCancelAt.toISOString())}"` : ""} data-customer-cancel-available="1"></span>
     <button class="danger-btn customer-cancel-btn" type="button" data-cancel-booking="${escapeHtml(bookingId)}">Cancel Task</button>
   </section>`;
 }
@@ -5140,21 +5301,57 @@ function customerCartLocationKey(stop = {}) {
   const latitude = Number(stop.latitude);
   const longitude = Number(stop.longitude);
   if (Number.isFinite(latitude) && Number.isFinite(longitude)) return `pin:${latitude.toFixed(6)},${longitude.toFixed(6)}`;
-  return `address:${String(stop.address || "").trim().toLowerCase()}`;
+  return `address:${String(stop.address || "").trim().replace(/\s+/g, " ").toLowerCase()}`;
 }
 
-function customerCartLocationAlreadyAdded(candidate = {}, ignoreIndex = -1) {
+function customerCartLocationsSame(first = {}, second = {}) {
+  const firstAddressId = String(first.addressId || first.savedAddressId || "").trim();
+  const secondAddressId = String(second.addressId || second.savedAddressId || "").trim();
+  if (firstAddressId && secondAddressId && firstAddressId === secondAddressId) return true;
+  const firstLatitude = Number(first.latitude);
+  const firstLongitude = Number(first.longitude);
+  const secondLatitude = Number(second.latitude);
+  const secondLongitude = Number(second.longitude);
+  if (
+    Number.isFinite(firstLatitude)
+    && Number.isFinite(firstLongitude)
+    && Number.isFinite(secondLatitude)
+    && Number.isFinite(secondLongitude)
+    && firstLatitude.toFixed(6) === secondLatitude.toFixed(6)
+    && firstLongitude.toFixed(6) === secondLongitude.toFixed(6)
+  ) return true;
+  const firstKey = customerCartLocationKey({ ...first, addressId: null });
+  const secondKey = customerCartLocationKey({ ...second, addressId: null });
+  return firstKey !== "address:" && firstKey === secondKey;
+}
+
+function customerCartAdjacentDuplicateIndex(stops = []) {
+  for (let index = 1; index < stops.length; index += 1) {
+    if (customerCartLocationsSame(stops[index - 1], stops[index])) return index;
+  }
+  return -1;
+}
+
+function customerCartLocationWouldRepeatAdjacent(candidate = {}, replaceIndex = -1) {
   const candidateStop = customerNormalizeCartLocationStop(candidate, 0, false);
-  const candidateKey = customerCartLocationKey(candidateStop);
-  if (!candidateKey || candidateKey === "address:") return false;
-  return customerCartLocationStopsForPayload().some((stop, index) =>
-    index !== Number(ignoreIndex) && customerCartLocationKey(stop) === candidateKey
-  );
+  const stops = customerCartLocationStopsForPayload();
+  const requestedIndex = Number(replaceIndex);
+  const targetIndex = Number.isInteger(requestedIndex) && requestedIndex >= 0 && requestedIndex < stops.length
+    ? requestedIndex
+    : stops.length;
+  return (targetIndex > 0 && customerCartLocationsSame(stops[targetIndex - 1], candidateStop))
+    || (targetIndex < stops.length - 1 && customerCartLocationsSame(candidateStop, stops[targetIndex + 1]));
 }
 
-function assertCustomerCartLocationNotDuplicate(candidate = {}, ignoreIndex = -1) {
-  if (customerCartLocationAlreadyAdded(candidate, ignoreIndex)) {
-    throw new Error("This location is already added to this booking.");
+function assertCustomerCartLocationNotAdjacent(candidate = {}, replaceIndex = -1) {
+  if (customerCartLocationWouldRepeatAdjacent(candidate, replaceIndex)) {
+    throw new Error("The same location cannot be added back to back. Add a different location between repeated stops.");
+  }
+}
+
+function assertCustomerCartLocationSequence(stops = []) {
+  if (customerCartAdjacentDuplicateIndex(stops) >= 0) {
+    throw new Error("The same location cannot be added back to back. Add a different location between repeated stops.");
   }
 }
 
@@ -5169,15 +5366,14 @@ function customerPrimaryCartLocationStop() {
 function syncCustomerCartLocationStops() {
   const requirement = customerCartLocationRequirement();
   const primary = customerPrimaryCartLocationStop();
-  const seen = new Set(primary ? [customerCartLocationKey(primary)] : []);
+  let previousStop = primary;
   const maxExtraStops = Math.max(0, requirement.maxLocations - (primary ? 1 : 0));
   state.customerLocationStops = normalizeArray(state.customerLocationStops)
     .map((stop, index) => customerNormalizeCartLocationStop(stop, index + 1, false))
     .filter((stop) => stop.address && stop.clusterId && stop.latitude !== null && stop.longitude !== null)
     .filter((stop) => {
-      const key = customerCartLocationKey(stop);
-      if (seen.has(key)) return false;
-      seen.add(key);
+      if (previousStop && customerCartLocationsSame(previousStop, stop)) return false;
+      previousStop = stop;
       return true;
     })
     .slice(0, maxExtraStops);
@@ -5214,7 +5410,12 @@ function customerCartLocationCard(stop = {}, index = 0, total = 1) {
 }
 
 function customerCartRouteTitle(stop = {}, fallback = "Location") {
-  return customerDisplayLocationLabel(stop) || stop.label || stop.name || stop.title || fallback;
+  const label = String(stop.label || stop.name || stop.title || "").trim();
+  const address = String(stop.address || stop.addressText || "").trim();
+  if (["previous used", "current location"].includes(label.toLowerCase()) && address) {
+    return address.split(",")[0]?.trim() || label;
+  }
+  return label || address.split(",")[0]?.trim() || fallback;
 }
 
 function customerCartRouteMobile(stop = {}) {
@@ -5271,7 +5472,7 @@ function customerCartRouteSummaryHtml(stops = [], canAdd = false, maxLocations =
     return `<div class="customer-route-summary-card current-only single-location">
       <span class="customer-route-dot start" aria-hidden="true"></span>
       ${customerCartRouteSummaryCopyHtml(start, startTitle, "start")}
-      <span></span>
+      <button class="customer-route-location-action edit" data-edit-customer-cart-location-stop="0" type="button" aria-label="Edit location" title="Edit location">${customerIcon("edit")}</button>
       ${showAddStops ? `<button class="customer-route-add-stop" data-open-cart-stop-picker type="button">Add Stops</button>` : ""}
     </div>`;
   }
@@ -5297,13 +5498,16 @@ function customerCartRouteDetailsHtml(stops = []) {
       const mobile = customerCartRouteMobile(stop);
       const personName = String(stop.personName || stop.metadata?.personName || "").trim();
       const titleExtra = [personName, mobile].filter(Boolean).join(personName && mobile ? " | " : "");
-      return `<article class="customer-route-detail-row ${isStart ? "start" : isEnd ? "end" : "middle"}" data-route-stop-index="${escapeHtml(index)}" data-edit-customer-cart-location-stop="${escapeHtml(index)}" role="button" tabindex="0" aria-label="Change route location">
+      return `<article class="customer-route-detail-row ${isStart ? "start" : isEnd ? "end" : "middle"}" data-route-stop-index="${escapeHtml(index)}">
         <span class="customer-route-detail-marker">${isStart || isEnd ? "" : escapeHtml(index)}</span>
         <span class="customer-route-detail-copy">
           <b>${escapeHtml(customerCartRouteTitle(stop, customerCartLocationLabel(index, stops.length)))}${titleExtra ? ` <em>${escapeHtml(titleExtra)}</em>` : ""}</b>
           <small>${escapeHtml(customerCartRouteDetailAddress(stop))}</small>
         </span>
-        <button data-open-customer-cart-route-delete="${escapeHtml(index)}" type="button" aria-label="Remove stop">${customerIcon("trash")}</button>
+        <span class="customer-route-detail-actions">
+          <button class="edit" data-edit-customer-cart-location-stop="${escapeHtml(index)}" type="button" aria-label="Edit location" title="Edit location">${customerIcon("edit")}</button>
+          ${stops.length > 1 ? `<button class="delete" data-open-customer-cart-route-delete="${escapeHtml(index)}" type="button" aria-label="Delete location" title="Delete location">${customerIcon("trash")}</button>` : ""}
+        </span>
       </article>`;
     }).join("")}
   </div>`;
@@ -5383,6 +5587,18 @@ function customerCartRouteDeletePopupHtml() {
   </div>`;
 }
 
+function openCustomerCartRouteDeleteConfirmation(index) {
+  const stops = customerCartLocationStopsForPayload();
+  const deleteIndex = Number(index);
+  if (stops.length <= 1 || !Number.isInteger(deleteIndex) || deleteIndex < 0 || deleteIndex >= stops.length) return false;
+  state.customerCartRouteDeleteIndex = deleteIndex;
+  if (!refreshCustomerCartLocationSection()) return false;
+  window.requestAnimationFrame(() => {
+    root.querySelector("[data-close-customer-route-delete]")?.focus?.({ preventScroll: true });
+  });
+  return true;
+}
+
 function focusCustomerCartLocationInput() {
   const input = root.querySelector("[data-customer-cart-location-search]");
   if (!(input instanceof HTMLInputElement)) return;
@@ -5431,12 +5647,11 @@ async function addCustomerCartLocationStop(candidate = {}) {
   const requirement = customerCartLocationRequirement();
   const stops = customerCartLocationStopsForPayload();
   if (stops.length >= requirement.maxLocations) throw new Error(`Maximum ${requirement.maxLocations} locations allowed for this service.`);
-  assertCustomerCartLocationNotDuplicate(candidate);
+  assertCustomerCartLocationNotAdjacent(candidate);
   const stop = await validateCustomerCartLocation(candidate);
   if (!stop.clusterId) throw new Error("This location is not in an active working cluster.");
+  assertCustomerCartLocationSequence([...stops, stop]);
   await validateCustomerCartLocationRoute([...stops, stop]);
-  const duplicate = stops.some((item) => customerCartLocationKey(item) === customerCartLocationKey(stop));
-  if (duplicate) throw new Error("This location is already added to this booking.");
   state.customerRoutePrimaryCleared = false;
   state.customerLocationStops.push(stop);
   state.customerCartLocationQuery = "";
@@ -5460,15 +5675,13 @@ async function replaceCustomerCartLocationStop(index, candidate = {}) {
   if (!Number.isInteger(replaceIndex) || replaceIndex < 0 || replaceIndex >= stops.length) {
     throw new Error("Choose a valid route location to change.");
   }
-  assertCustomerCartLocationNotDuplicate(candidate, replaceIndex);
+  assertCustomerCartLocationNotAdjacent(candidate, replaceIndex);
   const stop = await validateCustomerCartLocation(candidate);
   if (!stop.clusterId) throw new Error("This location is not in an active working cluster.");
-  const remainingStops = stops.filter((_, itemIndex) => itemIndex !== replaceIndex);
-  await validateCustomerCartLocationRoute([...remainingStops, stop]);
-  const duplicate = remainingStops.some((item) => customerCartLocationKey(item) === customerCartLocationKey(stop));
-  if (duplicate) throw new Error("This location is already added to this booking.");
   const nextStops = [...stops];
   nextStops[replaceIndex] = stop;
+  assertCustomerCartLocationSequence(nextStops);
+  await validateCustomerCartLocationRoute(nextStops);
   setCustomerCartRouteOrder(nextStops);
   state.customerCartRouteEditIndex = -1;
   state.customerCartLocationQuery = "";
@@ -5566,6 +5779,31 @@ function revokeCustomerCartUploadUrls(files = []) {
         /* noop */
       }
     }
+  }
+}
+
+async function normalizePortalUploadFile(file) {
+  if (!(file instanceof Blob)) return file;
+  let header = "";
+  try {
+    header = await file.slice(0, 4096).text();
+  } catch (error) {
+    return file;
+  }
+  const isSvg = /^(?:\uFEFF)?\s*(?:<\?xml[\s\S]*?\?>\s*)?(?:<!--[\s\S]*?-->\s*)*<svg(?:\s|>)/i.test(header);
+  if (!isSvg) return file;
+
+  const originalName = String(file.name || "image.svg");
+  const baseName = originalName.replace(/\.[^.]+$/, "").trim() || "image";
+  const correctedName = `${baseName}.svg`;
+  if (String(file.type || "").toLowerCase() === "image/svg+xml" && /\.svg$/i.test(originalName)) return file;
+  try {
+    return new File([file], correctedName, { type: "image/svg+xml", lastModified: Number(file.lastModified || Date.now()) });
+  } catch (error) {
+    const correctedFile = new Blob([file], { type: "image/svg+xml" });
+    Object.defineProperty(correctedFile, "name", { configurable: true, value: correctedName });
+    Object.defineProperty(correctedFile, "lastModified", { configurable: true, value: Number(file.lastModified || Date.now()) });
+    return correctedFile;
   }
 }
 
@@ -7036,7 +7274,7 @@ function bottomCartBar() {
           const duration = customerTrackDurationUnitText(durationMinutes);
           const isWorking = ["working", "in_progress", "approval_pending"].includes(String(customerTrackStatus(booking) || "").toLowerCase());
           const liveTaskHtml = customerHomeOngoingBookingLiveHtml(booking, items);
-          const canExtend = isWorking && Boolean(customerTrackExtendDurationHtml(booking, items, "working"));
+          const canExtend = isWorking && !customerTrackExtensionCutoffState(booking, "working").disabled && Boolean(customerTrackExtendDurationHtml(booking, items, "working"));
           const extendHtml = canExtend ? `<span class="customer-ongoing-task-extend" style="position:absolute !important;left:auto !important;right:100px !important;bottom:10px !important;">${customerTrackIcon("plus")}Extend</span>` : "";
           const totalTimeHtml = customerTrackTotalTimeHtml(booking, items, { liveCountdown: isWorking });
           return `<button class="customer-ongoing-task-card${isWorking ? " has-live-task" : ""}" type="button" data-track-booking="${escapeHtml(booking.id || "")}">
@@ -7070,7 +7308,7 @@ function customerHomeOngoingBookingLiveHtml(booking = {}, items = []) {
   const pins = metadata.taskPins || {};
   const finishPin = String(pins.finishPin || metadata.finishPin || "").trim();
   const pinHtml = /^\d{4}$/.test(finishPin)
-    ? `<span class="customer-ongoing-task-finish-pin"><small>Finish PIN</small><b>${finishPin.split("").map((digit) => `<i>${escapeHtml(digit)}</i>`).join("")}</b></span>`
+    ? `<span class="customer-ongoing-task-finish-pin"><small>End PIN</small><b>${finishPin.split("").map((digit) => `<i>${escapeHtml(digit)}</i>`).join("")}</b></span>`
     : "";
   return pinHtml ? `<span class="customer-ongoing-task-live">${pinHtml}</span>` : "";
 }
@@ -7248,7 +7486,7 @@ async function refreshCustomerPaymentMethodConfig() {
       cacheKey: "/portal/config",
       forceRefresh: true
     });
-    state.portalConfig = configPayload.data || state.portalConfig || null;
+    applyPortalConfig(configPayload.data, state.portalConfig);
     writePortalSessionCache();
   } catch (error) {
     // Keep the last known configuration so payment selection remains usable offline.
@@ -7265,6 +7503,17 @@ async function openCustomerPaymentMethodSheet(context = null) {
     addOn: context.addOn && typeof context.addOn === "object" ? { ...context.addOn } : null
   } : null;
   await refreshCustomerPaymentMethodConfig();
+  if (String(state.customerPaymentSheetContext?.addOn?.kind || "").toLowerCase() === "extension") {
+    const cutoff = customerTrackExtensionCutoffState(customerTrackCurrentBooking(state.customerPaymentSheetContext.bookingId));
+    if (cutoff.disabled) {
+      state.customerPaymentSheetContext = null;
+      state.customerPaymentSheetOpen = false;
+      refreshCustomerPaymentSheetOnly();
+      updateCustomerTrackExtensionControls();
+      notify(cutoff.message, "error");
+      return false;
+    }
+  }
   const methods = customerPaymentSheetMethods();
   const selectableMethods = methods.filter((method) => !method.disabled);
   const currentSelectionAvailable = selectableMethods.some((method) => method.value === state.selectedPayment);
@@ -10004,16 +10253,17 @@ function customerHomeLocationPickerSheet() {
   const currentLocationActionLabel = "Change";
   const locationCardTitle = customerDisplayLocationLabel(currentLocation) || "Current location";
   const locationCardAddress = locationShortAddress(currentLocation);
+  const listSignature = customerLocationPickerListSignature(savedAddresses, recentLocations);
   return `<div class="customer-location-picker-overlay ${state.customerLocationPickerClosing ? "is-closing" : ""}" data-location-picker-overlay>
     <div class="customer-location-picker-scrim" aria-hidden="true"></div>
     <div class="customer-location-picker-panel">
       <button class="customer-location-picker-close" data-close-location-picker type="button" aria-label="Close">${customerIcon("x")}</button>
       <section class="customer-location-picker-sheet ${searching ? "is-searching" : "is-listing"}" role="dialog" aria-modal="true" aria-label="Select your location">
-      ${hasCurrentLocation ? `<div class="customer-location-permission-card current">
+      ${hasCurrentLocation ? `<div class="customer-location-permission-card current" data-location-permission-state="current">
         <span class="customer-location-disabled-icon">${customerIcon("map")}</span>
         <div><b>${escapeHtml(locationCardTitle)}</b><small>${escapeHtml(locationCardAddress)}</small></div>
         <button type="button" data-change-current-location>${currentLocationActionLabel}</button>
-      </div>` : `<div class="customer-location-permission-card">
+      </div>` : `<div class="customer-location-permission-card" data-location-permission-state="disabled">
         <span class="customer-location-disabled-icon">${customerIcon("map")}</span>
         <div><b>Device location not enabled</b><small>Enable for a better service experience</small></div>
         <button type="button" data-use-current-location ${state.locationBusy ? "disabled" : ""}>${state.locationBusy ? "Enabling..." : "Enable"}</button>
@@ -10025,11 +10275,11 @@ function customerHomeLocationPickerSheet() {
         </div>
         <form class="customer-location-search-entry" data-location-search-form>
           <span>${customerIcon("search")}</span>
-          <input name="q" value="${escapeHtml(state.locationSearchQuery)}" placeholder="Search for area, street name..." autocomplete="off" data-location-search-input>
-          ${searching ? `<button class="customer-location-search-clear" data-clear-location-search type="button" aria-label="Clear search">${customerIcon("x")}</button>` : ""}
+          <input name="q" value="${escapeHtml(state.locationSearchQuery)}" placeholder="Search places, addresses or landmarks" autocomplete="off" data-location-search-input>
+          <button class="customer-location-search-clear" data-clear-location-search type="button" aria-label="Clear search" ${searching ? "" : "hidden"}>${customerIcon("x")}</button>
         </form>
       </div>
-      <div data-location-picker-body>${searching ? customerHomeLocationSearchResults() : customerHomeLocationPickerListHtml(savedAddresses, recentLocations)}</div>
+      <div data-location-picker-body data-location-picker-mode="${searching ? "search" : "list"}" data-location-list-signature="${escapeHtml(listSignature)}">${searching ? customerHomeLocationSearchResults() : customerHomeLocationPickerListHtml(savedAddresses, recentLocations)}</div>
       </section>
     </div>
   </div>`;
@@ -10071,29 +10321,126 @@ function customerHomeLocationPickerListHtml(savedAddresses = state.customerAddre
   ${!saved.length && !recent.length ? `<p class="customer-location-picker-empty">No saved or recent locations yet. Search manually or enable current location.</p>` : ""}`;
 }
 
+function customerLocationPickerListSignature(savedAddresses = state.customerAddresses || [], recentLocations = state.customerRecentLocations || []) {
+  const signature = (locations) => normalizeArray(locations)
+    .map((location) => `${location.addressId || location.id || ""}:${location.updatedAt || location.updated_at || ""}:${location.address || location.addressText || ""}`)
+    .join("|");
+  return `${signature(savedAddresses)}::${signature(recentLocations)}`;
+}
+
 function updateCustomerLocationPickerPermissionUi() {
   const overlay = root.querySelector("[data-location-picker-overlay]");
   const card = overlay?.querySelector(".customer-location-permission-card");
-  const button = overlay?.querySelector("[data-use-current-location]");
   const message = overlay?.querySelector("[data-location-inline-message]");
   const currentLocation = state.currentDeviceLocation || {};
   const hasCurrentLocation = state.customerLocationPermissionGranted && Number.isFinite(Number(currentLocation.latitude)) && Number.isFinite(Number(currentLocation.longitude));
   const currentLocationActionLabel = "Change";
-  if (card && hasCurrentLocation) {
-    card.classList.add("current");
-    card.innerHTML = `<span class="customer-location-disabled-icon">${customerIcon("map")}</span>
-      <div><b>${escapeHtml(customerDisplayLocationLabel(currentLocation) || "Current location")}</b><small>${escapeHtml(locationShortAddress(currentLocation))}</small></div>
-      <button type="button" data-change-current-location>${currentLocationActionLabel}</button>`;
-  }
-  if (button) {
-    button.textContent = state.locationBusy ? "Enabling..." : "Enable";
-    button.disabled = Boolean(state.locationBusy);
+  if (card) {
+    const permissionState = hasCurrentLocation ? "current" : "disabled";
+    if (card.dataset.locationPermissionState !== permissionState) {
+      card.dataset.locationPermissionState = permissionState;
+      card.classList.toggle("current", hasCurrentLocation);
+      card.innerHTML = hasCurrentLocation
+        ? `<span class="customer-location-disabled-icon">${customerIcon("map")}</span>
+          <div><b></b><small></small></div>
+          <button type="button" data-change-current-location>${currentLocationActionLabel}</button>`
+        : `<span class="customer-location-disabled-icon">${customerIcon("map")}</span>
+          <div><b>Device location not enabled</b><small>Enable for a better service experience</small></div>
+          <button type="button" data-use-current-location>Enable</button>`;
+    }
+    if (hasCurrentLocation) {
+      const title = card.querySelector("b");
+      const address = card.querySelector("small");
+      const changeButton = card.querySelector("[data-change-current-location]");
+      if (title) title.textContent = customerDisplayLocationLabel(currentLocation) || "Current location";
+      if (address) address.textContent = locationShortAddress(currentLocation);
+      if (changeButton) changeButton.textContent = currentLocationActionLabel;
+    } else {
+      const enableButton = card.querySelector("[data-use-current-location]");
+      if (enableButton) {
+        enableButton.textContent = state.locationBusy ? "Enabling..." : "Enable";
+        enableButton.disabled = Boolean(state.locationBusy);
+      }
+    }
   }
   if (message) {
     message.textContent = state.locationMessage || "";
     message.classList.toggle("visible", Boolean(state.locationMessage));
   }
   return Boolean(overlay);
+}
+
+function customerLocationSearchResultKey(result = {}, index = 0) {
+  const latitude = Number(result.latitude);
+  const longitude = Number(result.longitude);
+  const coordinates = Number.isFinite(latitude) && Number.isFinite(longitude)
+    ? `${latitude.toFixed(6)},${longitude.toFixed(6)}`
+    : "";
+  return String(result.placeId || `${coordinates}|${result.label || ""}|${result.address || ""}` || index);
+}
+
+function customerLocationSearchResultCardHtml(result = {}, index = 0) {
+  const key = customerLocationSearchResultKey(result, index);
+  return `<button class="customer-location-search-result-card" data-location-result="${index}" data-location-result-key="${escapeHtml(key)}" type="button">
+    <span class="customer-location-result-icon">${customerIcon("map")}</span>
+    <span>
+      <b>${escapeHtml(result.label || "Location")}</b>
+      <em>${escapeHtml(result.address || "")}</em>
+    </span>
+  </button>`;
+}
+
+function reconcileCustomerLocationSearchResults(container) {
+  if (!(container instanceof HTMLElement)) return;
+  const results = normalizeArray(state.locationResults);
+  const busy = Boolean(state.locationBusy);
+  container.classList.toggle("is-loading", busy);
+  container.setAttribute("aria-busy", String(busy));
+  const list = container.querySelector("[data-location-search-list]");
+  if (!(list instanceof HTMLElement)) return;
+
+  const currentCards = Array.from(list.querySelectorAll("[data-location-result-key]"));
+  if (busy && currentCards.length) return;
+  if (!results.length) {
+    currentCards.forEach((card) => card.remove());
+    let empty = list.querySelector("[data-location-search-empty]");
+    if (!empty) {
+      empty = document.createElement("p");
+      empty.className = "customer-location-picker-empty";
+      empty.dataset.locationSearchEmpty = "true";
+      list.appendChild(empty);
+    }
+    const queryLength = String(state.locationSearchQuery || "").trim().length;
+    empty.textContent = busy
+      ? "Searching locations..."
+      : queryLength < 2 ? "Enter at least 2 characters to search." : "No matching locations found.";
+    return;
+  }
+
+  list.querySelector("[data-location-search-empty]")?.remove();
+  const cardsByKey = new Map(currentCards.map((card) => [card.dataset.locationResultKey, card]));
+  results.forEach((result, index) => {
+    const key = customerLocationSearchResultKey(result, index);
+    let card = cardsByKey.get(key);
+    if (!card) {
+      const holder = document.createElement("div");
+      holder.innerHTML = customerLocationSearchResultCardHtml(result, index);
+      card = holder.firstElementChild;
+    }
+    if (!(card instanceof HTMLButtonElement)) return;
+    card.dataset.locationResult = String(index);
+    card.dataset.locationResultKey = key;
+    const title = card.querySelector("b");
+    const address = card.querySelector("em");
+    const nextTitle = String(result.label || "Location");
+    const nextAddress = String(result.address || "");
+    if (title && title.textContent !== nextTitle) title.textContent = nextTitle;
+    if (address && address.textContent !== nextAddress) address.textContent = nextAddress;
+    const currentAtIndex = list.children[index];
+    if (currentAtIndex !== card) list.insertBefore(card, currentAtIndex || null);
+    cardsByKey.delete(key);
+  });
+  cardsByKey.forEach((card) => card.remove());
 }
 
 function updateCustomerHomeLocationPickerSearch({ focusSearch = false } = {}) {
@@ -10109,20 +10456,76 @@ function updateCustomerHomeLocationPickerSearch({ focusSearch = false } = {}) {
   sheet.classList.toggle("is-searching", searching);
   sheet.classList.toggle("is-listing", !searching);
   sticky.classList.toggle("active", searching);
-  if (input.value !== state.locationSearchQuery) input.value = state.locationSearchQuery;
-  const clearButton = form.querySelector("[data-clear-location-search]");
-  if (searching && !clearButton) {
+  if (document.activeElement !== input && input.value !== state.locationSearchQuery) input.value = state.locationSearchQuery;
+  let clearButton = form.querySelector("[data-clear-location-search]");
+  if (!clearButton) {
     form.insertAdjacentHTML("beforeend", `<button class="customer-location-search-clear" data-clear-location-search type="button" aria-label="Clear search">${customerIcon("x")}</button>`);
-  } else if (!searching && clearButton) {
-    clearButton.remove();
+    clearButton = form.querySelector("[data-clear-location-search]");
   }
-  body.innerHTML = searching ? customerHomeLocationSearchResults() : customerHomeLocationPickerListHtml();
-  if (focusSearch) setTimeout(focusLocationSearchInput, 0);
+  if (clearButton) clearButton.hidden = !searching;
+
+  if (searching) {
+    if (body.dataset.locationPickerMode !== "search" || !body.querySelector("[data-location-search-results]")) {
+      body.dataset.locationPickerMode = "search";
+      body.innerHTML = customerHomeLocationSearchResults();
+    }
+    reconcileCustomerLocationSearchResults(body.querySelector("[data-location-search-results]"));
+  } else {
+    const signature = customerLocationPickerListSignature();
+    if (body.dataset.locationPickerMode !== "list" || body.dataset.locationListSignature !== signature) {
+      body.dataset.locationPickerMode = "list";
+      body.dataset.locationListSignature = signature;
+      body.innerHTML = customerHomeLocationPickerListHtml();
+    }
+  }
+  if (focusSearch && document.activeElement !== input) setTimeout(focusLocationSearchInput, 0);
   return true;
 }
 
 function customerHomeLocationPickerHost() {
-  return root.querySelector(".zigo-commerce-home") || root.querySelector(".customer-cart-screen");
+  const hasLocationPickerView = root.querySelector(".zigo-commerce-home") || root.querySelector(".customer-cart-screen");
+  return hasLocationPickerView ? root : null;
+}
+
+function setCustomerViewHtmlPreservingLocationPicker(html) {
+  const overlay = root.querySelector("[data-location-picker-overlay]");
+  const shouldPreserve = Boolean(
+    overlay
+    && state.customerLocationPickerSheetOpen
+    && ["home", "cart"].includes(state.customerView)
+    && !isCustomerLocationPickerSuppressed()
+  );
+  if (!shouldPreserve) {
+    root.innerHTML = html;
+    return;
+  }
+
+  const sheet = overlay.querySelector(".customer-location-picker-sheet");
+  const input = overlay.querySelector("[data-location-search-input]");
+  const inputWasFocused = document.activeElement === input;
+  const selectionStart = inputWasFocused ? input.selectionStart : null;
+  const selectionEnd = inputWasFocused ? input.selectionEnd : null;
+  const sheetScrollTop = sheet?.scrollTop || 0;
+
+  if (overlay.parentNode !== root) root.appendChild(overlay);
+  overlay.classList.remove("is-closing");
+  overlay.classList.add("is-stable");
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  template.content.querySelector("[data-location-picker-overlay]")?.remove();
+  Array.from(root.childNodes).forEach((node) => {
+    if (node !== overlay) node.remove();
+  });
+  root.insertBefore(template.content, overlay);
+
+  updateCustomerLocationPickerPermissionUi();
+  updateCustomerHomeLocationPickerSearch();
+  const restoredSheet = overlay.querySelector(".customer-location-picker-sheet");
+  if (restoredSheet) restoredSheet.scrollTop = sheetScrollTop;
+  if (inputWasFocused && input?.isConnected) {
+    input.focus({ preventScroll: true });
+    if (selectionStart !== null && selectionEnd !== null) input.setSelectionRange(selectionStart, selectionEnd);
+  }
 }
 
 function syncCustomerHomeLocationPickerSheet({ focusSearch = false } = {}) {
@@ -10151,9 +10554,13 @@ function syncCustomerHomeLocationPickerSheet({ focusSearch = false } = {}) {
     return;
   }
   state.customerLocationPickerClosing = false;
-  const html = customerHomeLocationPickerSheet();
-  if (existing) existing.outerHTML = html;
-  else host.insertAdjacentHTML("beforeend", html);
+  if (existing) {
+    existing.classList.remove("is-closing");
+    updateCustomerLocationPickerPermissionUi();
+    updateCustomerHomeLocationPickerSearch({ focusSearch });
+    return;
+  }
+  host.insertAdjacentHTML("beforeend", customerHomeLocationPickerSheet());
   if (focusSearch) setTimeout(focusLocationSearchInput, 80);
 }
 
@@ -10180,7 +10587,6 @@ async function refreshCustomerLocationPickerDataInPlace() {
   const [addresses] = await Promise.all([
     portalCachedGet(addressesUrl, { cacheKey: addressesUrl, forceRefresh: true }).catch(() => ({ data: state.customerAddresses })),
     customerLoadPreviousUsedLocations({ forceRefresh: true }).catch(() => state.customerRecentLocations),
-    ensureCustomerLocationServiceBoundaries().catch(() => customerLocationServiceBoundaries),
     refreshCustomerLocationPermissionState().catch(() => state.customerLocationPermissionGranted)
   ]);
   state.customerAddresses = normalizeArray(addresses?.data);
@@ -10374,18 +10780,16 @@ function customerLocationPermissionPopupHtml() {
 
 function customerHomeLocationSearchResults() {
   const mapResults = Array.isArray(state.locationResults) ? state.locationResults : [];
-  const hasAny = mapResults.length || state.locationBusy;
-  if (!hasAny) return `<div class="customer-location-search-results"><p class="customer-location-picker-empty">No matching locations found.</p></div>`;
-  return `<div class="customer-location-search-results">
+  const queryLength = String(state.locationSearchQuery || "").trim().length;
+  const emptyText = state.locationBusy
+    ? "Searching locations..."
+    : queryLength < 2 ? "Enter at least 2 characters to search." : "No matching locations found.";
+  return `<div class="customer-location-search-results ${state.locationBusy ? "is-loading" : ""}" data-location-search-results aria-busy="${Boolean(state.locationBusy)}">
     <section class="customer-location-search-group">
-      <h3>Map Search</h3>
-      ${state.locationBusy ? `<p class="customer-location-picker-empty">Searching map locations...</p>` : mapResults.length ? mapResults.map((result, index) => `<button class="customer-location-search-result-card" data-location-result="${index}" type="button">
-      <span class="customer-location-result-icon">${customerIcon("map")}</span>
-      <span>
-        <b>${escapeHtml(result.label || "Location")}</b>
-        <em>${escapeHtml(result.address || "")}</em>
-      </span>
-    </button>`).join("") : `<p class="customer-location-picker-empty">No map locations found.</p>`}
+      <header class="customer-location-search-group-head"><h3>Search results</h3><span class="customer-location-search-progress" aria-hidden="true"></span></header>
+      <div class="customer-location-search-list" data-location-search-list>
+        ${mapResults.length ? mapResults.map((result, index) => customerLocationSearchResultCardHtml(result, index)).join("") : `<p class="customer-location-picker-empty" data-location-search-empty>${emptyText}</p>`}
+      </div>
     </section>
   </div>`;
 }
@@ -10432,7 +10836,14 @@ function customerLocationPreview({ interactive = false } = {}) {
     return `<div class="location-preview ${serviceable ? "serviceable" : "not-serviceable"} map-only">
       <div class="customer-location-map-shell">
         <div id="customerLocationMap" class="customer-location-real-map"><div class="location-map-loading">Loading map...</div></div>
-        <span class="map-callout">${escapeHtml(calloutTitle)}</span>
+        <div class="customer-location-map-address" data-customer-map-address aria-live="polite">
+          <span class="customer-location-map-address-icon">${customerIcon("map")}</span>
+          <span class="customer-location-map-address-copy">
+            <b data-customer-map-title>${escapeHtml(calloutTitle)}</b>
+            <small data-customer-map-address-text>${escapeHtml(locationShortAddress(picked))}</small>
+          </span>
+          <span class="customer-location-geocode-spinner" aria-hidden="true"></span>
+        </div>
         <span class="customer-location-map-pin" aria-hidden="true">${customerIcon("map")}</span>
         <small class="customer-location-map-coords" data-customer-map-coords>${Number(picked.latitude || 0).toFixed(6)}, ${Number(picked.longitude || 0).toFixed(6)}</small>
       </div>
@@ -10489,128 +10900,6 @@ function customerLocationMapLatLngFromWorld(x, y, zoom) {
   return { latitude, longitude };
 }
 
-function customerLocationClusterPolygonCoordinates() {
-  const candidates = [
-    state.locationServiceability?.cluster?.polygonCoordinates,
-    state.locationPicked?.serviceability?.cluster?.polygonCoordinates,
-    state.selectedLocation?.serviceability?.cluster?.polygonCoordinates
-  ];
-  for (const coordinates of candidates) {
-    if (!Array.isArray(coordinates)) continue;
-    const polygon = coordinates
-      .map((point) => ({ latitude: Number(point.latitude), longitude: Number(point.longitude) }))
-      .filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude));
-    if (polygon.length >= 3) {
-      customerLocationClusterPolygonCache = polygon;
-      return polygon;
-    }
-  }
-  const clusterId = String(
-    state.locationPicked?.clusterId
-    || state.selectedLocation?.clusterId
-    || state.locationServiceability?.cluster?.clusterId
-    || ""
-  );
-  const boundary = customerLocationServiceBoundaries.find((item) => String(item.clusterId || "") === clusterId)
-    || customerLocationServiceBoundaries[0];
-  if (Array.isArray(boundary?.polygonCoordinates) && boundary.polygonCoordinates.length >= 3) {
-    customerLocationClusterPolygonCache = boundary.polygonCoordinates;
-    return customerLocationClusterPolygonCache;
-  }
-  return customerLocationClusterPolygonCache;
-}
-
-function rememberCustomerLocationServiceBoundaries(rows = []) {
-  customerLocationServiceBoundaries = normalizeArray(rows)
-    .map((boundary) => ({
-      ...boundary,
-      polygonCoordinates: normalizeArray(boundary?.polygonCoordinates)
-        .map((point) => ({ latitude: Number(point.latitude), longitude: Number(point.longitude) }))
-        .filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude))
-    }))
-    .filter((boundary) => boundary.polygonCoordinates.length >= 3);
-  customerLocationClusterPolygonCoordinates();
-  return customerLocationServiceBoundaries;
-}
-
-async function ensureCustomerLocationServiceBoundaries({ forceRefresh = false } = {}) {
-  if (customerLocationServiceBoundaries.length && !forceRefresh) return customerLocationServiceBoundaries;
-  const url = "/portal/customer/locations/service-boundaries";
-  try {
-    const payload = await portalCachedGet(url, {
-      cacheKey: url,
-      forceRefresh,
-      maxAgeMs: 6 * 60 * 60 * 1000
-    });
-    return rememberCustomerLocationServiceBoundaries(payload.data);
-  } catch (error) {
-    return customerLocationServiceBoundaries;
-  }
-}
-
-function customerLocationPolygonLabelPoint(polygon) {
-  const points = polygon.filter((point, index) => index === 0 || point.latitude !== polygon[0].latitude || point.longitude !== polygon[0].longitude);
-  const source = points.length ? points : polygon;
-  return source.reduce(
-    (sum, point) => ({ latitude: sum.latitude + point.latitude / source.length, longitude: sum.longitude + point.longitude / source.length }),
-    { latitude: 0, longitude: 0 }
-  );
-}
-
-function customerLocationClusterOverlaySvg(topLeft, zoom) {
-  const polygon = customerLocationClusterPolygonCoordinates();
-  if (polygon.length < 3) return "";
-  const points = polygon
-    .map((point) => {
-      const world = customerLocationMapWorldPoint(point.latitude, point.longitude, zoom);
-      return `${(world.x - topLeft.x).toFixed(1)},${(world.y - topLeft.y).toFixed(1)}`;
-    })
-    .join(" ");
-  return `<svg class="customer-simple-map-cluster" aria-label="Working cluster boundary">
-    <polygon points="${points}" class="customer-simple-map-cluster-fill"></polygon>
-    <polyline points="${points}" class="customer-simple-map-cluster-line"></polyline>
-  </svg>`;
-}
-
-function refreshCustomerLocationClusterOverlay() {
-  const mapEl = document.querySelector("#customerLocationMap");
-  if (!mapEl || !customerLocationSimpleMap) return;
-  const sdkMap = customerOlaLocationMapResolved || resolveCustomerOlaMapObject();
-  if (sdkMap) {
-    mapEl.querySelector(".customer-simple-map-cluster-overlay")?.remove();
-    if (!sdkMap.isStyleLoaded?.()) return;
-    const ring = customerLocationClusterPolygonCoordinates().map(point => [Number(point.longitude), Number(point.latitude)]);
-    if (ring.length >= 3 && (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1])) ring.push([...ring[0]]);
-    const data = { type: "FeatureCollection", features: ring.length >= 4 ? [{ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [ring] } }] : [] };
-    if (sdkMap.getSource("customer-coverage")) sdkMap.getSource("customer-coverage").setData(data);
-    else {
-      sdkMap.addSource("customer-coverage", { type: "geojson", data });
-      sdkMap.addLayer({ id: "customer-coverage-fill", type: "fill", source: "customer-coverage", paint: { "fill-color": "#075eea", "fill-opacity": 0.08 } });
-      sdkMap.addLayer({ id: "customer-coverage-boundary", type: "line", source: "customer-coverage", paint: { "line-color": "#075eea", "line-width": 2 } });
-    }
-    return;
-  }
-  const polygon = customerLocationClusterPolygonCoordinates();
-  if (polygon.length < 3) return;
-  const rect = mapEl.getBoundingClientRect();
-  const width = Math.max(320, rect.width || mapEl.clientWidth || 390);
-  const height = Math.max(280, rect.height || mapEl.clientHeight || 430);
-  const center = customerLocationMapWorldPoint(
-    customerLocationSimpleMap.latitude,
-    customerLocationSimpleMap.longitude,
-    customerLocationSimpleMap.zoom
-  );
-  const topLeft = { x: center.x - width / 2, y: center.y - height / 2 };
-  const holder = document.createElement("div");
-  holder.innerHTML = customerLocationClusterOverlaySvg(topLeft, customerLocationSimpleMap.zoom);
-  const overlay = holder.firstElementChild;
-  if (!overlay) return;
-  mapEl.querySelectorAll(".customer-simple-map-canvas").forEach((canvas) => {
-    canvas.querySelector(".customer-simple-map-cluster")?.remove();
-    canvas.appendChild(overlay.cloneNode(true));
-  });
-}
-
 function renderCustomerLocationSimpleMap() {
   const mapEl = document.querySelector("#customerLocationMap");
   if (!mapEl || !customerLocationSimpleMap) return;
@@ -10638,7 +10927,7 @@ function renderCustomerLocationSimpleMap() {
   }
   const renderToken = ++customerLocationMapRenderToken;
   const holder = document.createElement("div");
-  holder.innerHTML = `<div class="customer-simple-map-canvas customer-simple-map-canvas-entering">${tiles.join("")}${customerLocationClusterOverlaySvg(topLeft, zoom)}</div>`;
+  holder.innerHTML = `<div class="customer-simple-map-canvas customer-simple-map-canvas-entering">${tiles.join("")}</div>`;
   const nextCanvas = holder.firstElementChild;
   const currentCanvas = mapEl.querySelector(".customer-simple-map-canvas:not(.customer-simple-map-canvas-entering)");
   mapEl.querySelectorAll(".customer-simple-map-canvas-entering").forEach((canvas) => canvas.remove());
@@ -10809,7 +11098,7 @@ function refreshCustomerLocationConfirmDetails() {
   const picked = state.locationPicked || state.selectedLocation;
   const cluster = picked ? customerLocationCluster(picked) : {};
   const serviceability = state.locationServiceability || picked?.serviceability || {};
-  const canContinue = Boolean(!state.locationBusy && picked && cluster.clusterId && serviceability.isServiceable === true);
+  const canContinue = Boolean(!state.locationBusy && !customerLocationMapMoving && picked && cluster.clusterId && serviceability.isServiceable === true);
   if (!canContinue) {
   void saveUnserviceableLocationInBackground(picked, serviceability);
 }
@@ -10841,8 +11130,16 @@ function refreshCustomerLocationConfirmDetails() {
     submitButton.disabled = !canContinue;
     submitButton.innerHTML = `${state.locationBusy ? "Please wait..." : "Confirm Location"} ${customerIcon("chevron")}`;
   }
-  const callout = screen.querySelector(".map-callout");
-  if (callout) callout.textContent = title;
+  const mapAddress = screen.querySelector("[data-customer-map-address]");
+  const mapTitle = screen.querySelector("[data-customer-map-title]");
+  const mapAddressText = screen.querySelector("[data-customer-map-address-text]");
+  mapAddress?.classList.toggle("is-loading", Boolean(state.locationBusy));
+  mapAddress?.classList.toggle("is-moving", customerLocationMapMoving);
+  if (mapTitle) mapTitle.textContent = customerLocationMapMoving ? "Place the pin on your location" : state.locationBusy ? "Finding this address..." : title;
+  if (mapAddressText) mapAddressText.textContent = customerLocationMapMoving
+    ? "Release the map to identify this place"
+    : state.locationBusy ? "Checking the location with Ola Maps" : address;
+  screen.querySelector(".customer-location-map-pin")?.classList.toggle("is-moving", customerLocationMapMoving);
   const coords = screen.querySelector("[data-customer-map-coords]");
   if (coords && picked) coords.textContent = `${Number(picked.latitude || 0).toFixed(6)}, ${Number(picked.longitude || 0).toFixed(6)}`;
   const stateInput = form?.querySelector("input[name='stateName']");
@@ -10851,14 +11148,16 @@ function refreshCustomerLocationConfirmDetails() {
   if (stateInput) stateInput.value = picked?.stateName || picked?.metadata?.stateName || "";
   if (cityInput) cityInput.value = picked?.cityName || picked?.metadata?.cityName || "";
   if (postalCodeInput) postalCodeInput.value = picked?.postalCode || picked?.pincode || picked?.metadata?.postalCode || picked?.metadata?.pincode || "";
-  refreshCustomerLocationClusterOverlay();
 }
 
 function scheduleCustomerLocationSimpleMapPick() {
-  if (!customerLocationSimpleMap) return;
+  if (!customerLocationSimpleMap) return false;
   const { latitude, longitude } = customerLocationSimpleMap;
   const syncKey = `${Number(latitude).toFixed(6)},${Number(longitude).toFixed(6)}`;
-  if (syncKey === customerLocationLastMapSyncKey) return;
+  if (syncKey === customerLocationLastMapSyncKey) {
+    refreshCustomerLocationConfirmDetails();
+    return false;
+  }
   customerLocationLastMapSyncKey = syncKey;
   if (customerLocationMapSyncTimer) clearTimeout(customerLocationMapSyncTimer);
   const requestId = ++customerLocationMapRequestId;
@@ -10880,6 +11179,7 @@ function scheduleCustomerLocationSimpleMapPick() {
       refreshCustomerLocationConfirmDetails();
     }
   }, 220);
+  return true;
 }
 
 function customerOlaMapConfig() {
@@ -10897,7 +11197,7 @@ async function ensureCustomerOlaMapConfig() {
       maxAgeMs: 0,
       forceRefresh: true
     });
-    state.portalConfig = configPayload.data || state.portalConfig || null;
+    applyPortalConfig(configPayload.data, state.portalConfig);
     persistSessionCache();
   } catch (error) {
     // The caller will fall back to the lightweight local map if Ola config is unavailable.
@@ -10981,16 +11281,16 @@ function readCustomerOlaMapCenter(map = customerOlaLocationMapResolved || resolv
 }
 
 function syncCustomerOlaMapCenter() {
-  if (!customerOlaLocationMap) return;
+  if (!customerOlaLocationMap) return false;
   const center = readCustomerOlaMapCenter();
-  if (!Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) return;
+  if (!Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) return false;
   customerLocationSimpleMap = {
     ...(customerLocationSimpleMap || {}),
     latitude: center.latitude,
     longitude: center.longitude,
     zoom: resolveCustomerOlaMapObject()?.getZoom?.() || customerLocationSimpleMap?.zoom || 17
   };
-  scheduleCustomerLocationSimpleMapPick();
+  return scheduleCustomerLocationSimpleMapPick();
 }
 
 function initializeCustomerLocationRasterFallbackMap(mapEl, center = customerLocationMapCenterLocation()) {
@@ -11157,7 +11457,14 @@ async function initializeCustomerLocationOlaMap() {
     const map = resolveCustomerOlaMapObject();
     if (mapEl.dataset.olaEventsBound === "true") return;
     mapEl.dataset.olaEventsBound = "true";
-    map?.on?.("moveend", syncCustomerOlaMapCenter);
+    map?.on?.("movestart", () => {
+      customerLocationMapMoving = true;
+      refreshCustomerLocationConfirmDetails();
+    });
+    map?.on?.("moveend", () => {
+      customerLocationMapMoving = false;
+      if (!syncCustomerOlaMapCenter()) refreshCustomerLocationConfirmDetails();
+    });
     syncCustomerOlaMapCenter();
   };
   const bindMapEvents = () => {
@@ -11258,6 +11565,7 @@ function cleanupCustomerLocationMap() {
   customerOlaLocationMap?.remove?.();
   customerOlaLocationMap = null;
   customerOlaLocationMapResolved = null;
+  customerLocationMapMoving = false;
   customerLocationSimpleMap = null;
   customerLocationLastMapSyncKey = "";
 }
@@ -11463,7 +11771,7 @@ function renderLocationConfirm() {
   const cluster = picked ? customerLocationCluster(picked) : {};
   const serviceability = state.locationServiceability || picked?.serviceability || {};
  const isServiceable = Boolean(picked && cluster.clusterId && serviceability.isServiceable === true);
-const canContinue = isServiceable && !state.locationBusy;
+const canContinue = isServiceable && !state.locationBusy && !customerLocationMapMoving;
 if (!isServiceable) {
   void saveUnserviceableLocationInBackground(picked, serviceability);
 }
@@ -11814,17 +12122,17 @@ function renderCustomerHome() {
     invalidateCustomerHomeSupplyAvailability();
     state.customerHomeSupplyForceRefreshOnce = true;
   }
-  root.innerHTML = `<section class="mobile-app home-screen customer-flow-screen zigo-commerce-home">
+  setCustomerViewHtmlPreservingLocationPicker(`<section class="mobile-app home-screen customer-flow-screen zigo-commerce-home">
     ${customerHomeHeader()}
     <section class="zigo-home-body">
       ${customerHomeSections()}
     </section>
     ${customerCartNoticeHtml()}
     ${bottomCartBar()}
-    ${customerHomeLocationPickerSheet()}
     ${customerLocationPermissionPopupHtml()}
     ${customerSupplyUnavailablePopupHtml()}
-  </section>`;
+  </section>
+  ${customerHomeLocationPickerSheet()}`);
   attachCustomerOngoingBookingDots();
   attachCustomerHomeDurationSlider();
   startCustomerHomeCategoryImageSequence();
@@ -11978,20 +12286,21 @@ function renderCart() {
   }
   ensureCustomerBookingTypeAllowed();
   if (!state.cart.length) {
-    root.innerHTML = `<section class="mobile-app home-screen customer-flow-screen customer-cart-screen">
+    setCustomerViewHtmlPreservingLocationPicker(`<section class="mobile-app home-screen customer-flow-screen customer-cart-screen">
       <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-review-booking-back aria-label="Back">${customerIcon("back")}</button><h1>Review Booking</h1></header>
       <section class="content-section compact-section">
         ${cartRows()}
       </section>
       ${bottomNav("cart")}
-    </section>`;
+    </section>
+    ${customerHomeLocationPickerSheet()}`);
     syncPortalToastHost();
     return;
   }
   const totals = cartTotals();
   const activeBookingType = customerEffectiveBookingType(state.bookingType);
   const confirmLabel = state.bookingType === "schedule" ? "Schedule & Confirm" : "Confirm Booking";
-  root.innerHTML = `<section class="mobile-app home-screen customer-flow-screen customer-cart-screen">
+  setCustomerViewHtmlPreservingLocationPicker(`<section class="mobile-app home-screen customer-flow-screen customer-cart-screen">
     <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-review-booking-back aria-label="Back">${customerIcon("back")}</button><h1>Review Booking</h1></header>
     ${customerReviewNotificationsHtml()}
     <section class="content-section compact-section">
@@ -12019,7 +12328,8 @@ function renderCart() {
     ${customerCartConfirmBarHtml(totals, activeBookingType, confirmLabel)}
     ${bottomNav("cart")}
   </section>
-  ${customerPaymentSheetHtml()}`;
+  ${customerHomeLocationPickerSheet()}
+  ${customerPaymentSheetHtml()}`);
   syncPortalToastHost();
 }
 
@@ -12068,6 +12378,21 @@ function openCustomerCartStopPicker({ editIndex = -1 } = {}) {
   syncCustomerHomeLocationPickerSheet({ focusSearch: true });
 }
 
+function openCustomerCartLocationEdit(index) {
+  const stops = customerCartLocationStopsForPayload();
+  const editIndex = Number(index);
+  const stop = Number.isInteger(editIndex) && editIndex >= 0 && editIndex < stops.length ? stops[editIndex] : null;
+  if (!stop) return false;
+  state.customerLocationPickerPurpose = "cart-edit";
+  state.customerCartRouteEditIndex = editIndex;
+  state.customerCartRouteDeleteIndex = -1;
+  openCustomerPickedLocationConfirm(stop, {
+    returnStep: "cart-edit",
+    savedAddressId: stop.addressId || null
+  });
+  return true;
+}
+
 function setCustomerCartRouteOrder(stops = []) {
   const ordered = normalizeArray(stops).filter((stop) => stop && stop.address && stop.clusterId);
   if (!ordered.length) return false;
@@ -12111,6 +12436,7 @@ function removeCustomerCartRouteStop(index) {
     writePortalSessionCache();
     return true;
   }
+  if (stops.length <= 1) state.customerCartRouteExpanded = false;
   return setCustomerCartRouteOrder(stops);
 }
 
@@ -12889,10 +13215,20 @@ function customerTrackDurationCapsuleText(minutes = 0) {
 
 function customerTrackBaseDurationMinutes(booking = {}, items = []) {
   const metadata = booking.metadata || {};
+  const assignmentMetadata = booking.assignmentMetadata || metadata.assignmentMetadata || {};
+  const timer = metadata.taskTimer || {};
   const itemTotal = normalizeArray(items).reduce((sum, item) => sum + Math.max(0, Number(item.durationMinutes || item.cartDurationMinutes || 0)), 0);
-  if (itemTotal > 0) return Math.max(1, Math.round(itemTotal));
-  const explicit = Number(booking.durationMinutes || metadata.durationMinutes || metadata.requestedDurationMinutes || 0);
-  if (Number.isFinite(explicit) && explicit > 0) return Math.max(1, Math.round(explicit));
+  const persistedDurations = [
+    booking.durationMinutes,
+    metadata.effectiveDurationMinutes,
+    assignmentMetadata.durationMinutes,
+    timer.taskTotalMinutes,
+    timer.durationMinutes,
+    metadata.durationMinutes,
+    metadata.requestedDurationMinutes
+  ].map(Number).filter((value) => Number.isFinite(value) && value > 0);
+  const persistedDuration = persistedDurations.length ? Math.max(...persistedDurations) : 0;
+  if (itemTotal > 0 || persistedDuration > 0) return Math.max(1, Math.round(Math.max(itemTotal, persistedDuration)));
   return 30;
 }
 
@@ -13375,10 +13711,6 @@ function customerTrackPlannedEndDate(booking = {}, items = []) {
   const metadata = booking.metadata || {};
   const timer = metadata.taskTimer || {};
   const plannedStart = customerTrackPlannedStartDate(booking);
-  const durationMinutes = Number(customerTrackBaseDurationMinutes(booking, items));
-  if (plannedStart && Number.isFinite(durationMinutes) && durationMinutes > 0) {
-    return new Date(plannedStart.getTime() + durationMinutes * 60_000);
-  }
   const explicitEnd = customerTrackDateValue(
     booking.bookingEndAt,
     metadata.bookingEndAt,
@@ -13388,6 +13720,10 @@ function customerTrackPlannedEndDate(booking = {}, items = []) {
     timer.taskEndAt
   );
   if (explicitEnd) return explicitEnd;
+  const durationMinutes = Number(customerTrackBaseDurationMinutes(booking, items));
+  if (plannedStart && Number.isFinite(durationMinutes) && durationMinutes > 0) {
+    return new Date(plannedStart.getTime() + durationMinutes * 60_000);
+  }
   return plannedStart ? new Date(plannedStart.getTime() + 30 * 60_000) : null;
 }
 
@@ -13671,12 +14007,18 @@ function customerTrackChatNotificationHtml(count = 0) {
 
 function customerTrackChatHeaderHtml(booking = {}, expanded = false, updates = taskUpdates(booking)) {
   const status = customerTrackStatus(booking);
+  const metadata = booking.metadata || {};
+  const assistantCancelled = status === "cancelled" && (
+    String(metadata.cancelledBy || "").toLowerCase() === "assistant"
+    || String(metadata.cancellationSource || "").toLowerCase() === "assistant_portal"
+    || String(metadata.cancellationReasonCode || "").toLowerCase() === "assistant_cancelled_booking"
+  );
   const unreadCount = customerTrackUnreadAssistantChatCount(booking, updates);
   const chatLocked = customerTrackCommunicationLocked(booking);
   const notification = chatLocked ? "" : customerTrackChatNotificationHtml(unreadCount);
   // Closed bookings keep chat history expandable; only communication controls are disabled.
   const toggle = customerTrackChatToggleHtml(expanded);
-  if (status === "confirmed") {
+  if (status === "confirmed" || assistantCancelled) {
     return `<div class="customer-track-chat-title customer-track-chat-tone-confirmed">
       <div class="customer-track-chat-pending">
         <i class="customer-track-chat-status-dot black" aria-hidden="true"></i>
@@ -13893,7 +14235,8 @@ async function handleTaskUpdateAttachmentInput(input) {
   const key = taskUpdateAttachmentFormKey(form);
   const existing = taskUpdateAttachmentPreviews.get(key) || [];
   const nextItems = [];
-  for (const file of files) {
+  for (const selectedFile of files) {
+    const file = await normalizePortalUploadFile(selectedFile);
     const kind = taskUpdateAttachmentKind(file);
     let url = "";
     try {
@@ -13986,13 +14329,6 @@ function customerTrackLocationSaveLabel(location = {}) {
   ).trim();
 }
 
-function customerTrackLocationIconName(location = {}) {
-  const label = customerTrackLocationSaveLabel(location).toLowerCase();
-  if (label === "home" || label.includes("home")) return "homeSolid";
-  if (label === "work" || label.includes("work") || label.includes("office") || label.includes("business")) return "marketSolid";
-  return "pinSolid";
-}
-
 function customerTrackLocationIdentity(location = {}) {
   const metadata = location.metadata || {};
   const name = String(location.personName || location.nameOnAddress || metadata.personName || metadata.nameOnAddress || "").trim();
@@ -14004,19 +14340,19 @@ function customerTrackLocationFullAddress(location = {}) {
   return String(location.address || location.addressText || location.detailAddress || location.formattedAddress || location.label || "").trim() || "Pick your service location";
 }
 
-function customerTrackLocationRowHtml(location = {}, index = 0) {
+function customerTrackLocationRowHtml(location = {}, index = 0, total = 1) {
   const title = taskLocationTitle(location, index);
   const identity = customerTrackLocationIdentity(location);
   const address = customerTrackLocationFullAddress(location);
-  const iconName = customerTrackLocationIconName(location);
-  return `<div class="customer-track-location-row customer-track-location-row-static">
-    <span class="customer-track-location-pin ${escapeHtml(iconName === "homeSolid" ? "home" : iconName === "marketSolid" ? "work" : "other")}">${customerTrackIcon(iconName)}</span>
+  const pointType = index === 0 ? "start" : index === total - 1 ? "end" : "middle";
+  return `<div class="customer-track-location-row customer-track-location-row-static ${pointType}">
+    <span class="customer-track-location-pin" role="img" aria-label="${escapeHtml(pointType === "start" ? "Start point" : pointType === "end" ? "End point" : `Stop ${index}`)}">${customerTrackIcon("pinSolid")}</span>
     <span class="customer-track-location-copy">
       <b>${escapeHtml(title)}</b>
       ${identity ? `<small class="customer-track-location-person">${escapeHtml(identity)}</small>` : ""}
       <small class="customer-track-location-address">${escapeHtml(address)}</small>
     </span>
-    ${customerLocationHasCoordinates(location) ? `<button type="button" data-customer-stop-map="${index}" aria-label="View ${escapeHtml(title)} on Ola Maps">${customerIcon("map")}</button>` : ""}
+    ${customerLocationHasCoordinates(location) ? `<button type="button" data-customer-stop-map="${index}" aria-label="Navigate to ${escapeHtml(title)} with Ola Maps">${customerIcon("navigation")}</button>` : ""}
   </div>`;
 }
 
@@ -14093,7 +14429,7 @@ function customerTrackLocationsHtml(booking = {}) {
       <div class="customer-track-location-rows">
         ${locations.length
           ? locations.map((location, index) => {
-            return customerTrackLocationRowHtml(location, index);
+            return customerTrackLocationRowHtml(location, index, locations.length);
           }).join("")
           : `<div class="customer-track-location-empty">No locations added</div>`}
       </div>
@@ -14123,7 +14459,7 @@ function customerTrackLocationsUploadsHtml(booking = {}) {
             <div class="customer-track-location-rows">
               ${locations.length
                 ? locations.map((location, index) => {
-                  return customerTrackLocationRowHtml(location, index);
+                  return customerTrackLocationRowHtml(location, index, locations.length);
                 }).join("")
                 : `<div class="customer-track-location-empty">No locations added</div>`}
             </div>
@@ -14707,10 +15043,43 @@ function assistantApplyLocalTaskUpdate(input = {}, created = {}) {
   return assistantRefreshChatTimelineOnly();
 }
 
+function customerTrackAdminCancellationUpdate(booking = {}, sourceUpdates = []) {
+  const metadata = booking.metadata || {};
+  const cancelledByAdmin = customerTrackStatus(booking) === "cancelled" && (
+    String(metadata.cancelledBy || "").toLowerCase() === "admin"
+    || String(metadata.cancellationSource || "").toLowerCase() === "admin_panel"
+    || String(metadata.cancellationReasonCode || "").toLowerCase() === "admin_cancelled_booking"
+  );
+  const reason = String(metadata.cancellationReason || booking.cancelledReason || "").trim();
+  if (!cancelledByAdmin || !reason) return null;
+  const alreadyListed = normalizeArray(sourceUpdates).some((update) => {
+    const updateMetadata = update.metadata || {};
+    return String(updateMetadata.reasonCode || updateMetadata.cancellationReasonCode || "").toLowerCase() === "admin_cancelled_booking"
+      || (String(update.actorType || "").toLowerCase() === "admin" && String(update.message || "").toLowerCase().includes(reason.toLowerCase()));
+  });
+  if (alreadyListed) return null;
+  return {
+    id: `admin-cancellation-${booking.id || booking.bookingId || "booking"}`,
+    actorType: "admin",
+    actorName: "ZIGO Support",
+    updateType: "status",
+    message: `Booking cancelled by admin. Reason: ${reason}`,
+    metadata: { status: "cancelled", reason, reasonCode: "admin_cancelled_booking" },
+    createdAt: metadata.cancelledAt || booking.updatedAt || new Date().toISOString()
+  };
+}
+
+function customerTrackIsInternalAssistantRejection(update = {}) {
+  const metadata = update.metadata || {};
+  return String(metadata.assistantRejectedCopy ?? "").toLowerCase() === "true"
+    || String(metadata.rejectionSource || "").toLowerCase() === "assistant_portal";
+}
+
 function customerTrackChatHtml(booking = {}) {
   const chatEnabled = customerTrackChatEnabled(booking);
   const chatLocked = customerTrackCommunicationLocked(booking);
-  const sourceUpdates = taskUpdates(booking);
+  const sourceUpdates = taskUpdates(booking).filter((update) => !customerTrackIsInternalAssistantRejection(update));
+  const adminCancellationUpdate = customerTrackAdminCancellationUpdate(booking, sourceUpdates);
   const customerNote = customerTrackCustomerNote(booking);
   const updates = [];
   if (customerNote) {
@@ -14726,6 +15095,7 @@ function customerTrackChatHtml(booking = {}) {
     if (noteText && message === noteText) return;
     updates.push(update);
   });
+  if (adminCancellationUpdate) updates.push(adminCancellationUpdate);
   const approvalResponses = taskUpdateResponseMap(updates);
   const paymentResponses = taskUpdateResponseMap(updates, "payment_response");
   const disabledAttr = chatEnabled ? "" : " disabled";
@@ -14928,7 +15298,7 @@ function customerTrackTaskPinHtml(booking = {}, trackStatus = "") {
   if (finalStatuses.has(normalizedStatus)) return "";
   const isWorking = ["working", "in_progress", "approval_pending"].includes(normalizedStatus)
     || Boolean(booking.actualTaskStartedAt || booking.assignmentActualStartedAt);
-  const label = isWorking ? "Finish PIN" : "Start PIN";
+  const label = isWorking ? "End PIN" : "Start PIN";
   const pin = String(isWorking ? pins.finishPin || metadata.finishPin || "" : pins.startPin || metadata.startPin || "").trim();
   if (!/^\d{4}$/.test(pin)) return "";
   const endAt = booking.bookingEndAt ? new Date(booking.bookingEndAt) : null;
@@ -15211,10 +15581,53 @@ function handleCustomerTrackLiveRouteDoubleClick(event) {
 
 const customerSdkMapInstances = new Map();
 
+function customerTrackJobStarted(booking = {}) {
+  const status = String(customerTrackStatus(booking) || "").toLowerCase();
+  return Boolean(
+    booking.assistantJobStartedAt
+    || booking.actualTaskStartedAt
+    || booking.assignmentActualStartedAt
+    || booking.metadata?.assistantJobStartedAt
+    || booking.metadata?.jobStartedAt
+    || booking.liveRoute?.jobStartedAt
+    || booking.metadata?.liveRoute?.jobStartedAt
+    || ["working", "in_progress", "approval_pending", "completed", "success"].includes(status)
+  );
+}
+
+function customerTrackRouteDistanceText(route = {}) {
+  const meters = Number(route.distanceMeters);
+  if (!Number.isFinite(meters) || meters <= 0) return "";
+  if (meters < 1000) return `${Math.max(1, Math.round(meters))} meters`;
+  const kilometres = Math.round((meters / 1000) * 10) / 10;
+  return `${kilometres} KM`;
+}
+
 function customerSdkRoute(booking = {}) {
   const route = booking.liveRoute || booking.metadata?.liveRoute || {};
-  const stops = normalizeArray(route.stopLocations?.length ? route.stopLocations : customerTrackLocationRows(booking));
-  return { ...route, stopLocations: stops, destinationLocation: route.destinationLocation || stops.at(-1), followLocation: false };
+  const trackStatus = customerTrackStatus(booking);
+  const assistant = customerTrackAssistantInfo(booking);
+  const availableStops = normalizeArray(route.stopLocations?.length ? route.stopLocations : customerTrackLocationRows(booking));
+  const stops = trackStatus === "assigned" ? availableStops.slice(0, 1) : availableStops;
+  const routeMatchesStage = trackStatus !== "working" || String(route.routeStage || "").toLowerCase() === "task";
+  return {
+    ...route,
+    bookingId: booking.id || booking.bookingId || route.bookingId,
+    stopLocations: stops,
+    destinationLocation: trackStatus === "assigned" ? stops[0] || route.destinationLocation : route.destinationLocation || stops.at(-1),
+    status: routeMatchesStage ? route.status : "route_pending",
+    routePath: routeMatchesStage ? route.routePath : null,
+    routePolyline: routeMatchesStage ? route.routePolyline : null,
+    travelMode: "bike",
+    riderImageUrl: assetUrl("/assets/zigo-assistant-bike-top.png?v=20261015"),
+    markerMode: trackStatus === "working" ? "assistant" : "bike",
+    assistantImageUrl: assistant.imageUrl ? assetUrl(assistant.imageUrl) : "",
+    assistantInitials: assistant.initials,
+    assistantName: assistant.name,
+    markerAnimationMs: 9500,
+    routeStage: trackStatus === "assigned" ? "pickup" : trackStatus === "working" ? "task" : route.routeStage || "task",
+    followLocation: false
+  };
 }
 
 async function syncCustomerSdkMaps() {
@@ -15249,20 +15662,23 @@ function preserveCustomerSdkMaps(current, next) {
 
 function customerTrackLiveRouteHtml(booking = {}, trackStatus = "") {
   const normalizedStatus = String(trackStatus || customerTrackStatus(booking) || "").toLowerCase();
-  const route = booking.liveRoute || booking.metadata?.liveRoute || {};
-  const isWorking = normalizedStatus === "working";
+  const route = customerSdkRoute(booking);
+  const showsAssignedRoute = ["assigned", "working"].includes(normalizedStatus);
   const hasAssistant = Boolean(customerTrackHasAssignment(booking));
-  if (!isWorking || !hasAssistant) return "";
+  if (!showsAssignedRoute || !hasAssistant || !customerTrackJobStarted(booking)) return "";
   const assistantPoint = customerTrackLiveRoutePoint(route.assistantLocation || {});
   const routePoints = normalizeArray(route.routePolyline || route.routePath).map(customerTrackLiveRoutePoint).filter(Boolean);
-  const isLive = Boolean(assistantPoint) && String(route.status || "").toLowerCase() === "live" && routePoints.length >= 2;
+  const routeStatus = String(route.status || "").toLowerCase();
+  const isLive = Boolean(assistantPoint) && (routeStatus === "location_live" || (routeStatus === "live" && routePoints.length >= 2));
   const badgeClass = isLive ? "live" : "updating";
-  const badgeText = isLive ? "Live" : "Updating...";
+  const badgeText = isLive ? "Live" : assistantPoint ? "Routing..." : "Locating...";
   const badgeIcon = isLive ? customerIcon("map") : customerTrackLiveRefreshIcon();
+  const distanceText = customerTrackRouteDistanceText(route);
   return `<section class="customer-track-live-route-card" data-customer-live-route-card>
     <div class="customer-track-live-route-head">
       <div>
-        <h2>Live route tracking</h2>
+        <h2>${normalizedStatus === "assigned" ? "Assistant is on the way" : "Live route tracking"}</h2>
+        ${distanceText ? `<small>${escapeHtml(distanceText)}</small>` : ""}
       </div>
       <button type="button" data-live-route-recenter aria-label="Refresh live route">${customerTrackLiveRefreshIcon()}</button>
     </div>
@@ -15340,6 +15756,7 @@ function renderTrack() {
   customerTrackScrollChatToLatest();
   void syncPortalTrackingHub();
   syncCustomerTrackFallbackRefresh();
+  void refreshCustomerTrackExtensionPolicy();
 }
 
 function attachCustomerTrackScrollStability() {
@@ -15418,6 +15835,60 @@ function renderTrackRealtimeUpdate(options = {}) {
   if (state.customerTrackChatExpanded && chatWasAtBottom) customerTrackScrollChatToLatest();
   attachCustomerTrackScrollStability();
   void syncCustomerSdkMaps();
+  void syncPortalTrackingHub();
+  syncCustomerTrackFallbackRefresh();
+}
+
+function customerTrackExtensionPolicy() {
+  const engine = state.portalConfig?.bookingEngine || {};
+  return {
+    enabled: engine.disableExtendBeforeEndEnabled === true,
+    minutes: Math.max(1, Math.min(1440, Math.round(Number(engine.disableExtendBeforeEndMinutes || 10))))
+  };
+}
+
+function customerTrackExtensionCutoffState(booking = {}, trackStatus = "", now = portalServerNowMs()) {
+  const policy = customerTrackExtensionPolicy();
+  const status = String(trackStatus || customerTrackStatus(booking) || "").toLowerCase();
+  const rawStatus = String(booking.statusCode || booking.bookingStatus || booking.assignmentStatus || booking.status || booking.metadata?.status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const isRunning = status === "working" && ["working", "in_progress", "approval_pending"].includes(rawStatus);
+  const metadata = booking.metadata || {};
+  const assignmentMetadata = booking.assignmentMetadata || metadata.assignmentMetadata || {};
+  const timer = metadata.taskTimer || {};
+  const endAt = customerTrackDateValue(
+    booking.bookingEndAt,
+    booking.taskEndAt,
+    assignmentMetadata.taskEndAt,
+    metadata.bookingEndAt,
+    metadata.taskEndAt,
+    timer.actualTaskEndAt,
+    timer.taskEndAt
+  );
+  const disabled = Boolean(policy.enabled && isRunning && endAt && now >= endAt.getTime() - policy.minutes * 60_000);
+  return {
+    disabled,
+    endAt,
+    minutes: policy.minutes,
+    message: `Extension is no longer available because ${policy.minutes} minute${policy.minutes === 1 ? "" : "s"} or less remain in this task.`
+  };
+}
+
+async function refreshCustomerTrackExtensionPolicy() {
+  if (actor !== "customer" || !state.token || state.customerView !== "track") return;
+  try {
+    const configPayload = await portalCachedGet("/portal/config?extensionPolicy=v1", {
+      cacheKey: "/portal/config?extensionPolicy=v1",
+      forceRefresh: true
+    });
+    applyPortalConfig(configPayload.data, state.portalConfig);
+    writePortalSessionCache();
+    updateCustomerTrackExtensionControls();
+  } catch (_error) {
+    // The server still enforces the cutoff if the lightweight policy refresh is unavailable.
+  }
 }
 
 function customerTrackExtendDurationHtml(booking = {}, trackItems = [], trackStatus = "") {
@@ -15434,7 +15905,11 @@ function customerTrackExtendDurationHtml(booking = {}, trackItems = [], trackSta
   // Only expose Extend when the category has an active, scoped extension price rule.
   const extendOptions = customerHomeCategoryPriceDurationOptions(categoryId, { availableFor: "extend", clusterId });
   if (isClosed || !categoryId || !(booking.id || booking.bookingId) || !extendOptions.length) return "";
-  return `<button class="customer-track-extend-service" type="button" data-track-open-extension-sheet data-booking-id="${escapeHtml(booking.id || booking.bookingId || "")}" data-assignment-id="${escapeHtml(booking.assignmentId || "")}" data-category-id="${escapeHtml(categoryId)}" data-cluster-id="${escapeHtml(booking.clusterId || booking.metadata?.clusterId || "")}">Extend Service</button>`;
+  const bookingId = String(booking.id || booking.bookingId || "");
+  const cutoff = customerTrackExtensionCutoffState(booking, status);
+  return `<div class="customer-track-extension-control" data-track-extension-control data-booking-id="${escapeHtml(bookingId)}" ${cutoff.disabled ? "hidden" : ""}>
+    <button class="customer-track-extend-service" type="button" data-track-open-extension-sheet data-booking-id="${escapeHtml(bookingId)}" data-assignment-id="${escapeHtml(booking.assignmentId || "")}" data-category-id="${escapeHtml(categoryId)}" data-cluster-id="${escapeHtml(booking.clusterId || booking.metadata?.clusterId || "")}" ${cutoff.disabled ? "disabled" : ""} aria-disabled="${cutoff.disabled ? "true" : "false"}">Extend Service</button>
+  </div>`;
 }
 
 function customerTrackExtensionOptions(context = {}) {
@@ -15536,7 +16011,11 @@ function customerTrackServiceRowHtml(item = {}, index = 0, booking = {}, trackIt
   const category = customerCategoryMasterDisplayName(item, booking) || item.categoryName || item.serviceName || "";
   const tone = customerTrackCategoryTone(category);
   const showCategoryPill = Boolean(item.hasStore && category);
-  const durationText = customerTrackDurationCapsuleText(item.durationMinutes || 30);
+  const itemDurationMinutes = Math.max(1, Number(item.durationMinutes || 30));
+  const effectiveDurationMinutes = normalizeArray(trackItems).length <= 1
+    ? Math.max(itemDurationMinutes, customerTrackBaseDurationMinutes(booking, trackItems))
+    : itemDurationMinutes;
+  const durationText = customerTrackDurationCapsuleText(effectiveDurationMinutes);
   const timeframe = customerTrackTaskTimeRangeHtml(booking, trackItems);
   const inlineTiming = [durationText, timeframe].filter(Boolean).join(" . ");
   return `<div class="track-service-row">
@@ -16413,7 +16892,7 @@ function renderAssistantHome() {
   const homeHtml = `<section class="assistant-app assistant-task-screen">
     <div class="assistant-card">
       <div class="assistant-home-location">
-        <button class="assistant-location-main" data-assistant-enable-gps type="button" ${state.assistantLocationBusy ? "disabled" : ""} aria-label="${assistantGpsReady ? "Refresh assistant location" : "Enable assistant location"}">
+        <button class="assistant-location-main" data-assistant-enable-gps type="button" ${state.assistantLocationBusy || state.assistantAvailabilityBusy ? "disabled" : ""} aria-label="${assistantGpsReady ? "Refresh assistant location" : "Enable assistant location"}">
           <span class="assistant-location-pin">${customerIcon("map")}</span>
           <span class="assistant-location-copy">
             <b>${escapeHtml(assistantLocation.title)}</b>
@@ -16421,9 +16900,9 @@ function renderAssistantHome() {
           </span>
           <span class="assistant-location-caret">${customerIcon("chevronDown")}</span>
         </button>
-        <button class="assistant-online-toggle ${assistantOnline ? "is-online" : "is-offline"}" data-online="${assistantOnline ? "false" : "true"}" type="button" ${state.assistantLocationBusy ? "disabled" : ""}>
+        <button class="assistant-online-toggle ${assistantOnline ? "is-online" : "is-offline"} ${assistantOnline && state.assistantGpsStatus !== "live" ? "has-gps-warning" : ""}" data-online="${assistantOnline ? "false" : "true"}" type="button" ${state.assistantLocationBusy || state.assistantAvailabilityBusy ? "disabled" : ""}>
           <span class="assistant-online-dot" aria-hidden="true"></span>
-          <span>${state.assistantLocationBusy ? "..." : assistantOnline ? "Online" : "Offline"}</span>
+          <span>${state.assistantLocationBusy || state.assistantAvailabilityBusy ? "..." : assistantOnline ? "Online" : "Offline"}</span>
         </button>
         <button class="assistant-profile-trigger" data-open-assistant-profile type="button" aria-label="Open assistant profile">${assistantAccountAvatarHtml()}</button>
       </div>
@@ -16449,6 +16928,7 @@ function assistantTaskTabs() {
     { key: "working", label: "Processing", short: "Processing" },
     { key: "accepted", label: "Pending", short: "Pending" },
     { key: "rejected", label: "Rejected", short: "Rejected" },
+    { key: "success", label: "Completed", short: "Completed" },
     { key: "cancelled", label: "Cancelled", short: "Cancel" },
     { key: "drop", label: "Drop", short: "Drop" }
   ];
@@ -16544,7 +17024,7 @@ function assistantTaskCount(tabKey) {
 
 function assistantBottomNav() {
   return `<nav class="assistant-bottom-nav assistant-main-nav" aria-label="Assistant navigation">
-    ${[{key:"home",label:"Home",icon:"home"},{key:"processing",label:"Tasks",icon:"receipt"},{key:"earning",label:"Earning",icon:"wallet"},{key:"profile",label:"Profile",icon:"user"}].map((tab) => `<button class="${(state.assistantProfileOpen ? "profile" : state.assistantMainTab || "home") === tab.key ? "active" : ""}" data-assistant-main-tab="${tab.key}" type="button">
+    ${[{key:"home",label:"Home",icon:"home"},{key:"processing",label:"Task",icon:"receipt"},{key:"earning",label:"Earning",icon:"wallet"},{key:"profile",label:"Profile",icon:"user"}].map((tab) => `<button class="${(state.assistantProfileOpen ? "profile" : state.assistantMainTab || "home") === tab.key ? "active" : ""}" data-assistant-main-tab="${tab.key}" type="button">
       ${customerIcon(tab.icon)}<b>${tab.label}</b>
     </button>`).join("")}
   </nav>`;
@@ -16611,12 +17091,37 @@ function renderAssistantTaskView() {
 }
 
 let assistantOfferBusyId = null;
+let assistantOfferExpiryTimer = null;
+let assistantOfferExpiryKey = "";
+
+function clearAssistantOfferExpiryTimer() {
+  if (assistantOfferExpiryTimer) clearTimeout(assistantOfferExpiryTimer);
+  assistantOfferExpiryTimer = null;
+  assistantOfferExpiryKey = "";
+}
+
+function scheduleAssistantOfferExpiry(offer = {}, expiresAt = Number.NaN) {
+  const key = `${offer.assignmentId || ""}:${expiresAt}:${portalServerClockOffsetMs}`;
+  if (assistantOfferExpiryTimer && assistantOfferExpiryKey === key) return;
+  clearAssistantOfferExpiryTimer();
+  if (!Number.isFinite(expiresAt)) return;
+  assistantOfferExpiryKey = key;
+  assistantOfferExpiryTimer = setTimeout(() => {
+    assistantOfferExpiryTimer = null;
+    assistantOfferExpiryKey = "";
+    syncAssistantOfferOverlay();
+    void refreshAssistantTasksRealtime(null, { immediate: true });
+  }, Math.max(0, expiresAt - portalServerNowMs()) + 25);
+}
+
 function syncAssistantOfferOverlay() {
   const current=root?.querySelector(':scope > .assistant-offer-backdrop');
-  const offer=actor==='assistant' && state.token && !state.assistantTaskConfirm ? state.tasks.find(task=>task.assignmentStatus==='offered'
-    && task.assignmentMetadata?.adminOffer && Date.parse(task.assignmentExpiresAt || task.assignmentMetadata.offerExpiresAt)>Date.now()) : null;
-  if(!offer) {current?.remove();return;}
-  const seconds=Math.max(0,Math.ceil((Date.parse(offer.assignmentExpiresAt || offer.assignmentMetadata.offerExpiresAt)-Date.now())/1000));
+  const offer=actor==='assistant' && state.token && !state.assistantTaskConfirm && !state.assistantSupportOpen ? state.tasks.find(task=>assistantTaskIsActiveBroadcastOffer(task)) : null;
+  if(!offer) {clearAssistantOfferExpiryTimer();current?.remove();return;}
+  const expiresAt=Date.parse(offer.assignmentExpiresAt || offer.assignmentMetadata.offerExpiresAt || "");
+  if(!Number.isFinite(expiresAt) || expiresAt<=portalServerNowMs()) {clearAssistantOfferExpiryTimer();current?.remove();return;}
+  scheduleAssistantOfferExpiry(offer, expiresAt);
+  const seconds=Math.max(0,Math.ceil((expiresAt-portalServerNowMs())/1000));
   let panel=current;
   if(panel?.dataset.assignmentId!==offer.assignmentId) {
     panel?.remove();
@@ -16633,11 +17138,13 @@ function syncAssistantTaskConfirmOverlay() {
   const confirm = state.assistantTaskConfirm;
   const nextKey = confirm ? `${confirm.assignmentId || ""}:${confirm.status || ""}:${confirm.actionLabel || ""}:${confirm.error || ""}` : "";
   const existing = root.querySelector(":scope > .assistant-confirm-backdrop");
-  if (existing && existing.getAttribute("data-confirm-key") === nextKey) return;
-  root.querySelectorAll(":scope > .assistant-confirm-backdrop").forEach((node) => node.remove());
-  root.querySelectorAll(".assistant-task-screen .assistant-confirm-backdrop, .task-chat-backdrop .assistant-confirm-backdrop").forEach((node) => node.remove());
-  const confirmHtml = assistantTaskConfirmModal();
-  if (confirmHtml) root.insertAdjacentHTML("beforeend", confirmHtml);
+  if (!(existing && existing.getAttribute("data-confirm-key") === nextKey)) {
+    root.querySelectorAll(":scope > .assistant-confirm-backdrop").forEach((node) => node.remove());
+    root.querySelectorAll(".assistant-task-screen .assistant-confirm-backdrop, .task-chat-backdrop .assistant-confirm-backdrop").forEach((node) => node.remove());
+    const confirmHtml = assistantTaskConfirmModal();
+    if (confirmHtml) root.insertAdjacentHTML("beforeend", confirmHtml);
+  }
+  syncAssistantSupportOverlay();
 }
 
 function refreshAssistantAfterPopupMutation() {
@@ -16707,19 +17214,43 @@ function assistantTaskFinishConfirmBy(task = {}) {
   return parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
 }
 
+function assistantTaskJobStarted(task = {}) {
+  const assignmentStatus = String(task.assignmentStatus || "").toLowerCase();
+  const bookingStatus = String(task.bookingStatus || "").toLowerCase();
+  return Boolean(
+    task.assignmentMetadata?.jobStartedAt
+    || task.assignmentMetadata?.travelStartedAt
+    || task.metadata?.assistantJobStartedAt
+    || ["in_progress", "working", "approval_pending", "completed", "success"].includes(assignmentStatus)
+    || ["in_progress", "working", "approval_pending", "completed", "success"].includes(bookingStatus)
+  );
+}
+
+function assistantTaskReachedFirstStop(task = {}) {
+  return Boolean(task.assignmentMetadata?.reachedAt || task.metadata?.assistantReachedAt);
+}
+
+function assistantTaskHelpButton(task = {}, className = "soft-btn") {
+  const assignmentId = escapeHtml(task.assignmentId || "");
+  return `<button class="${className}" data-open-assistant-help data-id="${assignmentId}" type="button">${customerIcon("help")}<span>Help</span></button>`;
+}
+
 function assistantTaskActions(task = {}) {
   const tab = assistantTaskTabFor(task);
   const assignmentId = escapeHtml(task.assignmentId || "");
   if (!assignmentId || ["success", "rejected", "cancelled", "drop", "hold"].includes(tab)) return "";
   if (tab === "accepted") {
+    const jobStarted = assistantTaskJobStarted(task);
+    const startPinReady = assistantCanEnterStartPin(task);
     return `<div class="task-actions">
-      <button class="primary-btn" data-task-status="in_progress" data-id="${assignmentId}" type="button">Start</button>
-      <button class="danger-btn" data-task-status="rejected" data-id="${assignmentId}" type="button">Reject</button>
+      ${!jobStarted ? `<button class="primary-btn" data-start-assistant-job data-id="${assignmentId}" type="button">Start Job</button>` : `<button class="primary-btn" data-task-status="in_progress" data-id="${assignmentId}" type="button"${startPinReady ? "" : " hidden"}>Start PIN</button>`}
+      <button class="danger-btn" data-task-status="cancelled" data-task-action-label="cancel" data-id="${assignmentId}" type="button">Cancel</button>
     </div>`;
   }
   if (tab === "working") {
     return `<div class="task-actions">
-      <button class="primary-btn" data-task-status="completed" data-id="${assignmentId}" type="button">Finish</button>
+      <button class="primary-btn" data-task-status="completed" data-id="${assignmentId}" type="button">End PIN</button>
+      ${assistantTaskHelpButton(task)}
     </div>`;
   }
   return `<div class="task-actions">
@@ -17523,19 +18054,147 @@ function assistantTrackFooterControls(task = {}) {
   const assignmentId = escapeHtml(task.assignmentId || "");
   if (!assignmentId || ["success", "rejected", "cancelled", "hold"].includes(tab)) return "";
   if (tab === "accepted") {
+    const jobStarted = assistantTaskJobStarted(task);
+    const startPinReady = assistantCanEnterStartPin(task);
     return `<div class="task-chat-footer">
-      <small class="assistant-arrival-status" data-assistant-arrival-status data-id="${assignmentId}">${task.assignmentMetadata?.reachedAt || task.metadata?.assistantReachedAt ? 'Reached first stop' : escapeHtml(assistantArrivalInstruction(' to enter Start PIN'))}</small>
-      <button class="primary-btn" data-task-status="in_progress" data-id="${assignmentId}" type="button" title="Check location and enter Start PIN">Start</button>
-      <button class="danger-btn" data-task-status="rejected" data-id="${assignmentId}" type="button">Reject</button>
+      ${jobStarted ? `<small class="assistant-arrival-status" data-assistant-arrival-status data-id="${assignmentId}">${startPinReady ? 'Within arrival radius. Start PIN available.' : escapeHtml(assistantArrivalInstruction(' to enter Start PIN'))}</small>` : ""}
+      ${!jobStarted ? `<button class="primary-btn" data-start-assistant-job data-id="${assignmentId}" type="button">Start Job</button>` : `<button class="primary-btn" data-task-status="in_progress" data-id="${assignmentId}" type="button" title="Check location and enter Start PIN"${startPinReady ? "" : " hidden"}>Start PIN</button>`}
+      <button class="danger-btn" data-task-status="rejected" data-task-action-label="cancel" data-id="${assignmentId}" type="button">Cancel</button>
     </div>`;
   }
   if (tab === "working") {
     return `<div class="task-chat-footer">
-      <button class="danger-btn" data-task-status="rejected" data-task-action-label="cancel" data-id="${assignmentId}" type="button">Cancel</button>
-      <button class="primary-btn" data-task-status="completed" data-id="${assignmentId}" type="button">Finish</button>
+      <button class="primary-btn" data-task-status="completed" data-id="${assignmentId}" type="button">End PIN</button>
+      ${assistantTaskHelpButton(task)}
     </div>`;
   }
   return "";
+}
+
+function assistantSupportModalHtml() {
+  if (!state.assistantSupportOpen) return "";
+  const detail = state.assistantSupportDetail || {};
+  const ticket = detail.ticket || {};
+  const messages = normalizeArray(detail.messages);
+  const inChat = state.assistantSupportMode === "chat";
+  const closed = ["closed", "resolved"].includes(String(ticket.statusCode || "").toLowerCase());
+  const key = [
+    state.assistantSupportMode,
+    state.assistantSupportBusy ? "busy" : "ready",
+    state.assistantSupportError,
+    ticket.id,
+    ticket.statusCode,
+    messages.length,
+    messages.at(-1)?.id || messages.at(-1)?.createdAt || ""
+  ].join(":");
+  return `<div class="assistant-support-backdrop" data-assistant-support-backdrop data-support-key="${escapeHtml(key)}" role="dialog" aria-modal="true" aria-labelledby="assistantSupportTitle">
+    <section class="assistant-support-sheet">
+      <header>
+        <div><small>ASSISTANT HELP</small><h2 id="assistantSupportTitle">${inChat ? "ZIGO Support" : "Need help?"}</h2></div>
+        <button type="button" data-close-assistant-support aria-label="Close support">${customerIcon("x")}</button>
+      </header>
+      ${state.assistantSupportError ? `<p class="assistant-support-error" role="alert">${escapeHtml(state.assistantSupportError)}</p>` : ""}
+      ${!inChat ? `<div class="assistant-support-options">
+        <p>Contact the support team for help with this task.</p>
+        <a href="tel:+918448736662">${customerIcon("call")}<span><small>Call support</small><b>+91-8448736662</b></span></a>
+        <button type="button" data-start-assistant-support-chat ${state.assistantSupportBusy ? "disabled" : ""}>${customerIcon("chat")}<span><small>Live support</small><b>${state.assistantSupportBusy ? "Opening chat..." : "Chat with support team"}</b></span>${customerIcon("chevronRight")}</button>
+      </div>` : `<div class="assistant-support-chat">
+        <div class="assistant-support-contact"><span><b>${escapeHtml(ticket.ticketNumber || "Support chat")}</b><small>${escapeHtml(ticket.bookingNumber ? `Booking ${ticket.bookingNumber}` : ticket.subject || "Task support")}</small></span><a href="tel:+918448736662" aria-label="Call support">${customerIcon("call")}</a></div>
+        <div class="assistant-support-messages" data-assistant-support-messages>
+          ${messages.length ? messages.map((message) => `<article class="${message.senderType === "assistant" ? "own" : "support"}"><b>${message.senderType === "assistant" ? "You" : "ZIGO Support"}</b><p>${escapeHtml(message.message || "")}</p><time>${escapeHtml(customerSupportTime(message.createdAt))}</time></article>`).join("") : `<div class="assistant-support-empty"><span>${customerIcon("chat")}</span><p>Send a message and the support team will reply here.</p></div>`}
+        </div>
+        ${closed ? `<p class="assistant-support-closed">This support chat is ${escapeHtml(customerSupportStatusLabel(ticket.statusCode).toLowerCase())}.</p>` : `<form class="assistant-support-composer" data-assistant-support-message-form><input name="message" maxlength="4000" autocomplete="off" placeholder="Type your message" required><button type="submit" aria-label="Send message" ${state.assistantSupportBusy ? "disabled" : ""}>${customerTrackIcon("send")}</button></form>`}
+      </div>`}
+    </section>
+  </div>`;
+}
+
+function syncAssistantSupportOverlay() {
+  if (!root) return;
+  const html = assistantSupportModalHtml();
+  const existing = root.querySelector(":scope > .assistant-support-backdrop");
+  if (!html) { existing?.remove(); return; }
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const next = template.content.firstElementChild;
+  if (existing?.dataset.supportKey === next?.dataset.supportKey) return;
+  const focusedMessage = existing?.querySelector("[data-assistant-support-message-form] input[name='message']") === document.activeElement;
+  const draft = existing?.querySelector("[data-assistant-support-message-form] input[name='message']")?.value || "";
+  existing?.remove();
+  if (next) root.append(next);
+  requestAnimationFrame(() => {
+    const messages = root.querySelector("[data-assistant-support-messages]");
+    if (messages) messages.scrollTop = messages.scrollHeight;
+    const input = root.querySelector("[data-assistant-support-message-form] input[name='message']");
+    if (input && draft) input.value = draft;
+    if (input && focusedMessage) input.focus({ preventScroll: true });
+  });
+}
+
+async function openAssistantSupportChat() {
+  if (state.assistantSupportBusy || !state.assistantSupportAssignmentId) return;
+  state.assistantSupportBusy = true;
+  state.assistantSupportError = "";
+  syncAssistantSupportOverlay();
+  try {
+    const payload = await api("/portal/assistant/support/tickets", {
+      method: "POST",
+      body: JSON.stringify({ assignmentId: state.assistantSupportAssignmentId, message: "" })
+    });
+    state.assistantSupportDetail = payload.data || null;
+    state.assistantSupportMode = "chat";
+  } catch (error) {
+    state.assistantSupportError = error.message || "Unable to open support chat.";
+  } finally {
+    state.assistantSupportBusy = false;
+    syncAssistantSupportOverlay();
+  }
+}
+
+async function refreshAssistantSupportChat(ticketId) {
+  if (!state.assistantSupportOpen || state.assistantSupportMode !== "chat" || !ticketId) return;
+  try {
+    const payload = await api(`/portal/assistant/support/tickets/${encodeURIComponent(ticketId)}`, { background: true });
+    if (!state.assistantSupportOpen || String(state.assistantSupportDetail?.ticket?.id || "") !== String(ticketId)) return;
+    state.assistantSupportDetail = payload.data || null;
+    state.assistantSupportError = "";
+    syncAssistantSupportOverlay();
+  } catch (error) {
+    state.assistantSupportError = error.message || "Unable to update support chat.";
+    syncAssistantSupportOverlay();
+  }
+}
+
+async function handleAssistantSupportSubmit(event) {
+  const form = event.target instanceof HTMLFormElement ? event.target.closest("[data-assistant-support-message-form]") : null;
+  if (!form) return;
+  event.preventDefault();
+  const ticketId = state.assistantSupportDetail?.ticket?.id;
+  const message = String(new FormData(form).get("message") || "").trim();
+  if (!ticketId || !message || state.assistantSupportBusy) return;
+  state.assistantSupportBusy = true;
+  state.assistantSupportError = "";
+  const input = form.querySelector("input[name='message']");
+  let restoreMessage = false;
+  if (input) input.value = "";
+  syncAssistantSupportOverlay();
+  try {
+    const payload = await api(`/portal/assistant/support/tickets/${encodeURIComponent(ticketId)}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ message, attachments: [] })
+    });
+    state.assistantSupportDetail = payload.data || state.assistantSupportDetail;
+  } catch (error) {
+    state.assistantSupportError = error.message || "Unable to send your message.";
+    restoreMessage = true;
+  } finally {
+    state.assistantSupportBusy = false;
+    syncAssistantSupportOverlay();
+    if (restoreMessage) requestAnimationFrame(() => {
+      const nextInput = root.querySelector("[data-assistant-support-message-form] input[name='message']");
+      if (nextInput) { nextInput.value = message; nextInput.focus({ preventScroll: true }); }
+    });
+  }
 }
 
 function assistantDetailLocationStops(task = {}) {
@@ -17546,7 +18205,10 @@ function assistantDetailLocationStops(task = {}) {
 }
 
 function assistantTaskNavigationEnabled(task = {}) {
-  return Boolean(task) && !assistantTaskIsFinal(task) && ["assigned", "accepted", "in_progress", "working", "approval_pending"].includes(String(task.assignmentStatus || task.bookingStatus || "").toLowerCase());
+  if (!task || assistantTaskIsFinal(task)) return false;
+  const status = String(task.assignmentStatus || task.bookingStatus || "").toLowerCase();
+  if (["in_progress", "working", "approval_pending"].includes(status)) return true;
+  return ["assigned", "accepted"].includes(status) && assistantTaskJobStarted(task);
 }
 
 const assistantStartEligibilityByTask = new Map();
@@ -17574,12 +18236,12 @@ async function confirmAssistantStartLocation(task) {
 }
 function assistantCanEnterStartPin(task = {}) {
   const eligibility = assistantStartEligibilityByTask.get(task.assignmentId);
-  if (!state.token || !state.assistantIsOnline || !eligibility?.eligible || Date.now() - Date.parse(eligibility.capturedAt || '') > 30000) return false;
+  if (!assistantTaskJobStarted(task) || !state.token || !state.assistantIsOnline || !eligibility?.eligible || Date.now() - Date.parse(eligibility.capturedAt || '') > 30000) return false;
   const location = state.assistantCurrentLocation;
   const stop = assistantDetailLocationStops(task)[0];
   if (location && stop && window.ZigoLiveMap?.metersBetween) {
     const current = customerTrackLiveRoutePoint(location), first = customerTrackLiveRoutePoint(stop);
-    if (!current || !first || location.accuracy == null || Number(location.accuracy) > 50 || Date.now() - Date.parse(location.capturedAt || '') > 30000) return false;
+    if (!current || !first || location.accuracy == null || !Number.isFinite(Number(location.accuracy)) || Number(location.accuracy) < 0 || Number(location.accuracy) > 500 || Date.now() - Date.parse(location.capturedAt || '') > 30000) return false;
     const eligibilityRadius = Number(eligibility.radiusMeters);
     const radiusMeters = Number.isFinite(eligibilityRadius) ? eligibilityRadius : assistantArrivalRadiusMeters();
     return window.ZigoLiveMap.metersBetween([current.longitude,current.latitude], [first.longitude,first.latitude]) <= radiusMeters;
@@ -17590,11 +18252,16 @@ function assistantCanEnterStartPin(task = {}) {
 function syncAssistantStartControls() {
   root.querySelectorAll('[data-assistant-arrival-status]').forEach(label => {
     const task = state.tasks.find(task => task.assignmentId === label.dataset.id);
-    label.textContent = task?.assignmentMetadata?.reachedAt || task?.metadata?.assistantReachedAt ? 'Reached first stop' : assistantArrivalInstruction(' to enter Start PIN');
+    const eligibility = assistantStartEligibilityByTask.get(task?.assignmentId);
+    label.textContent = task && assistantCanEnterStartPin(task)
+      ? 'Within arrival radius. Start PIN available.'
+      : eligibility?.reason || assistantArrivalInstruction(' to enter Start PIN');
   });
   root.querySelectorAll('[data-task-status="in_progress"]').forEach(button => {
     const task = state.tasks.find(task => task.assignmentId === button.dataset.id);
-    button.disabled = !task || assistantStartChecks.has(task.assignmentId);
+    const canEnterStartPin = Boolean(task && assistantCanEnterStartPin(task));
+    button.hidden = !canEnterStartPin;
+    button.disabled = !canEnterStartPin || assistantStartChecks.has(task.assignmentId);
     button.title = assistantStartEligibilityByTask.get(task?.assignmentId)?.reason || 'Check location and enter Start PIN';
   });
   if (state.assistantTaskConfirm?.status === 'in_progress') {
@@ -17884,6 +18551,21 @@ function updateCustomerTrackTotalTimeBadges() {
   });
 }
 
+function updateCustomerTrackExtensionControls() {
+  document.querySelectorAll("[data-track-extension-control]").forEach((control) => {
+    const bookingId = String(control.getAttribute("data-booking-id") || "");
+    const booking = customerTrackCurrentBooking(bookingId);
+    if (!booking) return;
+    const cutoff = customerTrackExtensionCutoffState(booking);
+    const button = control.querySelector("[data-track-open-extension-sheet]");
+    control.hidden = cutoff.disabled;
+    if (button) {
+      button.disabled = cutoff.disabled;
+      button.setAttribute("aria-disabled", cutoff.disabled ? "true" : "false");
+    }
+  });
+}
+
 function updateCustomerHomeCurrentBookingTimers() {
   document.querySelectorAll("[data-customer-home-current-booking-timer]").forEach((element) => {
     const endAt = element.getAttribute("data-base-end-at") ? new Date(element.getAttribute("data-base-end-at")) : null;
@@ -17897,12 +18579,13 @@ function updateCustomerHomeCurrentBookingTimers() {
 function updateCustomerCountdowns() {
   let needsRender = false;
   updateCustomerTrackTotalTimeBadges();
+  updateCustomerTrackExtensionControls();
   updateCustomerHomeCurrentBookingTimers();
   document.querySelectorAll("[data-customer-cancel-countdown]").forEach((element) => {
     const openAt = element.getAttribute("data-customer-cancel-open") ? new Date(element.getAttribute("data-customer-cancel-open")) : null;
     const autoAt = element.getAttribute("data-customer-cancel-auto") ? new Date(element.getAttribute("data-customer-cancel-auto")) : null;
     if ((openAt && Number.isNaN(openAt.getTime())) || (autoAt && Number.isNaN(autoAt.getTime()))) return;
-    const now = Date.now();
+    const now = portalServerNowMs();
     let deadline = autoAt && !Number.isNaN(autoAt.getTime()) ? autoAt : openAt && !Number.isNaN(openAt.getTime()) ? openAt : null;
     if (!deadline) return;
 
@@ -17956,10 +18639,10 @@ function updateCustomerCountdowns() {
 
 function assistantTaskConfirmCopy(status, actionLabel = "") {
   if (status === "accepted") return { title: "Accept Task", message: "Do you want to accept the task?", yes: "Yes, Accept" };
-  if (status === "rejected" && actionLabel === "cancel") return { title: "Cancel Task", message: "Do you want to cancel the task?", yes: "Yes, Cancel" };
+  if (status === "cancelled" || (status === "rejected" && actionLabel === "cancel")) return { title: "Cancel Task", message: "Tell the customer why you are cancelling this booking.", yes: "Cancel Booking" };
   if (status === "rejected") return { title: "Reject Task", message: "Do you want to reject the task?", yes: "Yes, Reject" };
-  if (status === "in_progress") return { title: "Start Task", message: "Ask customer to share 4 digit PIN to start.", yes: "Start" };
-  if (status === "completed") return { title: "Finish Task", message: "Ask customer to share 4 digit PIN to finish.", yes: "Finish" };
+  if (status === "in_progress") return { title: "Start PIN", message: "Ask the customer to share the 4 digit Start PIN.", yes: "Verify Start PIN" };
+  if (status === "completed") return { title: "End PIN", message: "Ask the customer to share the 4 digit End PIN.", yes: "Verify End PIN" };
   return { title: "Complete Task", message: "Do you want to complete the task?", yes: "Yes, Complete" };
 }
 
@@ -17967,6 +18650,7 @@ function assistantTaskConfirmModal() {
   if (!state.assistantTaskConfirm) return "";
   const copy = assistantTaskConfirmCopy(state.assistantTaskConfirm.status, state.assistantTaskConfirm.actionLabel);
   const needsPin = ["in_progress", "completed"].includes(String(state.assistantTaskConfirm.status || ""));
+  const needsReason = String(state.assistantTaskConfirm.status || "") === "cancelled";
   const error = state.assistantTaskConfirm.error ? `<div class="assistant-confirm-error">${escapeHtml(state.assistantTaskConfirm.error)}</div>` : "";
   const confirmKey = `${state.assistantTaskConfirm.assignmentId || ""}:${state.assistantTaskConfirm.status || ""}:${state.assistantTaskConfirm.actionLabel || ""}:${state.assistantTaskConfirm.error || ""}`;
   return `<div class="assistant-confirm-backdrop" data-confirm-key="${escapeHtml(confirmKey)}" role="dialog" aria-modal="true">
@@ -17974,10 +18658,12 @@ function assistantTaskConfirmModal() {
       <p>Task Confirmation</p>
       <h2>${escapeHtml(copy.title)}</h2>
       <span>${escapeHtml(copy.message)}</span>
-      ${needsPin ? `<label class="sr-only" for="assistantTaskPinInput">4 digit PIN</label><input id="assistantTaskPinInput" name="assistantTaskPin" class="assistant-confirm-pin" data-assistant-task-pin-input type="tel" inputmode="numeric" maxlength="4" pattern="\\d{4}" placeholder="4 digit PIN" autocomplete="one-time-code" aria-label="4 digit PIN" autofocus />${error}` : error}
+      ${needsPin ? `<label class="sr-only" for="assistantTaskPinInput">4 digit PIN</label><input id="assistantTaskPinInput" name="assistantTaskPin" class="assistant-confirm-pin" data-assistant-task-pin-input type="tel" inputmode="numeric" maxlength="4" pattern="\\d{4}" placeholder="4 digit PIN" autocomplete="one-time-code" aria-label="4 digit PIN" autofocus />` : ""}
+      ${needsReason ? `<label class="sr-only" for="assistantTaskCancelReason">Cancellation reason</label><textarea id="assistantTaskCancelReason" class="assistant-confirm-reason" data-assistant-task-cancel-reason maxlength="500" placeholder="Enter cancellation reason" aria-label="Cancellation reason" autofocus>${escapeHtml(state.assistantTaskConfirm.reason || "")}</textarea>` : ""}
+      ${error}
       <div class="assistant-confirm-actions">
         <button class="soft-btn" data-close-assistant-confirm type="button">No</button>
-        <button class="${state.assistantTaskConfirm.status === "rejected" ? "danger-btn" : "primary-btn"}" data-confirm-assistant-task type="button">${escapeHtml(copy.yes)}</button>
+        <button class="${["rejected", "cancelled"].includes(String(state.assistantTaskConfirm.status || "")) ? "danger-btn" : "primary-btn"}" data-confirm-assistant-task type="button">${escapeHtml(copy.yes)}</button>
       </div>
     </div>
   </div>`;
@@ -17985,7 +18671,7 @@ function assistantTaskConfirmModal() {
 
 function focusAssistantTaskPinInput() {
   requestAnimationFrame(() => {
-    const input = root.querySelector("[data-assistant-task-pin-input]");
+    const input = root.querySelector("[data-assistant-task-pin-input], [data-assistant-task-cancel-reason]");
     if (!input) return;
     input.focus?.({ preventScroll: true });
     const length = String(input.value || "").length;
@@ -18037,6 +18723,7 @@ async function loadMe({ forceRefresh = false, preserveCart = false } = {}) {
   try {
     const meUrl = `/portal/${actor}/me`;
     const mePayload = await portalCachedGet(meUrl, { cacheKey: meUrl, forceRefresh });
+    syncPortalServerClock(mePayload.data.serverNow);
     state.user = { ...(mePayload.data.user || {}), ...(actor === "customer" && mePayload.data.wallet ? { wallet: mePayload.data.wallet } : {}) };
     state.customerId = actor === "customer" ? String(mePayload.data.customerId || state.customerId || "") : "";
     if (actor === "assistant") {
@@ -18044,12 +18731,7 @@ async function loadMe({ forceRefresh = false, preserveCart = false } = {}) {
         ...state.assistantMasterSettings,
         ...(mePayload.data.assistantMasterSettings || {})
       };
-      const availability = mePayload.data.availability || null;
-      const availabilityStatus = String(availability?.statusCode || "").toLowerCase();
-      state.assistantIsOnline = ["available", "online", "active", "working"].includes(availabilityStatus);
-      if (!state.assistantIsOnline) stopAssistantLocationPings();
-      const savedPoint = validPortalCoordinatePair(availability || {});
-      if (savedPoint) state.assistantCurrentLocation = savedPoint;
+      applyAssistantAvailabilitySnapshot(mePayload.data.availability || null, { force: true });
       try {
         const tasksUrl = "/portal/assistant/tasks";
         const tasks = await portalCachedGet(tasksUrl, { cacheKey: tasksUrl, forceRefresh });
@@ -18068,7 +18750,7 @@ async function loadMe({ forceRefresh = false, preserveCart = false } = {}) {
       const configUrl = "/portal/config?pricing=v2";
       try {
         const configPayload = await portalCachedGet(configUrl, { cacheKey: configUrl, forceRefresh });
-        state.portalConfig = configPayload.data || null;
+        applyPortalConfig(configPayload.data, null);
       } catch (configError) {
         if (Number(configError.status) === 401) throw configError;
         state.portalConfig = state.portalConfig || null;
@@ -18084,12 +18766,11 @@ async function loadMe({ forceRefresh = false, preserveCart = false } = {}) {
       const addressesUrl = "/portal/customer/addresses";
       const previousLocationsUrl = "/portal/customer/previous-used-locations";
       const defaultLocationUrl = "/portal/customer/default-location";
-      const [bookingsPayload, addresses, previousLocations, defaultLocation, serviceBoundaries] = await Promise.all([
+      const [bookingsPayload, addresses, previousLocations, defaultLocation] = await Promise.all([
         portalCachedGet(bookingsUrl, { cacheKey: bookingsUrl, forceRefresh }),
         portalCachedGet(addressesUrl, { cacheKey: addressesUrl, forceRefresh }).catch(() => ({ data: [] })),
         api(previousLocationsUrl).catch(() => ({ data: [] })),
-        api(defaultLocationUrl).catch(() => ({ data: null })),
-        ensureCustomerLocationServiceBoundaries({ forceRefresh })
+        api(defaultLocationUrl).catch(() => ({ data: null }))
       ]);
       state.bookings = Array.isArray(bookingsPayload?.data) ? bookingsPayload.data : state.bookings;
       if (state.confirmedBooking) {
@@ -18111,7 +18792,6 @@ async function loadMe({ forceRefresh = false, preserveCart = false } = {}) {
         defaultLocation: defaultLocation?.data || null,
         sessionLocation
       });
-      rememberCustomerLocationServiceBoundaries(serviceBoundaries);
       if (restoredLocation) await refreshCustomerSelectedCoverage({ force: true });
       if (state.customerView === "home") state.customerLocationPickerSheetOpen = !Boolean(restoredLocation);
       const clusterId = selectedCustomerClusterId();
@@ -18312,8 +18992,11 @@ async function initPortal() {
         return;
       }
     }
-    const hasCachedHome = actor === "assistant" ? true : Boolean(state.user || state.tasks.length || state.bookings.length);
-    state.sessionRestoring = !hasCachedHome && actor !== "assistant";
+    const hasCachedHome = actor === "assistant"
+      ? Boolean(state.user && state.assistantAvailabilityHydrated)
+      : Boolean(state.user || state.tasks.length || state.bookings.length);
+    state.sessionRestoring = !hasCachedHome;
+    if (actor === "assistant" && state.assistantIsOnline) startAssistantLocationPings();
     render();
     const isValid = await loadMe({ forceRefresh: true });
     state.sessionRestoring = false;
@@ -18366,7 +19049,10 @@ window.addEventListener("zigo:native-resume", () => {
   }
   void refreshPortalSessionIfDue();
   if (actor === 'assistant') {
+    syncAssistantOfferOverlay();
+    if (state.assistantIsOnline) startAssistantLocationPings();
     startAssistantRealtime(true);
+    void syncAssistantAvailabilitySnapshot();
     void refreshAssistantTasksRealtime(null, { immediate: true });
   }
   startCustomerRealtime(true);
@@ -18382,7 +19068,10 @@ document.addEventListener("visibilitychange", () => {
   }
   void refreshPortalSessionIfDue();
   if (actor === 'assistant') {
+    syncAssistantOfferOverlay();
+    if (state.assistantIsOnline) startAssistantLocationPings();
     startAssistantRealtime(true);
+    void syncAssistantAvailabilitySnapshot();
     void refreshAssistantTasksRealtime(null, { immediate: true });
   }
   void refreshCustomerSelectedCoverage().catch(() => {});
@@ -18844,6 +19533,83 @@ function assistantGpsLocationView() {
   };
 }
 
+const assistantOnlineStatusValues = new Set(["available", "online", "active", "working"]);
+
+function assistantAvailabilityIsOnline(value) {
+  return assistantOnlineStatusValues.has(String(value || "").toLowerCase());
+}
+
+function applyAssistantAvailabilitySnapshot(availability = null, { force = false } = {}) {
+  if (!availability || typeof availability !== "object") return false;
+  const incomingUpdatedAt = String(availability.availabilityUpdatedAt || availability.updatedAt || "");
+  const incomingTime = Date.parse(incomingUpdatedAt);
+  const currentTime = Date.parse(state.assistantAvailabilityUpdatedAt || "");
+  if (!force && Number.isFinite(incomingTime) && Number.isFinite(currentTime) && incomingTime < currentTime) return false;
+  if (!force && state.assistantAvailabilityBusy) return false;
+
+  const online = assistantAvailabilityIsOnline(availability.availabilityStatus || availability.statusCode);
+  const presenceStatus = String(availability.presenceStatus || (online ? "STALE" : "OFFLINE")).toUpperCase();
+  const heartbeatFresh = availability.heartbeatFresh === true;
+  const gpsFresh = availability.gpsFresh === true;
+  state.assistantIsOnline = online;
+  state.assistantPresenceStatus = presenceStatus;
+  state.assistantAvailabilityUpdatedAt = incomingUpdatedAt || state.assistantAvailabilityUpdatedAt;
+  state.assistantAvailabilityHydrated = true;
+  const savedPoint = validPortalCoordinatePair({
+    ...availability,
+    capturedAt: availability.gpsCapturedAt || availability.capturedAt || availability.updatedAt
+  });
+  if (savedPoint) state.assistantCurrentLocation = { ...(state.assistantCurrentLocation || {}), ...savedPoint };
+
+  if (online) {
+    if (heartbeatFresh && gpsFresh && presenceStatus === "ONLINE") {
+      state.assistantGpsStatus = "live";
+      state.assistantLocationError = "";
+    } else {
+      state.assistantGpsStatus = "stale";
+      if (!state.assistantLocationError) state.assistantLocationError = "Restoring live GPS...";
+    }
+    startAssistantLocationPings();
+  } else {
+    state.assistantGpsStatus = "idle";
+    state.assistantPresenceStatus = "OFFLINE";
+    state.assistantLocationError = "";
+    stopAssistantLocationPings();
+  }
+  syncAssistantAvailabilityUi();
+  writePortalSessionCache();
+  return true;
+}
+
+function syncAssistantAvailabilityUi() {
+  if (actor !== "assistant" || !root) return;
+  const busy = Boolean(state.assistantLocationBusy || state.assistantAvailabilityBusy);
+  const online = Boolean(state.assistantIsOnline);
+  const location = assistantGpsLocationView();
+  const locationButton = root.querySelector("[data-assistant-enable-gps]");
+  if (locationButton) {
+    locationButton.disabled = busy;
+    const title = locationButton.querySelector(".assistant-location-copy b");
+    const detail = locationButton.querySelector(".assistant-location-copy small");
+    if (title) title.textContent = location.title;
+    if (detail) detail.textContent = state.assistantLocationBusy
+      ? "Reading current location..."
+      : state.assistantLocationError || location.detail;
+  }
+  const onlineButton = root.querySelector("[data-online]");
+  if (onlineButton) {
+    onlineButton.disabled = busy;
+    onlineButton.dataset.online = online ? "false" : "true";
+    onlineButton.classList.toggle("is-online", online);
+    onlineButton.classList.toggle("is-offline", !online);
+    onlineButton.classList.toggle("has-gps-warning", online && state.assistantGpsStatus !== "live");
+    onlineButton.setAttribute("aria-pressed", String(online));
+    onlineButton.setAttribute("aria-busy", String(busy));
+    const label = onlineButton.querySelector("span:last-child");
+    if (label) label.textContent = busy ? "..." : online ? "Online" : "Offline";
+  }
+}
+
 async function enrichAssistantGpsAddress(point = {}) {
   const parsed = validPortalCoordinatePair(point);
   if (!parsed) return point;
@@ -18891,53 +19657,66 @@ function assistantProfileSheetHtml() {
   </div>`;
 }
 
-async function requestAssistantGpsLocation({ renderHome = true } = {}) {
-  if (state.assistantLocationBusy) return validPortalCoordinatePair(state.assistantCurrentLocation);
+let assistantLocationRequestPromise = null;
+let assistantAvailabilityMutationId = 0;
+let assistantAvailabilitySyncPromise = null;
+
+function requestAssistantGpsLocation({ renderHome = true } = {}) {
+  if (assistantLocationRequestPromise) return assistantLocationRequestPromise;
   state.assistantLocationBusy = true;
   state.assistantLocationError = "";
-  if (renderHome && actor === "assistant") updateAssistantLocationBusyUi();
-  try {
-    const point = await assistantGpsTracker().freshPosition();
-    if (!point) throw new Error("Unable to read current GPS location.");
-    state.assistantCurrentLocation = { ...point, ...await enrichAssistantGpsAddress(point) };
-    state.assistantLocationError = "";
-    return { ...state.assistantCurrentLocation, ...point };
-  } catch (error) {
-    if (!state.assistantIsOnline) stopAssistantLocationPings();
-    state.assistantCurrentLocation = null;
-    state.assistantLocationError = error.message || "Allow current location to go online.";
-    throw error;
-  } finally {
-    state.assistantLocationBusy = false;
-    if (renderHome && actor === "assistant") renderAssistantHome();
-  }
+  state.assistantGpsStatus = "acquiring";
+  if (renderHome && actor === "assistant") syncAssistantAvailabilityUi();
+  let request;
+  request = (async () => {
+    try {
+      const point = await assistantGpsTracker().freshPosition();
+      if (!point) throw new Error("Unable to read current GPS location.");
+      state.assistantCurrentLocation = { ...(state.assistantCurrentLocation || {}), ...point };
+      void enrichAssistantGpsAddress(point).then((resolved) => {
+        if (state.assistantCurrentLocation?.capturedAt !== point.capturedAt) return;
+        state.assistantCurrentLocation = { ...state.assistantCurrentLocation, ...resolved, ...point };
+        syncAssistantAvailabilityUi();
+      });
+      state.assistantGpsStatus = state.assistantIsOnline ? state.assistantGpsStatus : "ready";
+      state.assistantLocationError = "";
+      return point;
+    } catch (error) {
+      state.assistantGpsStatus = "unavailable";
+      state.assistantLocationError = error.message || "Allow current location to go online.";
+      throw error;
+    } finally {
+      state.assistantLocationBusy = false;
+      if (assistantLocationRequestPromise === request) assistantLocationRequestPromise = null;
+      if (renderHome && actor === "assistant") syncAssistantAvailabilityUi();
+    }
+  })();
+  assistantLocationRequestPromise = request;
+  return request;
 }
 
 function updateAssistantLocationBusyUi() {
-  if (actor !== "assistant" || !root) return;
-  const locationButton = root.querySelector("[data-assistant-enable-gps]");
-  if (locationButton) {
-    locationButton.disabled = true;
-    const detail = locationButton.querySelector(".assistant-location-copy small");
-    if (detail) detail.textContent = "Reading current location...";
-  }
-  const onlineButton = root.querySelector("[data-online]");
-  if (onlineButton) {
-    onlineButton.disabled = true;
-    const label = onlineButton.querySelector("span:last-child");
-    if (label) label.textContent = "...";
-  }
+  syncAssistantAvailabilityUi();
 }
 
-async function setAssistantOnlineStatus(isOnline, point = null) {
-  const response = await api("/portal/assistant/availability", {
+async function setAssistantOnlineStatus(isOnline, point = null, requestId = "") {
+  return api("/portal/assistant/availability", {
     method: "PATCH",
-    body: JSON.stringify({ isOnline, ...(point || {}) })
+    body: JSON.stringify({ isOnline, requestId, ...(point || {}) })
   });
-  const status = String(response?.data?.availabilityStatus || "").toLowerCase();
-  state.assistantIsOnline = isOnline && (status ? ["available", "online", "active", "working"].includes(status) : true);
-  if (!isOnline) stopAssistantLocationPings();
-  return response;
+}
+
+async function syncAssistantAvailabilitySnapshot() {
+  if (actor !== "assistant" || !state.token || state.assistantAvailabilityBusy) return null;
+  if (assistantAvailabilitySyncPromise) return assistantAvailabilitySyncPromise;
+  assistantAvailabilitySyncPromise = api("/portal/assistant/me", { background: true })
+    .then((payload) => {
+      applyAssistantAvailabilitySnapshot(payload?.data?.availability || null);
+      return payload?.data?.availability || null;
+    })
+    .catch(() => null)
+    .finally(() => { assistantAvailabilitySyncPromise = null; });
+  return assistantAvailabilitySyncPromise;
 }
 
 function assistantHasActiveTrackingTask() {
@@ -19017,28 +19796,48 @@ function assistantGpsTracker() {
     publish: async point => {
       if (!state.token || !state.assistantIsOnline) return;
       const response = await api('/portal/assistant/location-pings', { method: 'POST', body: JSON.stringify(point), background: true, signal: AbortSignal.timeout(10000) });
+      if (response.data?.onlineIntent === false) {
+        state.assistantIsOnline = false;
+        state.assistantPresenceStatus = "OFFLINE";
+        state.assistantGpsStatus = "idle";
+        stopAssistantLocationPings();
+        syncAssistantAvailabilityUi();
+        return;
+      }
+      state.assistantPresenceStatus = String(response.data?.presenceStatus || "ONLINE").toUpperCase();
+      state.assistantAvailabilityUpdatedAt = response.data?.availabilityUpdatedAt || state.assistantAvailabilityUpdatedAt;
       if (response.data?.assignmentId && response.data.startEligibility) {
         assistantStartEligibilityByTask.set(response.data.assignmentId, response.data.startEligibility);
         if (Number.isFinite(Number(response.data.startEligibility.radiusMeters))) state.assistantMasterSettings.autoArrivedRadiusMeters = Number(response.data.startEligibility.radiusMeters);
         const task = state.tasks.find(task => task.assignmentId === response.data.assignmentId);
+        const becameReached = Boolean(task && response.data.reachedAt && !assistantTaskReachedFirstStop(task));
         if (task && response.data.reachedAt) task.assignmentMetadata = { ...(task.assignmentMetadata || {}), reachedAt: response.data.reachedAt };
         syncAssistantStartControls();
+        if (becameReached) {
+          if (!renderAssistantTaskView()) renderAssistantHome();
+          notify("First stop reached. Start PIN is now available.");
+        }
       }
     },
     onPosition: point => {
       state.assistantCurrentLocation = { ...(state.assistantCurrentLocation || {}), ...point };
+      if (!state.assistantIsOnline) state.assistantGpsStatus = "ready";
+      state.assistantLocationError = "";
+      syncAssistantAvailabilityUi();
       syncAssistantStartControls();
       if (assistantLiveMap) { assistantLiveRoute = { ...assistantLiveRoute, assistantLocation: point }; assistantLiveMap.update(assistantLiveRoute); }
     },
     onStatus: status => {
       const labels = { live: '', acquiring: 'Reading GPS...', stale: 'Location stale', connection_lost: 'Location upload reconnecting...', permission_denied: 'Location permission denied', location_unavailable: 'GPS unavailable', gps_timeout: 'Waiting for GPS signal' };
+      state.assistantGpsStatus = status;
+      if (status === "live") state.assistantPresenceStatus = "ONLINE";
       state.assistantLocationError = labels[status] || '';
-      const detail = root.querySelector('.assistant-location-copy small');
-      if (detail) detail.textContent = state.assistantLocationError || assistantGpsLocationView().detail;
+      syncAssistantAvailabilityUi();
     },
     onPermissionDenied: () => {
-      const wasOnline = state.assistantIsOnline; state.assistantIsOnline = false;
-      if (state.token && wasOnline) void setAssistantOnlineStatus(false).then(() => renderAssistantHome()).catch(() => {});
+      state.assistantGpsStatus = "permission_denied";
+      state.assistantLocationError = "Location permission denied. Enable device location to restore booking availability.";
+      syncAssistantAvailabilityUi();
     }
   });
   return assistantGpsTracking;
@@ -19058,7 +19857,7 @@ function startAssistantLocationPings() {
   assistantGpsTracker().start();
 }
 
-const customerUnserviceableMessage = "Service is not available at this location yet. We are expanding our coverage and look forward to serving your area soon. Please choose another location to continue.";
+const customerUnserviceableMessage = "Service is not available at this location yet.";
 let customerCoverageCheckAt = 0;
 let customerCoverageCheckPending = null;
 
@@ -19392,19 +20191,64 @@ async function customerSelectLocationForHomeDefault(picked = {}, { label = "", s
 async function searchCustomerLocations(query) {
   const text = String(query || "").trim();
   if (text.length < 1) throw new Error("Enter location to search.");
+  if (locationSearchTimer) clearTimeout(locationSearchTimer);
+  const requestId = ++locationSearchRequestId;
   state.locationBusy = true;
   state.locationSearchQuery = text;
   state.locationMessage = "Searching locations...";
-  if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch({ focusSearch: true });
+  if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch();
   else render();
   try {
     const url = `/portal/customer/locations/search?q=${encodeURIComponent(text)}`;
     const results = await portalCachedGet(url, { cacheKey: url });
+    if (requestId !== locationSearchRequestId) return;
     state.locationResults = results.data || [];
     state.locationMessage = state.locationResults.length ? "Choose one searched location." : "No matching locations found.";
     state.locationStep = "manual";
   } finally {
-    state.locationBusy = false;
+    if (requestId === locationSearchRequestId) state.locationBusy = false;
+  }
+}
+
+function setCustomerLocationResultBusy(button, busy) {
+  if (!(button instanceof HTMLButtonElement)) return;
+  button.disabled = Boolean(busy);
+  button.classList.toggle("is-resolving", Boolean(busy));
+  button.setAttribute("aria-busy", String(Boolean(busy)));
+  button.dataset.locationOpening = busy ? "true" : "false";
+}
+
+async function resolveCustomerSearchLocationCandidate(candidate = {}) {
+  const normalized = customerNormalizePersistedLocation(candidate) || candidate;
+  const hasCoordinates = customerLocationHasCoordinates(normalized);
+  const needsResolution = !hasCoordinates || normalized.lookupKind === "autocomplete";
+  if (!needsResolution) return normalized;
+
+  const address = String(normalized.address || normalized.label || state.locationSearchQuery || "").trim();
+  if (!address) throw new Error("This place does not include an address to locate on the map.");
+  const params = new URLSearchParams({ address });
+  if (normalized.placeId) params.set("placeId", normalized.placeId);
+  if (hasCoordinates) {
+    params.set("latitude", String(normalized.latitude));
+    params.set("longitude", String(normalized.longitude));
+  }
+  try {
+    const response = await api(`/portal/customer/locations/geocode?${params.toString()}`, {
+      background: true,
+      signal: AbortSignal.timeout(10000)
+    });
+    const resolved = response.data || {};
+    if (!customerLocationHasCoordinates(resolved)) throw new Error("Ola Maps did not return coordinates for this place.");
+    return customerNormalizePersistedLocation({
+      ...normalized,
+      ...resolved,
+      label: resolved.label || normalized.label || "Selected location",
+      address: resolved.address || normalized.address || address,
+      source: "search"
+    });
+  } catch (error) {
+    if (hasCoordinates) return normalized;
+    throw error;
   }
 }
 
@@ -19417,9 +20261,12 @@ async function openCustomerSearchLocationConfirm(indexOrButton, event = null) {
   const index = Number(button ? button.dataset.locationResult : indexOrButton);
   const candidate = state.locationResults[index];
   if (!candidate) return false;
-  if (button) button.dataset.locationOpening = "true";
+  setCustomerLocationResultBusy(button, true);
+  state.locationBusy = true;
+  state.locationMessage = "Finding the exact location...";
   try {
-    openCustomerPickedLocationConfirm({ ...candidate, source: candidate.source || "search" }, {
+    const resolved = await resolveCustomerSearchLocationCandidate(candidate);
+    openCustomerPickedLocationConfirm({ ...resolved, source: resolved.source || "search" }, {
       returnStep: state.customerLocationPickerPurpose === "cart-stop" ? "cart-stop" : "picker"
     });
   } catch (error) {
@@ -19430,7 +20277,7 @@ async function openCustomerSearchLocationConfirm(indexOrButton, event = null) {
     state.locationMessage = error.message || "Unable to validate location.";
     syncCustomerHomeLocationPickerSheet({ focusSearch: true });
   } finally {
-    if (button) button.dataset.locationOpening = "false";
+    setCustomerLocationResultBusy(button, false);
   }
   return false;
 }
@@ -19442,6 +20289,17 @@ function backFromCustomerConfirmLocation() {
   state.locationMessage = "";
   state.locationSaveAsMessage = "";
   const returnStep = String(state.locationConfirmReturnStep || "manual");
+  if (returnStep === "cart-edit") {
+    state.customerView = "cart";
+    state.customerLocationPickerPurpose = "";
+    state.customerLocationPickerSheetOpen = false;
+    state.customerLocationPickerClosing = false;
+    state.customerCartRouteEditIndex = -1;
+    state.locationStep = "permission";
+    state.locationConfirmReturnStep = "manual";
+    renderCart();
+    return;
+  }
   if (returnStep === "cart-stop") {
     state.customerView = "cart";
     state.customerLocationPickerPurpose = "cart-stop";
@@ -19489,7 +20347,8 @@ function backFromCustomerConfirmLocation() {
 function focusLocationSearchInput() {
   const input = root.querySelector("[data-location-search-input]");
   if (!(input instanceof HTMLInputElement)) return;
-  input.focus();
+  if (document.activeElement === input) return;
+  input.focus({ preventScroll: true });
   const end = input.value.length;
   input.setSelectionRange(end, end);
 }
@@ -19503,7 +20362,7 @@ function scheduleCustomerLocationAutocomplete(query) {
     state.locationResults = [];
     state.locationBusy = false;
     state.locationMessage = "";
-    if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch({ focusSearch: true });
+    if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch();
     else {
       render();
       focusLocationSearchInput();
@@ -19528,7 +20387,7 @@ function scheduleCustomerLocationAutocomplete(query) {
     } finally {
       if (requestId === locationSearchRequestId) {
         state.locationBusy = false;
-        if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch({ focusSearch: true });
+        if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch();
         else {
           render();
           focusLocationSearchInput();
@@ -19701,8 +20560,9 @@ async function endCustomerMapDrag(event) {
 }
 
 function locationFormLabel(data) {
-  const label = String(data.label || "Home");
+  const label = String(data.label || "").trim();
   const customLabel = String(data.customLabel || "").trim();
+  if (!label) return "";
   return label === "Other" ? (customLabel || "Other") : label;
 }
 
@@ -19722,7 +20582,9 @@ async function completeCustomerLocationSelection(form) {
   const cityName = String(data.cityName || picked.cityName || picked.metadata?.cityName || "").trim();
   const postalCode = String(data.postalCode || picked.postalCode || picked.pincode || picked.metadata?.postalCode || picked.metadata?.pincode || "").trim();
   const submitButton = form.querySelector(".confirm-location-btn");
-  if (state.locationConfirmReturnStep === "cart-stop" || state.customerLocationPickerPurpose === "cart-stop") {
+  const isCartLocationFlow = ["cart-stop", "cart-edit"].includes(state.locationConfirmReturnStep)
+    || ["cart-stop", "cart-edit"].includes(state.customerLocationPickerPurpose);
+  if (isCartLocationFlow) {
     if (!isServiceable) throw new Error("Pick a serviceable location first.");
     const contactNumber = data.useMyMobile ? customerDisplayMobile10(state.user?.phone || "") : customerDisplayMobile10(data.contactNumber || "");
     state.locationBusy = true;
@@ -20389,7 +21251,7 @@ function fileToDataBase64(file) {
 }
 
 async function uploadPortalTaskFile(file, context = "") {
-  const sourceFile = file?.file || file;
+  const sourceFile = await normalizePortalUploadFile(file?.file || file);
   if (!sourceFile) return null;
   const payload = await api("/portal/task-media", {
     method: "POST",
@@ -20874,12 +21736,12 @@ async function handleCustomerLocationSubmit(event) {
     const data = Object.fromEntries(new FormData(form));
     try {
       await searchCustomerLocations(data.q);
-      if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch({ focusSearch: true });
+      if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch();
       else render();
     } catch (error) {
       state.locationBusy = false;
       notify(error.message || "Unable to search location.");
-      if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch({ focusSearch: true });
+      if (["home", "cart"].includes(state.customerView) && state.customerLocationPickerSheetOpen) updateCustomerHomeLocationPickerSearch();
       else render();
     }
     return;
@@ -20939,6 +21801,7 @@ document.addEventListener("submit", handleCustomerDisputeSubmit);
 document.addEventListener("submit", handleCustomerPaymentProofSubmit);
 document.addEventListener("submit", handleCustomerProfileEditSubmit);
 document.addEventListener("submit", handleCustomerSupportSubmit);
+document.addEventListener("submit", handleAssistantSupportSubmit);
 document.addEventListener("pointerdown", handleCustomerTrackLiveRoutePointerDown, { passive: true });
 document.addEventListener("pointermove", handleCustomerTrackLiveRoutePointerMove, { passive: false });
 document.addEventListener("pointerup", handleCustomerTrackLiveRoutePointerEnd, { passive: true });
@@ -21133,21 +21996,28 @@ document.addEventListener("change", (event) => {
     const maxBytes = 2 * 1024 * 1024;
     const acceptedFiles = files.filter((file) => Number(file?.size || 0) <= maxBytes);
     const oversizedFiles = files.filter((file) => Number(file?.size || 0) > maxBytes);
-    const current = Array.isArray(state.cartUploads) ? state.cartUploads : [];
-    const nextEntries = acceptedFiles.map((file, index) => customerCartUploadEntryFromFile(file, current.length + index));
-    const merged = [...current, ...nextEntries].slice(0, 8);
-    const discarded = [...current, ...nextEntries].slice(8);
-    revokeCustomerCartUploadUrls(discarded);
-    state.cartUploads = merged;
-    state.cartUploadMessage = oversizedFiles.length === 1
-      ? `${oversizedFiles[0].name} exceeds the 2 MB attachment limit.`
-      : oversizedFiles.length > 1
-        ? `${oversizedFiles.length} files exceed the 2 MB attachment limit.`
-        : "";
-    state.cartUploadPreviewIndex = -1;
-    state.cartUploadDeleteIndex = -1;
     uploadInput.value = "";
-    render();
+    void Promise.all(acceptedFiles.map((file) => normalizePortalUploadFile(file)))
+      .then((normalizedFiles) => {
+        const current = Array.isArray(state.cartUploads) ? state.cartUploads : [];
+        const nextEntries = normalizedFiles.map((file, index) => customerCartUploadEntryFromFile(file, current.length + index));
+        const merged = [...current, ...nextEntries].slice(0, 8);
+        const discarded = [...current, ...nextEntries].slice(8);
+        revokeCustomerCartUploadUrls(discarded);
+        state.cartUploads = merged;
+        state.cartUploadMessage = oversizedFiles.length === 1
+          ? `${oversizedFiles[0].name} exceeds the 2 MB attachment limit.`
+          : oversizedFiles.length > 1
+            ? `${oversizedFiles.length} files exceed the 2 MB attachment limit.`
+            : "";
+        state.cartUploadPreviewIndex = -1;
+        state.cartUploadDeleteIndex = -1;
+        render();
+      })
+      .catch(() => {
+        state.cartUploadMessage = "Unable to read the selected attachment.";
+        render();
+      });
   }
   const taskUpdateFileInput = event.target instanceof HTMLInputElement && event.target.type === "file" && event.target.closest("[data-task-update-form], [data-customer-support-message-form]")
     ? event.target
@@ -21357,18 +22227,120 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const closeAssistantSupport = event.target.closest("[data-close-assistant-support]") || (event.target.matches?.(".assistant-support-backdrop") ? event.target : null);
+  if (closeAssistantSupport && actor === "assistant") {
+    event.preventDefault();
+    state.assistantSupportOpen = false;
+    state.assistantSupportMode = "options";
+    state.assistantSupportBusy = false;
+    state.assistantSupportError = "";
+    state.assistantSupportAssignmentId = "";
+    state.assistantSupportDetail = null;
+    syncAssistantTaskConfirmOverlay();
+    return;
+  }
+
+  const openAssistantHelp = event.target.closest("[data-open-assistant-help]");
+  if (openAssistantHelp && actor === "assistant") {
+    event.preventDefault();
+    event.stopPropagation();
+    state.assistantSupportOpen = true;
+    state.assistantSupportMode = "options";
+    state.assistantSupportBusy = false;
+    state.assistantSupportError = "";
+    state.assistantSupportAssignmentId = openAssistantHelp.dataset.id || "";
+    state.assistantSupportDetail = null;
+    syncAssistantTaskConfirmOverlay();
+    return;
+  }
+
+  if (event.target.closest("[data-start-assistant-support-chat]") && actor === "assistant") {
+    event.preventDefault();
+    await openAssistantSupportChat();
+    return;
+  }
+
+  const startAssistantJobButton = event.target.closest("[data-start-assistant-job]");
+  if (startAssistantJobButton && actor === "assistant") {
+    event.preventDefault();
+    event.stopPropagation();
+    const assignmentId = startAssistantJobButton.dataset.id || "";
+    if (!assignmentId || state.assistantStartJobBusyId) return;
+    state.assistantStartJobBusyId = assignmentId;
+    startAssistantJobButton.disabled = true;
+    const originalText = startAssistantJobButton.textContent;
+    startAssistantJobButton.textContent = "Starting...";
+    try {
+      const point = await assistantGpsTracker().freshPosition();
+      let locationSync = null;
+      if (state.assistantIsOnline) {
+        locationSync = await api('/portal/assistant/location-pings', {
+          method: 'POST',
+          body: JSON.stringify(point),
+          background: true,
+          signal: AbortSignal.timeout(10000)
+        });
+      }
+      if (!state.assistantIsOnline || locationSync?.data?.onlineIntent === false) {
+        const requestId = globalThis.crypto?.randomUUID?.() || `start-job-online-${Date.now()}`;
+        const availability = await setAssistantOnlineStatus(true, point, requestId);
+        applyAssistantAvailabilitySnapshot({
+          ...(availability?.data || {}),
+          statusCode: availability?.data?.availabilityStatus || "available",
+          presenceStatus: availability?.data?.presenceStatus || "ONLINE",
+          heartbeatFresh: true,
+          gpsFresh: true,
+          updatedAt: availability?.data?.availabilityUpdatedAt || new Date().toISOString()
+        }, { force: true });
+      } else {
+        state.assistantPresenceStatus = String(locationSync?.data?.presenceStatus || "ONLINE").toUpperCase();
+        state.assistantAvailabilityUpdatedAt = locationSync?.data?.availabilityUpdatedAt || state.assistantAvailabilityUpdatedAt;
+        state.assistantGpsStatus = "live";
+      }
+      const payload = await api(`/portal/assistant/tasks/${encodeURIComponent(assignmentId)}/start-job`, { method: "POST", body: JSON.stringify({}) });
+      const task = state.tasks.find((item) => item.assignmentId === assignmentId);
+      if (task) {
+        task.assignmentMetadata = {
+          ...(task.assignmentMetadata || {}),
+          jobStartedAt: payload.data?.jobStartedAt,
+          travelStartedAt: payload.data?.jobStartedAt
+        };
+      }
+      startAssistantLocationPings();
+      if (!renderAssistantTaskView()) renderAssistantHome();
+      void sendAssistantLocationPing({ silent: true });
+      notify("Job started. Navigate to the first stop.");
+    } catch (error) {
+      notify(error.message || "Unable to start this job.");
+      if (startAssistantJobButton.isConnected) {
+        startAssistantJobButton.disabled = false;
+        startAssistantJobButton.textContent = originalText;
+      }
+    } finally {
+      state.assistantStartJobBusyId = "";
+    }
+    return;
+  }
+
   const earlyTaskButton = event.target.closest("[data-task-status]");
   const offerButton=event.target.closest('[data-assistant-offer-response]');
   if(offerButton && actor==='assistant') {
     event.preventDefault();
     const assignmentId=offerButton.closest('[data-assignment-id]')?.dataset.assignmentId;
     if(!assignmentId || assistantOfferBusyId) return;
+    const task=state.tasks.find(task=>task.assignmentId===assignmentId);
+    if(!task || !assistantTaskIsActiveBroadcastOffer(task)) {
+      stopAssistantOrderBell();
+      syncAssistantOfferOverlay();
+      await refreshAssistantTasksRealtime(null,{immediate:true}).catch(()=>{});
+      notify('This booking offer has expired.');
+      return;
+    }
     stopAssistantOrderBell();
     assistantOfferBusyId=assignmentId; syncAssistantOfferOverlay();
     try {
       const response=offerButton.dataset.assistantOfferResponse;
       const payload=await api(`/portal/assistant/tasks/${encodeURIComponent(assignmentId)}/offer-response`,{method:'POST',body:JSON.stringify({response})});
-      const task=state.tasks.find(task=>task.assignmentId===assignmentId);
       if(task) {task.assignmentStatus=payload.data.status;task.bookingStatus=payload.data.status==='accepted' ? 'accepted' : 'queued';}
       rebuildAssistantTaskTabIndex();
       if(response==='accepted') {
@@ -21739,9 +22711,16 @@ document.addEventListener("click", async (event) => {
   const openTrackExtensionSheet = event.target.closest("[data-track-open-extension-sheet]");
   if (openTrackExtensionSheet) {
     event.preventDefault();
+    const bookingId = String(openTrackExtensionSheet.dataset.bookingId || "");
+    const cutoff = customerTrackExtensionCutoffState(customerTrackCurrentBooking(bookingId));
+    if (openTrackExtensionSheet.disabled || cutoff.disabled) {
+      updateCustomerTrackExtensionControls();
+      notify(cutoff.message, "error");
+      return;
+    }
     const categoryId = String(openTrackExtensionSheet.dataset.categoryId || "").trim();
     const clusterId = String(openTrackExtensionSheet.dataset.clusterId || "").trim();
-    state.customerTrackExtensionSheet = { bookingId: openTrackExtensionSheet.dataset.bookingId || "", assignmentId: openTrackExtensionSheet.dataset.assignmentId || "", categoryId, clusterId, durationId: "", options: [], selectedOption: null, loading: true, loadError: "" };
+    state.customerTrackExtensionSheet = { bookingId, assignmentId: openTrackExtensionSheet.dataset.assignmentId || "", categoryId, clusterId, durationId: "", options: [], selectedOption: null, loading: true, loadError: "" };
     renderCustomerTrackExtensionSheet();
     try {
       const options = await refreshCustomerCategoryDurationData(categoryId, "extend", clusterId);
@@ -22631,11 +23610,16 @@ document.addEventListener("click", async (event) => {
       event.stopImmediatePropagation?.();
       const candidate = state.locationResults[Number(locationResultButton.dataset.locationResult)];
       if (!candidate) return;
+      if (locationResultButton.dataset.locationOpening === "true") return;
+      setCustomerLocationResultBusy(locationResultButton, true);
       try {
-        await putCustomerCartLocationStop({ ...candidate, source: candidate.source || "search" });
+        const resolved = await resolveCustomerSearchLocationCandidate(candidate);
+        await putCustomerCartLocationStop({ ...resolved, source: resolved.source || "search" });
         closeCustomerCartStopPickerToReview();
       } catch (error) {
         notify(error.message || "Unable to add location.");
+      } finally {
+        setCustomerLocationResultBusy(locationResultButton, false);
       }
       return;
     }
@@ -22795,7 +23779,10 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (event.target.closest("[data-change-service-location]")) {
+    event.preventDefault();
+    event.stopPropagation();
     closeCustomerUnserviceableSheet();
+    if (state.customerView === "location" && state.locationStep === "confirm") return;
     openCustomerLocationPickerSheet({ step: "manual", focusSearch: true });
     return;
   }
@@ -23387,6 +24374,7 @@ document.addEventListener("click", async (event) => {
       }
     }
     render();
+    if (bookingId) void refreshCustomerTrackBookingRealtime(bookingId);
     return;
   }
 
@@ -23601,12 +24589,11 @@ document.addEventListener("click", async (event) => {
 
   const editCartLocationStopButton = event.target.closest("[data-edit-customer-cart-location-stop]");
   if (editCartLocationStopButton) {
-    if (event.target.closest("[data-open-customer-cart-route-delete]")) return;
     if (Date.now() < customerCartRouteSuppressClickUntil) return;
     event.preventDefault();
     event.stopPropagation();
     const index = Number(editCartLocationStopButton.dataset.editCustomerCartLocationStop);
-    openCustomerCartStopPicker({ editIndex: index });
+    if (!openCustomerCartLocationEdit(index)) notify("Unable to open this location.");
     return;
   }
 
@@ -23662,8 +24649,7 @@ document.addEventListener("click", async (event) => {
   if (openCartRouteDeleteButton) {
     event.preventDefault();
     event.stopPropagation();
-    state.customerCartRouteDeleteIndex = Number(openCartRouteDeleteButton.dataset.openCustomerCartRouteDelete);
-    refreshCustomerCartLocationSection();
+    openCustomerCartRouteDeleteConfirmation(openCartRouteDeleteButton.dataset.openCustomerCartRouteDelete);
     return;
   }
 
@@ -23689,11 +24675,12 @@ document.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
     const index = Number(state.customerCartRouteDeleteIndex);
-    if (removeCustomerCartRouteStop(index)) {
-      showCustomerCartNotice("Location removed from route.");
-      refreshCustomerCartLocationSection();
-    }
+    const canDelete = customerCartLocationStopsForPayload().length > 1;
     state.customerCartRouteDeleteIndex = -1;
+    if (canDelete && removeCustomerCartRouteStop(index)) {
+      showCustomerCartNotice("Location removed from route.");
+    }
+    refreshCustomerCartLocationSection();
     return;
   }
 
@@ -23997,18 +24984,47 @@ document.addEventListener("click", async (event) => {
 
   const online = event.target.closest("[data-online]");
   if (online) {
-    try {
-      const isOnline = online.dataset.online === "true";
-      const point = isOnline ? await requestAssistantGpsLocation({ renderHome: true }) : null;
-      await setAssistantOnlineStatus(isOnline, point);
-      if (isOnline) startAssistantLocationPings();
-      notify(isOnline ? "You are online." : "You are offline.");
-      renderAssistantHome();
-    } catch (error) {
+    if (state.assistantAvailabilityBusy) return;
+    const mutationId = ++assistantAvailabilityMutationId;
+    const requestId = globalThis.crypto?.randomUUID?.() || `availability-${Date.now()}-${mutationId}`;
+    const previousOnline = Boolean(state.assistantIsOnline);
+    const isOnline = online.dataset.online === "true";
+    let reconcileAfterFailure = false;
+    state.assistantAvailabilityBusy = true;
+    if (!isOnline) {
       state.assistantIsOnline = false;
+      state.assistantPresenceStatus = "OFFLINE";
+      state.assistantGpsStatus = "idle";
       stopAssistantLocationPings();
-      notify(error.message);
-      renderAssistantHome();
+    }
+    syncAssistantAvailabilityUi();
+    try {
+      const point = isOnline ? await requestAssistantGpsLocation({ renderHome: true }) : null;
+      if (mutationId !== assistantAvailabilityMutationId) return;
+      const response = await setAssistantOnlineStatus(isOnline, point, requestId);
+      if (mutationId !== assistantAvailabilityMutationId) return;
+      applyAssistantAvailabilitySnapshot({
+        ...(response?.data || {}),
+        statusCode: response?.data?.availabilityStatus || (isOnline ? "available" : "offline"),
+        presenceStatus: response?.data?.presenceStatus || (isOnline ? "ONLINE" : "OFFLINE"),
+        heartbeatFresh: isOnline,
+        gpsFresh: isOnline,
+        updatedAt: response?.data?.availabilityUpdatedAt || new Date().toISOString()
+      }, { force: true });
+      notify(isOnline ? "You are online." : "You are offline.");
+    } catch (error) {
+      if (mutationId === assistantAvailabilityMutationId) {
+        state.assistantIsOnline = previousOnline;
+        if (previousOnline) startAssistantLocationPings(); else stopAssistantLocationPings();
+        reconcileAfterFailure = true;
+        notify(error.message || "Unable to update online status.");
+      }
+    } finally {
+      if (mutationId === assistantAvailabilityMutationId) {
+        state.assistantAvailabilityBusy = false;
+        syncAssistantAvailabilityUi();
+        if (reconcileAfterFailure) void syncAssistantAvailabilitySnapshot();
+      }
     }
     return;
   }
@@ -24200,18 +25216,40 @@ document.addEventListener("click", async (event) => {
       }
       const needsPin = ["in_progress", "completed"].includes(String(pending.status || ""));
       const pin = String(root.querySelector("[data-assistant-task-pin-input]")?.value || "").replace(/\D/g, "").slice(0, 4);
+      const reason = String(root.querySelector("[data-assistant-task-cancel-reason]")?.value || pending.reason || "").trim();
       if (needsPin && !/^\d{4}$/.test(pin)) {
         state.assistantTaskConfirm = { ...pending, error: "Enter 4 digit PIN shared by customer." };
         if (!refreshAssistantAfterPopupMutation()) render();
         focusAssistantTaskPinInput();
         return;
       }
+      if (pending.status === "cancelled" && reason.length < 3) {
+        state.assistantTaskConfirm = { ...pending, reason, error: "Enter a cancellation reason." };
+        if (!refreshAssistantAfterPopupMutation()) render();
+        focusAssistantTaskPinInput();
+        return;
+      }
       confirmAssistantTask.disabled = true;
-      const payload = await api(`/portal/assistant/tasks/${pending.assignmentId}/status`, { method: "PATCH", body: JSON.stringify({ status: pending.status, ...(needsPin ? { pin } : {}) }) });
+      const payload = await api(`/portal/assistant/tasks/${pending.assignmentId}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: pending.status,
+          ...(needsPin ? { pin } : {}),
+          ...(pending.status === "cancelled" ? { reason } : {})
+        })
+      });
       const nextStatus = String(payload.data?.status || pending.status);
       state.assistantTaskConfirm = null;
       await loadMe({ forceRefresh: true });
-      state.assistantTaskTab = nextStatus === "accepted" ? "accepted" : ["in_progress", "approval_pending", "completed"].includes(nextStatus) ? "working" : "rejected";
+      state.assistantTaskTab = nextStatus === "accepted"
+        ? "accepted"
+        : nextStatus === "completed"
+          ? "success"
+          : ["in_progress", "approval_pending", "working"].includes(nextStatus)
+            ? "working"
+            : ["cancelled", "canceled"].includes(nextStatus)
+              ? "cancelled"
+              : "rejected";
       state.assistantChatTaskId = ["in_progress", "approval_pending"].includes(nextStatus) ? String(pending.assignmentId || "") : "";
       state.assistantChatCollapsed = true;
       state.assistantChatAction = "";
@@ -24221,8 +25259,11 @@ document.addEventListener("click", async (event) => {
     } catch (error) {
       const pending = state.assistantTaskConfirm;
       notify(error.message);
-      if (pending && ["in_progress", "completed"].includes(String(pending.status || ""))) {
-        state.assistantTaskConfirm = { ...pending, error: error.message || "Invalid PIN." };
+      if (pending && ["in_progress", "completed", "cancelled"].includes(String(pending.status || ""))) {
+        const reason = pending.status === "cancelled"
+          ? String(root.querySelector("[data-assistant-task-cancel-reason]")?.value || pending.reason || "").trim()
+          : pending.reason;
+        state.assistantTaskConfirm = { ...pending, reason, error: error.message || (pending.status === "cancelled" ? "Unable to cancel booking." : "Invalid PIN.") };
         if (!refreshAssistantAfterPopupMutation()) render();
         focusAssistantTaskPinInput();
         return;

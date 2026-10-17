@@ -23,6 +23,24 @@ export function isPointInPolygon(latitude, longitude, polygon) {
         return false;
     const x = longitude;
     const y = latitude;
+    const boundaryTolerance = 1e-7;
+    for (let index = 0; index < polygon.length; index += 1) {
+        const start = polygon[index];
+        const end = polygon[(index + 1) % polygon.length];
+        const deltaX = end[0] - start[0];
+        const deltaY = end[1] - start[1];
+        const lengthSquared = deltaX * deltaX + deltaY * deltaY;
+        if (lengthSquared === 0) {
+            if (Math.hypot(x - start[0], y - start[1]) <= boundaryTolerance)
+                return true;
+            continue;
+        }
+        const projection = Math.max(0, Math.min(1, ((x - start[0]) * deltaX + (y - start[1]) * deltaY) / lengthSquared));
+        const closestX = start[0] + projection * deltaX;
+        const closestY = start[1] + projection * deltaY;
+        if (Math.hypot(x - closestX, y - closestY) <= boundaryTolerance)
+            return true;
+    }
     let inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
         const xi = polygon[i][0];

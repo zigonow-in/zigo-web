@@ -18,6 +18,7 @@ import {
   setUserActiveState,
   softDeleteUser,
   updateOwnProfilePicture,
+  updateOwnBookingBellPreferences,
   updateUser,
   verifyUserOtpChallenge
 } from "./users.repository.js";
@@ -78,6 +79,10 @@ const superAdminPasswordResetBodySchema = z.object({
 const ownProfilePictureBodySchema = z.object({
   profilePictureUrl: z.string().min(1, "Profile picture is required.")
 });
+const ownBookingBellPreferencesBodySchema = z.object({
+  muted: z.boolean(),
+  volume: z.number().finite().min(0.05).max(1)
+});
 const ownPasswordResetBodySchema = z.object({
   currentPassword: z.string().min(1, "Current password is required."),
   newPassword: z.string().min(8, "New password must be at least 8 characters.")
@@ -112,6 +117,17 @@ usersRouter.patch("/me/profile-picture", async (req, res, next) => {
     const user = await updateOwnProfilePicture({ userId: req.auth!.sub, profilePictureUrl: body.profilePictureUrl });
     if (!user) throw new HttpError(404, "User not found");
     res.json({ data: user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+usersRouter.patch("/me/booking-bell-preferences", async (req, res, next) => {
+  try {
+    const body = ownBookingBellPreferencesBodySchema.parse(req.body);
+    const preferences = await updateOwnBookingBellPreferences({ userId: req.auth!.sub, ...body });
+    if (!preferences) throw new HttpError(404, "User not found");
+    res.json({ data: preferences });
   } catch (error) {
     next(error);
   }

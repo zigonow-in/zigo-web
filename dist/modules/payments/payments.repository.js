@@ -4,6 +4,7 @@ import { env } from "../../config/env.js";
 import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
 import { generateZigoBookingReference, isZigoBookingReference, zigoServiceTypeCode } from "../../utils/bookingReference.js";
+import { normalizePgTransactionPaymentMode, resolvePgTransactionCharge } from "../masters/masters.repository.js";
 import { emitBookingRealtimeEvent } from "../operations/bookingRealtime.js";
 let razorpayClient = null;
 let schemaReady = null;
@@ -136,15 +137,31 @@ function safeJson(value) {
     return JSON.stringify(value && typeof value === "object" ? value : {});
 }
 async function updateBookingPaymentFromRazorpay(client, orderId, statusCode, details) {
-    const payment = await client.query(`select service_request_id as "bookingId", metadata from zigo.razorpay_payments where provider_order_id = $1 limit 1`, [orderId]);
+    const payment = await client.query(`select service_request_id as "bookingId", metadata, method,
+        coalesce(nullif(raw_payment->'card'->>'type', ''), nullif(raw_payment->>'cardType', '')) as "cardType",
+        bank, wallet, vpa
+      from zigo.razorpay_payments where provider_order_id = $1 limit 1`, [orderId]);
     const bookingId = payment.rows[0]?.bookingId;
     const paymentMetadata = payment.rows[0]?.metadata && typeof payment.rows[0].metadata === "object" ? payment.rows[0].metadata : {};
     if (paymentMetadata.addOnKind || !bookingId)
         return null;
     const paymentStatus = bookingPaymentStatus(statusCode);
     const isPaid = paymentStatus === "paid";
-    const canonicalPaymentDetails = {
+    const storedPayment = payment.rows[0];
+    const resolvedDetails = {
         ...details,
+        method: details.method || storedPayment?.method || null,
+        cardType: details.cardType || storedPayment?.cardType || null,
+        bank: details.bank || storedPayment?.bank || null,
+        wallet: details.wallet || storedPayment?.wallet || null,
+        vpa: details.vpa || storedPayment?.vpa || null
+    };
+    const paymentMethod = normalizePgTransactionPaymentMode(resolvedDetails.method || resolvedDetails.paymentMethod || "other", resolvedDetails.cardType);
+    const paymentMode = paymentMethod === "cash" ? "cash" : "online";
+    const canonicalPaymentDetails = {
+        ...resolvedDetails,
+        paymentMode,
+        paymentMethod,
         paymentType: "razorpay",
         paymentStatus,
         isPaid
@@ -172,6 +189,45 @@ async function updateBookingPaymentFromRazorpay(client, orderId, statusCode, det
         sr.payment_type as "paymentType",
         sr.is_paid as "isPaid"
     `, [bookingId, paymentStatus, isPaid, safeJson(canonicalPaymentDetails)]);
+    if (bookingId && isPaid) {
+        const snapshot = await client.query(`select grand_total_paise as "grandTotalPaise"
+       from zigo.booking_billing_snapshots
+       where service_request_id = $1::uuid
+       limit 1`, [bookingId]);
+        const grandTotalPaise = Math.max(0, Math.round(Number(snapshot.rows[0]?.grandTotalPaise || 0)));
+        const pgTransactionCharge = await resolvePgTransactionCharge({
+            paymentMode: resolvedDetails.method || "razorpay",
+            cardType: resolvedDetails.cardType,
+            amountPaise: grandTotalPaise
+        });
+        await client.query(`update zigo.booking_billing_snapshots
+       set pg_transaction_charge_master_id = nullif($2, '')::uuid,
+           pg_transaction_payment_mode = $3,
+           pg_transaction_charge_type = $4,
+           pg_transaction_charge_value = $5::numeric,
+           pg_transaction_charge_base_paise = $6::bigint,
+           pg_transaction_charge_paise = $7::bigint,
+           pricing_details = coalesce(pricing_details, '{}'::jsonb) || $8::jsonb,
+           updated_at = now()
+       where service_request_id = $1::uuid`, [
+            bookingId,
+            pgTransactionCharge.masterId || "",
+            pgTransactionCharge.paymentMode,
+            pgTransactionCharge.chargeType,
+            pgTransactionCharge.chargeValue,
+            pgTransactionCharge.baseAmountPaise,
+            pgTransactionCharge.chargeAmountPaise,
+            safeJson({
+                pgTransactionCharge,
+                pgTransactionChargeMasterId: pgTransactionCharge.masterId,
+                pgTransactionPaymentMode: pgTransactionCharge.paymentMode,
+                pgTransactionChargeType: pgTransactionCharge.chargeType,
+                pgTransactionChargeValue: pgTransactionCharge.chargeValue,
+                pgTransactionChargeBasePaise: pgTransactionCharge.baseAmountPaise,
+                pgTransactionChargePaise: pgTransactionCharge.chargeAmountPaise
+            })
+        ]);
+    }
     return updated.rows[0] || null;
 }
 async function emitPaymentRealtime(booking, message) {
@@ -331,7 +387,11 @@ export async function verifyAndSaveRazorpayPayment(input) {
         source: "signature_verification",
         razorpayOrderId: orderId,
         razorpayPaymentId: paymentId,
-        method: payment.method || null
+        method: payment.method || null,
+        cardType: payment.card?.type || null,
+        bank: payment.bank || null,
+        wallet: payment.wallet || null,
+        vpa: payment.vpa || null
     });
     await emitPaymentRealtime(booking, statusCode === "paid" ? "Payment received" : "Payment updated");
     const paymentStatus = bookingPaymentStatus(effectiveStatusCode);
@@ -342,7 +402,11 @@ export async function verifyAndSaveRazorpayPayment(input) {
         razorpayPaymentId: paymentId,
         paymentStatus,
         providerStatus: effectiveStatusCode,
-        method: payment.method || null
+        method: payment.method || null,
+        cardType: payment.card?.type || null,
+        bank: payment.bank || null,
+        wallet: payment.wallet || null,
+        vpa: payment.vpa || null
     };
 }
 export async function linkRazorpayPaymentToBooking(input) {
@@ -455,6 +519,10 @@ export async function processRazorpayWebhook(rawBody, signature = "") {
                 razorpayOrderId: orderId,
                 razorpayPaymentId: paymentId || null,
                 method: payment.method || null,
+                cardType: payment.card?.type || null,
+                bank: payment.bank || null,
+                wallet: payment.wallet || null,
+                vpa: payment.vpa || null,
                 errorCode: payment.error_code || null,
                 errorDescription: payment.error_description || null
             });
@@ -537,7 +605,8 @@ export async function listRazorpayPayments(input) {
         u.display_name as "customerName", u.phone as "customerPhone",
         rp.provider_order_id as "razorpayOrderId", rp.provider_payment_id as "razorpayPaymentId",
         rp.amount_paise as "amountPaise", rp.currency, rp.status_code as "status",
-        rp.method, rp.error_description as "errorDescription",
+        rp.method, coalesce(nullif(rp.raw_payment->'card'->>'type', ''), nullif(rp.raw_payment->>'cardType', '')) as "cardType",
+        rp.bank, rp.wallet, rp.vpa, rp.error_description as "errorDescription",
         rp.created_at as "createdAt", rp.updated_at as "updatedAt", rp.last_reconciled_at as "lastReconciledAt"
       from zigo.razorpay_payments rp
       left join zigo.service_requests sr on sr.id = rp.service_request_id
@@ -568,7 +637,8 @@ export async function getRazorpayPaymentDetail(paymentId) {
         u.display_name as "customerName", u.phone as "customerPhone",
         rp.provider_order_id as "razorpayOrderId", rp.provider_payment_id as "razorpayPaymentId",
         rp.amount_paise as "amountPaise", rp.currency, rp.status_code as "status",
-        rp.method, rp.bank, rp.wallet, rp.vpa, rp.email, rp.contact,
+        rp.method, coalesce(nullif(rp.raw_payment->'card'->>'type', ''), nullif(rp.raw_payment->>'cardType', '')) as "cardType",
+        rp.bank, rp.wallet, rp.vpa, rp.email, rp.contact,
         rp.error_code as "errorCode", rp.error_description as "errorDescription",
         rp.metadata, rp.raw_order as "rawOrder", rp.raw_payment as "rawPayment", rp.webhook_payload as "webhookPayload",
         rp.captured_at as "capturedAt", rp.verified_at as "verifiedAt",
@@ -600,7 +670,9 @@ export async function listRazorpayPaymentsForBooking(bookingId) {
     await ensurePaymentsSchema();
     const result = await pool.query(`
       select id, provider_order_id as "razorpayOrderId", provider_payment_id as "razorpayPaymentId",
-        amount_paise as "amountPaise", currency, status_code as status, method, bank, wallet, vpa,
+        amount_paise as "amountPaise", currency, status_code as status, method,
+        coalesce(nullif(raw_payment->'card'->>'type', ''), nullif(raw_payment->>'cardType', '')) as "cardType",
+        bank, wallet, vpa,
         error_code as "errorCode", error_description as "errorDescription",
         captured_at as "capturedAt", verified_at as "verifiedAt",
         created_at as "createdAt", updated_at as "updatedAt", last_reconciled_at as "lastReconciledAt"
@@ -665,7 +737,11 @@ export async function reconcileRazorpayPayment(paymentId) {
         source: "manual_reconcile",
         razorpayOrderId: row.orderId,
         razorpayPaymentId: payment?.id || row.paymentId || null,
-        method: payment?.method || null
+        method: payment?.method || null,
+        cardType: payment?.card?.type || null,
+        bank: payment?.bank || null,
+        wallet: payment?.wallet || null,
+        vpa: payment?.vpa || null
     });
     await emitPaymentRealtime(booking, "Payment reconciled");
     return { id: paymentId, status: bookingPaymentStatus(effectiveStatusCode), providerStatus: effectiveStatusCode, razorpayPaymentId: payment?.id || row.paymentId || null };
@@ -683,6 +759,7 @@ export async function getCustomerRazorpayOrderStatus(input) {
         currency,
         status_code as "statusCode",
         method,
+        coalesce(raw_payment->'card'->>'type', '') as "cardType",
         error_code as "errorCode",
         error_description as "errorDescription",
         last_reconciled_at as "lastReconciledAt"
@@ -716,6 +793,7 @@ export async function getCustomerRazorpayOrderStatus(input) {
         bookingId: row.bookingId,
         bookingReference: row.bookingReference,
         method: row.method,
+        cardType: row.cardType,
         errorCode: row.errorCode,
         errorDescription: row.errorDescription
     };

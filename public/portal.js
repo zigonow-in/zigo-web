@@ -433,6 +433,13 @@ const state = {
   customerRoutePrimaryStop: null,
   customerRoutePrimaryCleared: false,
   customerLocationStops: [],
+  customerCartDeliveryQuote: null,
+  customerCartDeliveryQuoteKey: "",
+  customerCartDeliveryQuoteBusy: false,
+  customerServerBillingQuote: null,
+  customerServerBillingQuoteKey: "",
+  customerServerBillingQuoteBusy: false,
+  customerServerBillingQuoteError: "",
   customerCartRouteEditIndex: -1,
   customerCartRouteDeleteIndex: -1,
   customerCartRouteExpanded: false,
@@ -2373,11 +2380,11 @@ function applyCustomerTrackRealtimePatch(eventPayload = {}, eventType = "") {
       isPaid: isPaidEvent ? true : incomingPaymentStatus === "due" || incomingPaymentStatus === "pending" ? false : state.confirmedBooking?.metadata?.isPaid,
       chatLocked: isPaidEvent ? true : incomingPaymentStatus === "due" ? false : state.confirmedBooking?.metadata?.chatLocked,
       chatLockedAt: isPaidEvent ? new Date().toISOString() : incomingPaymentStatus === "due" ? "" : state.confirmedBooking?.metadata?.chatLockedAt,
-      autoCancelled: isCancelledEvent ? Boolean(eventPayload.autoCancelled ?? true) : state.confirmedBooking?.metadata?.autoCancelled,
+      autoCancelled: isCancelledEvent ? Boolean(eventPayload.autoCancelled ?? (String(eventPayload.cancelledBy || "").toLowerCase() === "system")) : state.confirmedBooking?.metadata?.autoCancelled,
       cancellationReason: isCancelledEvent ? eventPayload.reason || eventPayload.message || state.confirmedBooking?.metadata?.cancellationReason : state.confirmedBooking?.metadata?.cancellationReason,
       cancellationReasonCode: isCancelledEvent ? eventPayload.reasonCode || state.confirmedBooking?.metadata?.cancellationReasonCode : state.confirmedBooking?.metadata?.cancellationReasonCode,
       cancelledBy: isCancelledEvent ? eventPayload.cancelledBy || state.confirmedBooking?.metadata?.cancelledBy : state.confirmedBooking?.metadata?.cancelledBy,
-      cancellationSource: isCancelledEvent ? eventPayload.cancellationSource || state.confirmedBooking?.metadata?.cancellationSource : state.confirmedBooking?.metadata?.cancellationSource,
+      cancellationSource: isCancelledEvent ? eventPayload.cancellationSource || eventPayload.source || state.confirmedBooking?.metadata?.cancellationSource : state.confirmedBooking?.metadata?.cancellationSource,
       cancelledAt: isCancelledEvent ? eventPayload.cancelledAt || new Date().toISOString() : state.confirmedBooking?.metadata?.cancelledAt,
       assignmentId: eventPayload.assignmentId || state.confirmedBooking?.metadata?.assignmentId,
       ...(isWorkingEvent ? {
@@ -2510,6 +2517,9 @@ async function syncPortalBookingStatusNow(bookingId = "", source = "") {
 
 function scheduleCustomerBookingRefresh(message = "Booking updated.", options = {}) {
   if (actor !== "customer" || !state.token) return;
+  // Review Booking is a local draft. Background booking events must not replace
+  // its DOM because doing so closes open tax/add-on popups and resets input state.
+  if (state.customerView === "cart") return;
   const eventBookingId = String(options.bookingId || options.id || "").trim();
   const trackedBookingId = String(state.confirmedBooking?.id || state.confirmedBooking?.bookingId || "").trim();
   if (eventBookingId && options.immediate) {
@@ -3864,8 +3874,290 @@ function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
 }
 
+function customerCartAddOnBookingCount() {
+  const value = Number(
+    state.user?.bookingCount
+    ?? state.user?.metadata?.bookingCount
+    ?? state.user?.metadata?.completedBookingCount
+    ?? normalizeArray(state.bookings).length
+    ?? 0
+  );
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+
+function customerCartAddOnScopeLocation(stops = []) {
+  const first = normalizeArray(stops)[0] || state.selectedLocation || {};
+  const serviceability = first.serviceability || state.locationServiceability || {};
+  const cluster = serviceability.cluster || first.cluster || {};
+  const city = serviceability.city || first.city || {};
+  const zone = serviceability.zone || first.zone || {};
+  const stateValue = serviceability.state || first.state || {};
+  return {
+    stateId: String(first.stateId || stateValue.id || stateValue.stateId || serviceability.stateId || ""),
+    cityId: String(first.cityId || city.id || city.cityId || serviceability.cityId || ""),
+    zoneId: String(first.zoneId || zone.id || zone.zoneId || serviceability.zoneId || ""),
+    clusterId: String(first.clusterId || cluster.id || cluster.clusterId || ""),
+    microMarketId: String(first.microMarketId || first.metadata?.microMarketId || serviceability.microMarketId || ""),
+    nanoMarketId: String(first.nanoMarketId || first.metadata?.nanoMarketId || serviceability.nanoMarketId || "")
+  };
+}
+
+function customerCartAddOnApplies(addon = {}, stops = []) {
+  if (!addon || addon.isActive === false) return false;
+  const applicableOn = String(addon.applicableOn || addon.applicable_on || "all_customer")
+    .trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const bookingCount = customerCartAddOnBookingCount();
+  if (applicableOn === "new_customer" && bookingCount !== 0) return false;
+  if (applicableOn === "old_customer" && bookingCount <= 1) return false;
+  const scopeType = String(addon.scopeType || addon.scope_type || "all")
+    .trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["", "all", "all_location", "all_locations"].includes(scopeType)) return true;
+  const scopeField = {
+    state: "stateId",
+    city: "cityId",
+    zone: "zoneId",
+    cluster: "clusterId",
+    micro_market: "microMarketId",
+    nano_market: "nanoMarketId"
+  }[scopeType];
+  if (!scopeField) return true;
+  const location = customerCartAddOnScopeLocation(stops);
+  const addonField = {
+    stateId: "state_id",
+    cityId: "city_id",
+    zoneId: "zone_id",
+    clusterId: "cluster_id",
+    microMarketId: "micro_market_id",
+    nanoMarketId: "nano_market_id"
+  }[scopeField];
+  const configuredId = String(addon[scopeField] || (addonField ? addon[addonField] : "") || "").trim();
+  const locationId = String(location[scopeField] || "").trim();
+  return Boolean(configuredId && locationId && configuredId === locationId);
+}
+
+function customerCartAddOnDiscount(grossAmount = 0, slabs = []) {
+  const gross = Math.max(0, Number(grossAmount || 0));
+  const rows = normalizeArray(slabs)
+    .filter((slab) => slab && typeof slab === "object")
+    .sort((left, right) => Number(left.maxAmount ?? left.maxValue ?? 0) - Number(right.maxAmount ?? right.maxValue ?? 0));
+  const matched = rows.find((slab) => gross <= Number(slab.maxAmount ?? slab.maxValue ?? 0));
+  if (!matched || gross <= 0) return { type: "none", value: 0, amount: 0 };
+  const type = String(matched.discountType || matched.type || "percent").toLowerCase() === "flat" ? "flat" : "percent";
+  const value = Math.max(0, Number(matched.discountValue ?? matched.value ?? 0));
+  const amount = type === "flat" ? Math.min(gross, value) : Math.min(gross, gross * Math.min(100, value) / 100);
+  return { type, value, amount: Math.max(0, amount) };
+}
+
+function customerCartDeliveryQuoteKey(stops = customerCartLocationStopsForPayload()) {
+  return JSON.stringify({
+    customerId: state.user?.id || state.customerId || "",
+    clusterId: stops[0]?.clusterId || selectedCustomerClusterId(),
+    cart: normalizeArray(state.cart).map((item) => ({
+      categoryId: item.categoryId || "",
+      serviceId: item.serviceId || "",
+      price: Number(item.price || item.sellingPrice || 0),
+      durationMinutes: Number(item.durationMinutes || item.cartDurationMinutes || 0)
+    })),
+    stops: normalizeArray(stops).map((stop) => ({
+      latitude: Number(stop.latitude),
+      longitude: Number(stop.longitude),
+      clusterId: stop.clusterId || ""
+    }))
+  });
+}
+
+function customerCartAddOnSummary(baseTotal = 0, sellingTotal = 0) {
+  const stops = customerCartLocationStopsForPayload();
+  const configuredAddOns = normalizeArray(state.portalConfig?.addonCharges || state.portalConfig?.addOnCharges);
+  const lines = [];
+  const pushLine = (addon = {}, values = {}) => {
+    const grossAmount = Math.max(0, Number(values.grossAmount || 0));
+    const discountAmount = Math.min(grossAmount, Math.max(0, Number(values.discountAmount || 0)));
+    const netAmount = Math.max(0, grossAmount - discountAmount);
+    if (grossAmount <= 0 && netAmount <= 0) return;
+    lines.push({
+      ...addon,
+      kind: String(addon.addonType || addon.kind || "service").toLowerCase(),
+      label: String(addon.label || addon.title || "Add-on charges"),
+      rawGrossAmount: grossAmount,
+      rawNetAmount: netAmount,
+      grossAmount,
+      netAmount,
+      discountAmount,
+      distanceText: String(values.distanceText || "")
+    });
+  };
+  for (const addon of configuredAddOns) {
+    const kind = String(addon.addonType || addon.kind || "service").toLowerCase();
+    if (kind === "delivery" || !customerCartAddOnApplies(addon, stops)) continue;
+    const costType = String(addon.costType || "flat").toLowerCase() === "percent" ? "percent" : "flat";
+    const percentageBase = String(addon.percentageBase || "selling_price").toLowerCase();
+    const chargeBase = percentageBase === "task_base_price"
+      ? Math.max(0, Number(baseTotal || 0))
+      : percentageBase === "customer_price"
+        ? Math.max(0, Number(addon.customerPrice || 0))
+        : Math.max(0, Number(sellingTotal || 0));
+    const grossAmount = costType === "percent"
+      ? chargeBase * Math.max(0, Math.min(100, Number(addon.costValue || 0))) / 100
+      : Math.max(0, Number(addon.costValue || 0));
+    const discount = customerCartAddOnDiscount(grossAmount, addon.discountSlabs || addon.discount_slabs || addon.metadata?.discountSlabs);
+    pushLine(addon, { grossAmount, discountAmount: discount.amount });
+  }
+  const quoteKey = customerCartDeliveryQuoteKey(stops);
+  const deliveryQuote = state.customerCartDeliveryQuoteKey === quoteKey ? state.customerCartDeliveryQuote : null;
+  const deliveryGross = Math.max(0, Number(deliveryQuote?.originalDeliveryChargesPaise || 0) / 100);
+  const deliveryNet = Math.max(0, Number(deliveryQuote?.deliveryChargesPaise || 0) / 100);
+  if (deliveryQuote && (deliveryGross > 0 || deliveryNet > 0)) {
+    pushLine({ addonType: "delivery", label: "Delivery charges" }, {
+      grossAmount: deliveryGross || deliveryNet,
+      discountAmount: Math.max(0, deliveryGross - deliveryNet),
+      distanceText: Number(deliveryQuote.distanceMeters || 0) > 0
+        ? Number(deliveryQuote.distanceMeters) < 1000
+          ? `${Math.max(1, Math.round(Number(deliveryQuote.distanceMeters)))} meters`
+          : `${Math.round((Number(deliveryQuote.distanceMeters) / 1000) * 10) / 10} KM`
+        : ""
+    });
+  }
+  return {
+    lines,
+    grossTotal: lines.reduce((sum, line) => sum + Number(line.grossAmount || 0), 0),
+    netTotal: lines.reduce((sum, line) => sum + Number(line.netAmount || 0), 0),
+    discountTotal: lines.reduce((sum, line) => sum + Number(line.discountAmount || 0), 0)
+  };
+}
+
+function customerCartTaxAmountForRule(taxableAmount = 0, rule = {}) {
+  const taxable = Math.max(0, Number(taxableAmount || 0));
+  if (taxable <= 0) return 0;
+  const taxValue = Math.max(0, numberValue(rule.taxValue, 0));
+  if (String(rule.taxType || "percent").toLowerCase() === "flat") return taxValue;
+  const formula = String(rule.formula || rule.metadata?.formula || "").replace(/\s+/g, "").toLowerCase();
+  if (formula.includes("100+taxvalue") || String(rule.taxApplicability || "exclusive").toLowerCase() === "inclusive") {
+    return taxable * taxValue / (100 + taxValue || 1);
+  }
+  if (formula.includes("/100")) return taxable * taxValue / 100;
+  return taxable * taxValue / 100;
+}
+
+function customerCartBillingQuoteKey(stops = customerCartLocationStopsForPayload()) {
+  const item = state.cart.find((entry) => entry?.categoryId && !entry?.storeId) || state.cart[0] || {};
+  return JSON.stringify({
+    customerId: state.user?.id || state.customerId || "",
+    clusterId: selectedCustomerClusterId(),
+    categoryId: item.categoryId || "",
+    serviceId: item.serviceId || "",
+    categoryPriceRuleId: item.categoryPriceRuleId || "",
+    durationMinutes: Number(item.durationMinutes || item.cartDurationMinutes || 30),
+    stops: normalizeArray(stops).map((stop) => ({
+      address: String(stop.address || "").trim(),
+      latitude: Number(stop.latitude),
+      longitude: Number(stop.longitude),
+      clusterId: stop.clusterId || ""
+    }))
+  });
+}
+
+function customerCartBillingQuotePayload() {
+  const item = state.cart.find((entry) => entry?.categoryId && !entry?.storeId) || state.cart[0] || {};
+  const stops = customerCartLocationStopsForPayload();
+  const firstStop = stops[0] || state.selectedLocation || {};
+  const durationMinutes = Math.max(1, Math.round(Number(item.durationMinutes || item.cartDurationMinutes || 30)));
+  return {
+    serviceId: isUuid(item.serviceId) ? item.serviceId : null,
+    clusterId: firstStop.clusterId || selectedCustomerClusterId() || "",
+    categoryId: isUuid(item.categoryId) ? item.categoryId : null,
+    address: String(firstStop.address || firstStop.addressText || "").trim(),
+    latitude: Number.isFinite(Number(firstStop.latitude)) ? Number(firstStop.latitude) : null,
+    longitude: Number.isFinite(Number(firstStop.longitude)) ? Number(firstStop.longitude) : null,
+    durationMinutes,
+    metadata: {
+      categoryId: item.categoryId || null,
+      categoryPriceRuleId: item.categoryPriceRuleId || null,
+      durationMinutes,
+      cartItems: normalizeArray(state.cart),
+      bookingLocations: {
+        selectedCount: stops.length,
+        stops
+      }
+    }
+  };
+}
+
+function customerCartTotalsFromServerQuote() {
+  const quote = state.customerServerBillingQuote;
+  const quoteKey = customerCartBillingQuoteKey();
+  if (!quote || state.customerServerBillingQuoteKey !== quoteKey) return null;
+  const pricing = quote.pricingBreakdown && typeof quote.pricingBreakdown === "object"
+    ? quote.pricingBreakdown
+    : null;
+  if (!pricing || !Number.isFinite(Number(pricing.amountToPayPaise))) return null;
+  const moneyFromPaise = (value) => Math.max(0, Number(value || 0) / 100);
+  const addonLines = normalizeArray(pricing.addonLines).map((line) => {
+    const addonType = String(line.addonType || line.kind || "service").toLowerCase();
+    const rawGrossAmount = moneyFromPaise(line.rawGrossAmountPaise ?? line.grossAmountPaise);
+    const rawNetAmount = moneyFromPaise(line.rawNetAmountPaise ?? line.netAmountPaise);
+    const grossAmount = moneyFromPaise(line.grossAmountPaise ?? line.rawGrossAmountPaise);
+    const netAmount = moneyFromPaise(line.netAmountPaise ?? line.rawNetAmountPaise);
+    const distanceMeters = Number(pricing.deliveryDistanceMeters || 0);
+    return {
+      ...line,
+      id: line.id || line.addonType || "",
+      kind: addonType,
+      addonType,
+      label: String(line.label || line.title || "Add-on charges"),
+      rawGrossAmount,
+      rawNetAmount,
+      grossAmount,
+      netAmount,
+      discountAmount: moneyFromPaise(line.discountAmountPaise),
+      taxAmount: moneyFromPaise(line.inclusiveTaxAmountPaise),
+      distanceText: addonType === "delivery" && distanceMeters > 0
+        ? distanceMeters < 1000
+          ? `${Math.max(1, Math.round(distanceMeters))} meters`
+          : `${Math.round((distanceMeters / 1000) * 10) / 10} KM`
+        : ""
+    };
+  });
+  const taxRows = normalizeArray(pricing.taxRows).map((row) => ({
+    ...row,
+    amount: moneyFromPaise(row.amountPaise ?? (Number(row.amount || 0) * 100)),
+    addonTaxAmount: moneyFromPaise(row.addonTaxAmountPaise),
+    taxableAmount: moneyFromPaise(row.taxableAmountPaise ?? row.taxableAmount),
+    applicability: String(row.applicability || "exclusive").toLowerCase() === "inclusive" ? "inclusive" : "exclusive"
+  })).filter((row) => row.amount > 0);
+  const rawAddonGrossTotal = addonLines.reduce((sum, line) => sum + Number(line.rawGrossAmount || 0), 0);
+  return {
+    itemTotal: moneyFromPaise(pricing.itemTotalPaise),
+    totalAmount: moneyFromPaise(pricing.baseAmountPaise) + rawAddonGrossTotal,
+    sellingTotal: moneyFromPaise(pricing.sellingPricePaise ?? pricing.sellingAmountPaise),
+    discount: moneyFromPaise(pricing.totalDiscountPaise),
+    discountAmount: moneyFromPaise(pricing.totalDiscountPaise),
+    addOns: addonLines,
+    addonTotal: moneyFromPaise(pricing.addonTotalPaise),
+    addonDiscount: moneyFromPaise(pricing.addonDiscountPaise),
+    fees: moneyFromPaise(pricing.taxAmountPaise),
+    inclusiveTax: moneyFromPaise(pricing.inclusiveTaxAmountPaise),
+    exclusiveTax: moneyFromPaise(pricing.exclusiveTaxAmountPaise),
+    taxRows,
+    preRoundToPay: moneyFromPaise(pricing.preRoundTotalPaise),
+    roundingAdjustment: moneyFromPaise(pricing.roundingAdjustmentPaise),
+    toPay: moneyFromPaise(pricing.amountToPayPaise),
+    amountToPay: moneyFromPaise(pricing.amountToPayPaise),
+    duration: Math.max(1, Math.round(Number(quote.durationMinutes || 30)))
+  };
+}
+
+function customerCartTaxMatchesAddOn(line = {}, taxCategory = "service") {
+  const kind = String(line.kind || line.addonType || "service").trim().toLowerCase();
+  const category = String(taxCategory || "service").trim().toLowerCase();
+  if (category === "task") return false;
+  return kind === category;
+}
+
 function cartTotals() {
   customerRepriceStoreCartItems();
+  const serverTotals = customerCartTotalsFromServerQuote();
+  if (serverTotals) return serverTotals;
   const lines = state.cart.map((item) => {
     const selling = numberValue(item.price, 0);
     const base = Math.max(numberValue(item.basePrice, 0), selling + numberValue(item.saveAmount, 0), selling);
@@ -3873,51 +4165,89 @@ function cartTotals() {
   });
   const baseTotal = lines.reduce((sum, line) => sum + line.base, 0);
   const sellingTotal = lines.reduce((sum, line) => sum + line.selling, 0);
-  const discount = Math.max(0, baseTotal - sellingTotal);
+  const addOns = customerCartAddOnSummary(baseTotal, sellingTotal);
+  const discount = Math.max(0, baseTotal - sellingTotal + addOns.discountTotal);
   const taxRules = normalizeArray(state.portalConfig?.taxRules).filter((rule) => rule?.isActive !== false);
+  const inclusiveAddonTaxByIndex = new Map();
+  const inclusiveAddonGrossTaxByIndex = new Map();
   const taxRows = taxRules.map((rule) => {
-    const applicablePrice = rule.taxApplicableOn === "base_price" ? baseTotal : sellingTotal;
-    const taxValue = Math.max(0, numberValue(rule.taxValue, 0));
-    const formula = String(rule.formula || rule.metadata?.formula || "").replace(/\s+/g, "").toLowerCase();
-    let amount = 0;
-    if (rule.taxType === "flat") {
-      amount = taxValue;
-    } else if (formula.includes("100+taxvalue")) {
-      amount = applicablePrice * taxValue / (100 + taxValue || 1);
-    } else if (formula.includes("/100")) {
-      amount = applicablePrice * taxValue / 100;
-    } else if (rule.taxApplicability === "inclusive") {
-      amount = applicablePrice * taxValue / (100 + taxValue || 1);
-    } else {
-      amount = applicablePrice * taxValue / 100;
+    const taxCategory = String(rule.taxCategory || rule.addonType || "service").trim().toLowerCase();
+    const matchedLines = addOns.lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => customerCartTaxMatchesAddOn(line, taxCategory));
+    const addonTaxable = matchedLines.reduce((sum, { line }) => sum + Number(line.rawNetAmount ?? line.netAmount ?? 0), 0);
+    const itemTaxable = ["task", "service"].includes(taxCategory)
+      ? (rule.taxApplicableOn === "base_price" ? baseTotal : sellingTotal)
+      : 0;
+    const applicablePrice = itemTaxable + addonTaxable;
+    const amount = customerCartTaxAmountForRule(applicablePrice, rule);
+    const addonTaxAmount = applicablePrice > 0 ? amount * addonTaxable / applicablePrice : 0;
+    if (String(rule.taxApplicability || "exclusive").toLowerCase() === "inclusive" && addonTaxable > 0) {
+      matchedLines.forEach(({ line, index }) => {
+        const rawNet = Number(line.rawNetAmount ?? line.netAmount ?? 0);
+        const rawGross = Number(line.rawGrossAmount ?? line.grossAmount ?? rawNet);
+        const netShare = addonTaxAmount * rawNet / addonTaxable;
+        const grossAddonTaxable = matchedLines.reduce((sum, entry) => sum + Number(entry.line.rawGrossAmount ?? entry.line.grossAmount ?? 0), 0);
+        const grossApplicablePrice = itemTaxable + grossAddonTaxable;
+        const grossTax = customerCartTaxAmountForRule(grossApplicablePrice, rule);
+        const grossAddonTaxAmount = grossApplicablePrice > 0 ? grossTax * grossAddonTaxable / grossApplicablePrice : 0;
+        const grossShare = grossAddonTaxable > 0 ? grossAddonTaxAmount * rawGross / grossAddonTaxable : 0;
+        inclusiveAddonTaxByIndex.set(index, Number(inclusiveAddonTaxByIndex.get(index) || 0) + netShare);
+        inclusiveAddonGrossTaxByIndex.set(index, Number(inclusiveAddonGrossTaxByIndex.get(index) || 0) + grossShare);
+      });
     }
     return {
       id: rule.id || "",
       label: String(rule.taxLabel || "GST & Service Fees"),
       note: String(rule.taxNote || ""),
+      taxCategory,
       applicableOn: rule.taxApplicableOn === "base_price" ? "base_price" : "selling_price",
       applicability: rule.taxApplicability === "inclusive" ? "inclusive" : "exclusive",
       taxType: rule.taxType === "flat" ? "flat" : "percent",
-      taxValue,
+      taxValue: Math.max(0, numberValue(rule.taxValue, 0)),
       formula: String(rule.formula || rule.metadata?.formula || ""),
-      amount: Math.max(0, Math.round(amount * 100) / 100)
+      amount: Math.max(0, Math.round(amount * 100) / 100),
+      addonTaxAmount: Math.max(0, Math.round(addonTaxAmount * 100) / 100),
+      taxableAmount: Math.max(0, Math.round(applicablePrice * 100) / 100)
     };
   }).filter((row) => row.amount > 0);
+  const displayAddOns = addOns.lines.map((line, index) => {
+    const rawGross = Math.max(0, Number(line.rawGrossAmount ?? line.grossAmount ?? 0));
+    const rawNet = Math.max(0, Number(line.rawNetAmount ?? line.netAmount ?? 0));
+    const inclusiveNetTax = Math.min(rawNet, Math.max(0, Number(inclusiveAddonTaxByIndex.get(index) || 0)));
+    const inclusiveGrossTax = Math.min(rawGross, Math.max(0, Number(inclusiveAddonGrossTaxByIndex.get(index) || 0)));
+    return {
+      ...line,
+      grossAmount: Math.max(0, Math.round((rawGross - inclusiveGrossTax) * 100) / 100),
+      netAmount: Math.max(0, Math.round((rawNet - inclusiveNetTax) * 100) / 100),
+      taxAmount: Math.max(0, Math.round(inclusiveNetTax * 100) / 100),
+      preTaxGrossAmount: Math.max(0, Math.round((rawGross - inclusiveGrossTax) * 100) / 100),
+      preTaxNetAmount: Math.max(0, Math.round((rawNet - inclusiveNetTax) * 100) / 100)
+    };
+  });
   const inclusiveTax = taxRows.filter((row) => row.applicability === "inclusive").reduce((sum, row) => sum + row.amount, 0);
   const exclusiveTax = taxRows.filter((row) => row.applicability === "exclusive").reduce((sum, row) => sum + row.amount, 0);
-  const itemTotal = Math.max(0, Math.round((sellingTotal - inclusiveTax) * 100) / 100);
-  const toPay = Math.max(0, Math.round((sellingTotal + exclusiveTax) * 100) / 100);
+  const inclusiveAddonTax = displayAddOns.reduce((sum, line) => sum + Number(line.taxAmount || 0), 0);
+  const itemTotal = Math.max(0, Math.round((sellingTotal - Math.max(0, inclusiveTax - inclusiveAddonTax)) * 100) / 100);
+  const rawAddOnTotal = addOns.lines.reduce((sum, line) => sum + Number(line.rawNetAmount ?? line.netAmount ?? 0), 0);
+  const preRoundToPay = Math.max(0, Math.round((sellingTotal + rawAddOnTotal + exclusiveTax) * 100) / 100);
+  const toPay = Math.max(0, Math.round(preRoundToPay));
   const duration = state.cart.reduce((sum, item) => sum + Number(item.cartDurationMinutes ?? item.durationMinutes ?? 30), 0);
   return {
     itemTotal,
-    totalAmount: baseTotal,
+    totalAmount: baseTotal + addOns.grossTotal,
     sellingTotal,
     discount,
     discountAmount: discount,
+    addOns: displayAddOns,
+    addonTotal: displayAddOns.reduce((sum, line) => sum + Number(line.netAmount || 0), 0),
+    addonDiscount: addOns.discountTotal,
     fees: Math.round((inclusiveTax + exclusiveTax) * 100) / 100,
     inclusiveTax,
     exclusiveTax,
     taxRows,
+    preRoundToPay,
+    roundingAdjustment: toPay - preRoundToPay,
     toPay,
     amountToPay: toPay,
     duration
@@ -7448,7 +7778,130 @@ function refreshCustomerCartUiOnly() {
   customerRepriceStoreCartItems();
   refreshCustomerVisibleCartControls();
   refreshCustomerCartBarOnly();
+  refreshCustomerCartBillOnly();
   refreshCustomerCartNoticeOnly();
+}
+
+function refreshCustomerCartBillOnly() {
+  if (state.customerView !== "cart") return;
+  const currentSection = root.querySelector(".customer-cart-bill-section");
+  if (!currentSection) return;
+  const totals = cartTotals();
+  const nextSection = htmlFirstElement(customerCartBillDetailsHtml(totals));
+  if (nextSection) currentSection.replaceWith(nextSection);
+  const currentTaxModal = root.querySelector("[data-customer-cart-tax-modal]");
+  const currentAddOnModal = root.querySelector("[data-customer-cart-addon-modal]");
+  const taxWasOpen = Boolean(currentTaxModal && !currentTaxModal.classList.contains("hidden"));
+  const addOnWasOpen = Boolean(currentAddOnModal && !currentAddOnModal.classList.contains("hidden"));
+  currentTaxModal?.remove();
+  currentAddOnModal?.remove();
+  const billSection = root.querySelector(".customer-cart-bill-section");
+  if (!billSection) return;
+  billSection.insertAdjacentHTML("afterend", `${customerCartTaxInfoModalHtml(totals)}${customerCartAddOnInfoModalHtml(totals)}`);
+  if (taxWasOpen) root.querySelector("[data-customer-cart-tax-modal]")?.classList.remove("hidden");
+  if (addOnWasOpen) root.querySelector("[data-customer-cart-addon-modal]")?.classList.remove("hidden");
+}
+
+async function refreshCustomerCartDeliveryQuote({ forceRefresh = false } = {}) {
+  if (actor !== "customer" || state.customerView !== "cart" || !state.token) return;
+  const stops = customerCartLocationStopsForPayload().filter((stop) => Number.isFinite(Number(stop.latitude)) && Number.isFinite(Number(stop.longitude)));
+  const quoteKey = customerCartDeliveryQuoteKey(stops);
+  if (!forceRefresh && state.customerCartDeliveryQuoteKey === quoteKey && !state.customerCartDeliveryQuoteBusy) return;
+  state.customerCartDeliveryQuoteKey = quoteKey;
+  if (stops.length < 2) {
+    state.customerCartDeliveryQuote = null;
+    refreshCustomerCartBillOnly();
+    return;
+  }
+  if (state.customerCartDeliveryQuoteBusy) return;
+  state.customerCartDeliveryQuoteBusy = true;
+  try {
+    const payload = await api("/portal/customer/bookings/delivery-quote", {
+      method: "POST",
+      body: JSON.stringify({
+        clusterId: selectedCustomerClusterId() || stops[0]?.clusterId || null,
+        locations: stops.map((stop) => ({
+          address: stop.address || "",
+          label: stop.label || "",
+          latitude: Number(stop.latitude),
+          longitude: Number(stop.longitude)
+        }))
+      }),
+      suppressSessionLogout: true
+    });
+    state.customerCartDeliveryQuote = payload.data || null;
+  } catch (_error) {
+    state.customerCartDeliveryQuote = null;
+  } finally {
+    state.customerCartDeliveryQuoteBusy = false;
+    if (state.customerView === "cart") {
+      refreshCustomerCartBillOnly();
+      refreshCustomerCartConfirmBarOnly();
+    }
+    if (customerCartDeliveryQuoteKey(customerCartLocationStopsForPayload()) !== quoteKey) void refreshCustomerCartDeliveryQuote();
+  }
+}
+
+function customerCartBillingFingerprint(totals = cartTotals()) {
+  const paise = (value) => Math.round(Number(value || 0) * 100);
+  return JSON.stringify({
+    itemTotalPaise: paise(totals.itemTotal),
+    addonTotalPaise: paise(totals.addonTotal),
+    taxTotalPaise: paise(totals.fees),
+    discountPaise: paise(totals.discountAmount),
+    preRoundToPayPaise: paise(totals.preRoundToPay),
+    roundingAdjustmentPaise: paise(totals.roundingAdjustment),
+    toPayPaise: paise(totals.toPay),
+    taxRows: normalizeArray(totals.taxRows).map((row) => ({
+      id: String(row.id || ""),
+      amountPaise: paise(row.amount),
+      addonTaxAmountPaise: paise(row.addonTaxAmount),
+      taxablePaise: paise(row.taxableAmount),
+      applicability: String(row.applicability || "")
+    })),
+    addOns: normalizeArray(totals.addOns).map((line) => ({
+      id: String(line.id || line.addonType || ""),
+      grossPaise: paise(line.grossAmount),
+      netPaise: paise(line.netAmount),
+      discountPaise: paise(line.discountAmount),
+      taxPaise: paise(line.taxAmount)
+    }))
+  });
+}
+
+async function refreshCustomerCartAuthoritativePricing({ forceRefresh = false } = {}) {
+  if (actor !== "customer" || state.customerView !== "cart" || !state.token) return false;
+  const quoteKey = customerCartBillingQuoteKey();
+  if (!forceRefresh && state.customerServerBillingQuoteKey === quoteKey && state.customerServerBillingQuote) return false;
+  if (state.customerServerBillingQuoteBusy) return false;
+  const before = customerCartBillingFingerprint(cartTotals());
+  const request = customerCartBillingQuotePayload();
+  if (!isUuid(request.clusterId) || !isUuid(request.categoryId) || request.address.length < 3) return false;
+  state.customerServerBillingQuoteBusy = true;
+  try {
+    const payload = await api("/portal/customer/bookings/quote", {
+      method: "POST",
+      body: JSON.stringify(request),
+      suppressSessionLogout: true
+    });
+    state.customerServerBillingQuote = payload.data || null;
+    state.customerServerBillingQuoteKey = quoteKey;
+    state.customerServerBillingQuoteError = "";
+    const deliveryQuote = payload.data?.deliveryQuote || null;
+    if (deliveryQuote) {
+      state.customerCartDeliveryQuote = deliveryQuote;
+      state.customerCartDeliveryQuoteKey = customerCartDeliveryQuoteKey(customerCartLocationStopsForPayload());
+    }
+  } catch (error) {
+    state.customerServerBillingQuote = null;
+    state.customerServerBillingQuoteKey = "";
+    state.customerServerBillingQuoteError = String(error?.message || "Unable to verify the latest booking price.");
+  } finally {
+    state.customerServerBillingQuoteBusy = false;
+    refreshCustomerCartBillOnly();
+    refreshCustomerCartConfirmBarOnly();
+  }
+  return before !== customerCartBillingFingerprint(cartTotals());
 }
 
 function refreshCustomerCartConfirmBarOnly() {
@@ -12238,6 +12691,29 @@ function customerReviewNotificationsHtml() {
 function customerCartBillDetailsHtml(totals = cartTotals()) {
   const expanded = Boolean(state.customerCartBillExpanded);
   const taxRows = normalizeArray(totals.taxRows);
+  const addOns = normalizeArray(totals.addOns);
+  const singleAddOn = addOns.length === 1 ? addOns[0] : null;
+  const singleAddOnDiscount = Math.max(0, Number(singleAddOn?.discountAmount || 0));
+  const singleAddOnHasDiscount = singleAddOnDiscount > 0;
+  const singleAddOnPrice = singleAddOnHasDiscount
+    ? `<b class="customer-cart-addon-pricing">
+          <span class="customer-cart-addon-discount-badge">${customerReviewMoney(singleAddOnDiscount)} Off</span>
+          <span class="customer-cart-addon-price-line"><del>${customerReviewMoney(singleAddOn.grossAmount)}</del><strong>${customerReviewMoney(singleAddOn.netAmount)}</strong></span>
+        </b>`
+    : singleAddOn ? `<b>${customerReviewMoney(singleAddOn.netAmount)}</b>` : "";
+  const addOnBillRow = addOns.length > 1
+    ? `<div class="customer-cart-bill-row">
+          <span>Add-ons Charges<button class="customer-cart-tax-info-btn" type="button" data-customer-cart-addon-info aria-label="View add-on charges">${customerIcon("info")}</button></span>
+          <b>${customerReviewMoney(totals.addonTotal)}</b>
+        </div>`
+    : singleAddOn
+      ? `<div class="customer-cart-bill-row">
+          <span>${escapeHtml(singleAddOn.label || "Add-on charges")}${singleAddOn.distanceText ? ` <small>(${escapeHtml(singleAddOn.distanceText)})</small>` : ""}</span>
+          ${singleAddOnPrice}
+        </div>`
+      : "";
+  const taxTotal = Math.max(0, Number(totals.fees || 0));
+  const hasTax = taxTotal > 0 || taxRows.some((row) => Number(row?.amount || 0) > 0);
   return `<section class="content-section compact-section customer-cart-bill-section">
     <h2>Bill details</h2>
     <div class="customer-cart-bill-card ${expanded ? "" : "is-collapsed"}">
@@ -12250,14 +12726,41 @@ function customerCartBillDetailsHtml(totals = cartTotals()) {
       </div>
       <div class="customer-cart-bill-rows">
         <div class="customer-cart-bill-row"><span>Item total</span><b>${customerReviewMoney(totals.itemTotal)}</b></div>
-        ${taxRows.map((row) => `<div class="customer-cart-bill-row">
-          <span>${escapeHtml(row.label)}<button class="customer-cart-tax-info-btn" type="button" data-customer-cart-tax-info aria-label="View tax details">${customerIcon("info")}</button></span>
-          <b>${customerReviewMoney(row.amount)}</b>
-        </div>`).join("")}
+        ${addOnBillRow}
+        ${hasTax ? `<div class="customer-cart-bill-row">
+          <span>GST (govt. taxes)<button class="customer-cart-tax-info-btn" type="button" data-customer-cart-tax-info aria-label="View tax details">${customerIcon("info")}</button></span>
+          <b>${customerReviewMoney(taxTotal)}</b>
+        </div>` : ""}
         <div class="customer-cart-bill-row customer-cart-bill-total"><strong>To pay</strong><b>${customerReviewMoney(totals.toPay)}</b></div>
       </div>
     </div>
   </section>`;
+}
+
+function customerCartAddOnInfoModalHtml(totals = cartTotals()) {
+  const addOns = normalizeArray(totals.addOns);
+  if (addOns.length <= 1) return "";
+  return `<div class="customer-cart-tax-modal hidden" data-customer-cart-addon-modal role="dialog" aria-modal="true" aria-labelledby="customerCartAddOnTitle">
+    <div class="customer-cart-tax-modal-backdrop" data-customer-cart-addon-close></div>
+    <section class="customer-cart-tax-modal-card">
+      <h2 id="customerCartAddOnTitle">Add-ons Charges</h2>
+      <div class="customer-cart-tax-modal-rows">
+        ${addOns.map((row) => {
+          const hasDiscount = Number(row.discountAmount || 0) > 0;
+          const distance = row.distanceText ? ` <small>(${escapeHtml(row.distanceText)})</small>` : "";
+          return `<div class="customer-cart-addon-detail-row">
+            <span>${escapeHtml(row.label || "Add-on charges")}${distance}</span>
+            <b class="customer-cart-addon-pricing">
+              ${hasDiscount ? `<span class="customer-cart-addon-discount-badge">${customerReviewMoney(row.discountAmount)} Off</span>` : ""}
+              <span class="customer-cart-addon-price-line">${hasDiscount ? `<del>${customerReviewMoney(row.grossAmount)}</del>` : ""}<strong>${customerReviewMoney(row.netAmount)}</strong></span>
+            </b>
+          </div>`;
+        }).join("")}
+        <div class="customer-cart-tax-modal-total"><strong>Total</strong><b>${customerReviewMoney(totals.addonTotal)}</b></div>
+      </div>
+      <button class="customer-cart-tax-modal-ok" type="button" data-customer-cart-addon-close>Okay</button>
+    </section>
+  </div>`;
 }
 
 function customerCartTaxInfoModalHtml(totals = cartTotals()) {
@@ -12270,7 +12773,9 @@ function customerCartTaxInfoModalHtml(totals = cartTotals()) {
       <h2 id="customerCartTaxTitle">Tax details</h2>
       ${notes.length ? `<div class="customer-cart-tax-notes">${notes.map((note) => `<p>${escapeHtml(note)}</p>`).join("")}</div>` : ""}
       <div class="customer-cart-tax-modal-rows">
-        ${taxRows.map((row) => `<div><span>${escapeHtml(row.label)}</span><b>${customerReviewMoney(row.amount)}</b></div>`).join("")}
+        ${taxRows.map((row) => {
+          return `<div><span>${escapeHtml(row.label)}</span><b>${customerReviewMoney(row.amount)}</b></div>`;
+        }).join("")}
         <div class="customer-cart-tax-modal-total"><strong>Total</strong><b>${customerReviewMoney(totals.fees)}</b></div>
       </div>
       <button class="customer-cart-tax-modal-ok" type="button" data-customer-cart-tax-close>Okay</button>
@@ -12310,7 +12815,7 @@ function renderCart() {
       ${customerCartLocationsHtml()}
     </section>
     ${customerCartBillDetailsHtml(totals)}
-    ${customerCartTaxInfoModalHtml(totals)}
+    ${customerCartTaxInfoModalHtml(totals)}${customerCartAddOnInfoModalHtml(totals)}
     <section class="content-section compact-section">
       <h2 class="customer-cart-minor-heading">Uploads</h2>
       <label class="customer-upload-drop">
@@ -12331,12 +12836,14 @@ function renderCart() {
   ${customerHomeLocationPickerSheet()}
   ${customerPaymentSheetHtml()}`);
   syncPortalToastHost();
+  void refreshCustomerCartAuthoritativePricing();
 }
 
 function refreshCustomerCartLocationSection() {
   const section = root.querySelector(".customer-cart-location-section");
   if (!section) return false;
   section.innerHTML = customerCartLocationsHtml();
+  void refreshCustomerCartAuthoritativePricing();
   return true;
 }
 
@@ -13186,22 +13693,13 @@ function customerCategoryMasterDisplayName(source = {}, booking = {}) {
 }
 
 function customerTrackCategoryTitleHtml(item = {}, index = 0, booking = {}) {
-  const bookingType = customerTrackBookingTypeInfo(booking);
-  const mode = customerCategoryMasterHomeDisplayMode(item, booking);
-  const serviceName = customerCategoryMasterServiceName(item, booking);
-  const categoryName =
-    customerCategoryMasterCategoryName(item, booking)
-    || item.name
+  const displayName = String(
+    item.name
+    || customerCategoryMasterCategoryName(item, booking)
     || item.serviceName
-    || `Item ${index + 1}`;
-  const parts = mode === "categoryPrice"
-    ? [categoryName, bookingType.label]
-    : [serviceName, categoryName, bookingType.label];
-  return parts
-    .map((part) => String(part || "").trim())
-    .filter((part, partIndex, rows) => part && rows.indexOf(part) === partIndex)
-    .map((part) => `<span class="track-service-title-part">${escapeHtml(part)}</span>`)
-    .join('<span class="track-service-title-dot">.</span>');
+    || `Item ${index + 1}`
+  ).trim();
+  return `<span class="track-service-title-part">${escapeHtml(displayName)}</span>`;
 }
 
 function customerTrackDurationCapsuleText(minutes = 0) {
@@ -14005,20 +14503,45 @@ function customerTrackChatNotificationHtml(count = 0) {
   </button>`;
 }
 
+function customerTrackCancellationDetails(booking = {}, sourceUpdates = []) {
+  const metadata = booking.metadata && typeof booking.metadata === "object" ? booking.metadata : {};
+  const assignmentMetadata = booking.assignmentMetadata && typeof booking.assignmentMetadata === "object" ? booking.assignmentMetadata : {};
+  const cancellationUpdate = normalizeArray(sourceUpdates.length ? sourceUpdates : booking.taskUpdates).slice().reverse().find((update) => {
+    const updateStatus = String(update?.metadata?.status || update?.status || "").toLowerCase();
+    return ["cancelled", "canceled", "failed", "expired"].includes(updateStatus) || String(update?.message || "").toLowerCase().includes("cancel");
+  }) || {};
+  const updateMetadata = cancellationUpdate.metadata && typeof cancellationUpdate.metadata === "object" ? cancellationUpdate.metadata : {};
+  const read = (...keys) => keys.map((key) => booking[key] ?? metadata[key] ?? assignmentMetadata[key] ?? updateMetadata[key]).find((value) => value !== undefined && value !== null && String(value).trim() !== "");
+  const cancelledBy = String(read("cancelledBy") || "").trim().toLowerCase();
+  const source = String(read("cancellationSource", "source") || "").trim().toLowerCase();
+  const reasonCode = String(read("cancellationReasonCode", "reasonCode", "autoCancelReason") || "").trim().toLowerCase();
+  const reason = String(read("cancellationReason", "cancelledReason", "reason", "assistantCancellationReason") || "").trim();
+  const reasonText = `${reasonCode} ${reason}`.toLowerCase();
+  const autoCancelled = [booking.autoCancelled, metadata.autoCancelled, assignmentMetadata.autoCancelled, updateMetadata.autoCancelled].some((value) => value === true)
+    || String(read("autoCancelled") || "").toLowerCase() === "true"
+    || ["system", "auto", "automation"].includes(cancelledBy)
+    || reasonCode.startsWith("assistant_not_")
+    || reasonText.includes("auto cancel");
+  if (autoCancelled) {
+    if (reasonText.includes("assistant_not_assigned") || reasonText.includes("assistant not assigned")) return { label: "Auto Cancelled due to assistant not assigned", reason };
+    if (reasonText.includes("assistant_not_start_working") || reasonText.includes("assistant not start") || reasonText.includes("assistant did not start")) return { label: "Auto Cancelled due to assistant not start", reason };
+    if (reasonText.includes("booking_slot_expired") || reasonText.includes("slot expired")) return { label: "Auto Cancelled due to booking slot expired", reason };
+    return { label: "Auto Cancelled", reason };
+  }
+  if (cancelledBy === "customer" || source === "customer_portal" || reasonCode.startsWith("customer_cancel")) return { label: "Cancelled", reason, customerCancelled: true };
+  if (cancelledBy === "assistant" || source === "assistant_portal" || reasonCode === "assistant_cancelled_booking") return { label: "Cancelled by Assistant", reason };
+  if (cancelledBy === "admin" || source === "admin_panel" || reasonCode === "admin_cancelled_booking") return { label: "Cancelled by Admin", reason };
+  return { label: "Cancelled", reason };
+}
+
 function customerTrackChatHeaderHtml(booking = {}, expanded = false, updates = taskUpdates(booking)) {
   const status = customerTrackStatus(booking);
-  const metadata = booking.metadata || {};
-  const assistantCancelled = status === "cancelled" && (
-    String(metadata.cancelledBy || "").toLowerCase() === "assistant"
-    || String(metadata.cancellationSource || "").toLowerCase() === "assistant_portal"
-    || String(metadata.cancellationReasonCode || "").toLowerCase() === "assistant_cancelled_booking"
-  );
   const unreadCount = customerTrackUnreadAssistantChatCount(booking, updates);
   const chatLocked = customerTrackCommunicationLocked(booking);
   const notification = chatLocked ? "" : customerTrackChatNotificationHtml(unreadCount);
   // Closed bookings keep chat history expandable; only communication controls are disabled.
   const toggle = customerTrackChatToggleHtml(expanded);
-  if (status === "confirmed" || assistantCancelled) {
+  if (status === "confirmed") {
     return `<div class="customer-track-chat-title customer-track-chat-tone-confirmed">
       <div class="customer-track-chat-pending">
         <i class="customer-track-chat-status-dot black" aria-hidden="true"></i>
@@ -14031,15 +14554,19 @@ function customerTrackChatHeaderHtml(booking = {}, expanded = false, updates = t
   const assistant = customerTrackAssistantInfo(booking);
   const rating = customerTrackAssistantRating(booking);
   const statusLabel = customerTrackStatusLabel(status);
+  const cancellation = status === "cancelled" ? customerTrackCancellationDetails(booking, updates) : null;
+  const cancellationSource = cancellation && !cancellation.customerCancelled
+    ? `<small class="customer-track-cancellation-source">${escapeHtml(cancellation.label)}</small>`
+    : "";
   return `<div class="customer-track-chat-title customer-track-chat-tone-${escapeHtml(status)}">
     <div class="customer-track-chat-agent">
       ${customerTrackAssistantAvatarHtml(assistant)}
       <span>
         <span class="customer-track-chat-name-row">
-          <b>${escapeHtml(assistant.name)}</b>
+          <b>${escapeHtml(status === "cancelled" ? "Cancelled" : assistant.name)}</b>
           <span class="customer-track-assistant-status ${escapeHtml(status)}"><i></i>${escapeHtml(statusLabel)}</span>
         </span>
-        <small><span class="customer-track-chat-rating">Ratings ${customerTrackIcon("star")}${escapeHtml(rating)}</span></small>
+        ${cancellation ? cancellationSource : `<small><span class="customer-track-chat-rating">Ratings ${customerTrackIcon("star")}${escapeHtml(rating)}</span></small>`}
       </span>
     </div>
     ${customerTrackAssistantCallHtml(assistant, `customer-track-chat-call ${status}`, booking)}
@@ -14052,15 +14579,20 @@ function customerTrackAssistantSummaryHtml(booking = {}, status = "") {
   if (!customerTrackHasAssignment(booking) || status === "confirmed") return "";
   const assistant = customerTrackAssistantInfo(booking);
   const rating = customerTrackAssistantRating(booking);
-  const statusLabel = customerTrackStatusLabel(status || customerTrackStatus(booking));
+  const resolvedStatus = status || customerTrackStatus(booking);
+  const statusLabel = customerTrackStatusLabel(resolvedStatus);
+  const cancellation = resolvedStatus === "cancelled" ? customerTrackCancellationDetails(booking, taskUpdates(booking)) : null;
+  const cancellationSource = cancellation && !cancellation.customerCancelled
+    ? `<small class="customer-track-cancellation-source">${escapeHtml(cancellation.label)}</small>`
+    : "";
   return `<section class="customer-track-section customer-track-assistant-card">
     ${customerTrackAssistantAvatarHtml(assistant)}
     <span class="customer-track-assistant-copy">
       <span class="customer-track-assistant-name-row">
-        <b>${escapeHtml(assistant.name)}</b>
-        <span class="customer-track-assistant-status ${escapeHtml(status || customerTrackStatus(booking))}"><i></i>${escapeHtml(statusLabel)}</span>
+        <b>${escapeHtml(resolvedStatus === "cancelled" ? "Cancelled" : assistant.name)}</b>
+        <span class="customer-track-assistant-status ${escapeHtml(resolvedStatus)}"><i></i>${escapeHtml(statusLabel)}</span>
       </span>
-      <small><span class="customer-track-assistant-rating">Ratings ${customerTrackIcon("star")}${escapeHtml(rating)}</span></small>
+      ${cancellation ? cancellationSource : `<small><span class="customer-track-assistant-rating">Ratings ${customerTrackIcon("star")}${escapeHtml(rating)}</span></small>`}
     </span>
     ${customerTrackAssistantCallHtml(assistant, "", booking)}
   </section>`;
@@ -14536,119 +15068,134 @@ function customerTrackLiveWaitingSummary(booking = {}, items = []) {
 
 function customerTrackBillSummary(booking = {}, items = []) {
   const metadata = booking.metadata || {};
-  const pricing = metadata.pricingBreakdown || {};
-  const waiting = customerTrackLiveWaitingSummary(booking, items);
-  const tipAmount = Math.max(0, Number(customerTrackTipState(booking).amount || 0));
-  const persistedTipAmount = customerTrackPaiseValue(
-    booking.tipAmountPaise
-    ?? booking.billingSnapshot?.tipAmountPaise
-    ?? booking.paymentDetails?.tipAmountPaise
-    ?? pricing.tipAmountPaise
-    ?? metadata.tipAmountPaise
-    ?? 0
+  const metadataPricing = metadata.pricingBreakdown && typeof metadata.pricingBreakdown === "object"
+    ? metadata.pricingBreakdown
+    : {};
+  const pricing = {
+    ...metadataPricing,
+    ...(booking.billingSnapshot && typeof booking.billingSnapshot === "object" ? booking.billingSnapshot : {})
+  };
+  const storedAmount = (value, fallback = 0) => customerTrackPaiseValue(value ?? fallback);
+  const storedPositiveAmount = (...values) => {
+    let lastAmount = 0;
+    for (const value of values) {
+      if (value === null || value === undefined || value === "") continue;
+      const amount = storedAmount(value);
+      lastAmount = amount;
+      if (amount > 0) return amount;
+    }
+    return lastAmount;
+  };
+  const total = storedPositiveAmount(
+    booking.amountToPayPaise,
+    booking.billingSnapshot?.amountToPayPaise,
+    pricing.amountToPayPaise,
+    booking.grandTotalPaise,
+    pricing.grandTotalPaise,
+    booking.bookingAmountPaise
   );
-  const rawTotal = customerTrackPaiseValue(
-    booking.grandTotalPaise
-    || booking.bookingAmountPaise
-    || booking.estimatedAmountPaise
-    || metadata.paymentAmountPaise
-    || metadata.bookingAmountPaise
-    || metadata.estimatedAmountPaise
-    || pricing.grandTotalPaise
-    || pricing.finalTotalAmountPaise
-    || pricing.totalAmountPaise
-  );
-  const itemTotalFromItems = normalizeArray(items).reduce((sum, item) => sum + Number(item.sellingPrice || item.price || 0), 0);
-  const itemTotal = customerTrackPaiseValue(
-    booking.itemTotalPaise
-    || booking.billingSnapshot?.itemTotalPaise
-    || pricing.itemTotalPaise
-    || pricing.subtotalPaise
-    || pricing.sellingAmountPaise
-    || metadata.itemTotalPaise
-    || metadata.subtotalPaise,
-    itemTotalFromItems
-  ) || itemTotalFromItems || Math.max(0, rawTotal - waiting.charges);
-  const fees = customerTrackPaiseValue(
-    booking.taxAmountPaise
-    || booking.billingSnapshot?.taxAmountPaise
-    || pricing.feesPaise
-    || pricing.serviceFeePaise
-    || pricing.gstPaise
-    || pricing.taxAmountPaise
-    || metadata.feesPaise
-    || metadata.serviceFeePaise
-    || metadata.gstPaise,
-    Math.max(0, rawTotal - waiting.charges - itemTotal)
-  );
-  const taxRows = normalizeArray(
-    booking.taxDetails
-    || booking.billingSnapshot?.taxRows
-    || booking.paymentDetails?.taxRows
-    || pricing.taxRows
-  ).map((row) => {
+  const itemTotal = storedPositiveAmount(booking.itemTotalPaise, booking.billingSnapshot?.itemTotalPaise, pricing.itemTotalPaise);
+  const fees = storedPositiveAmount(booking.taxAmountPaise, booking.billingSnapshot?.taxAmountPaise, pricing.taxAmountPaise);
+  const waitingMinutes = Math.max(0, Number(booking.waitingTimeMinutes || 0));
+  const waitingCharges = storedPositiveAmount(booking.waitingChargesPaise, pricing.waitingChargesPaise);
+  const tipAmount = storedPositiveAmount(booking.tipAmountPaise, booking.billingSnapshot?.tipAmountPaise, pricing.tipAmountPaise);
+  const taxRowsSource = [
+    booking.taxDetails,
+    booking.billingSnapshot?.taxRows,
+    booking.paymentDetails?.taxRows,
+    pricing.taxRows
+  ].find((rows) => Array.isArray(rows) && rows.length) || [];
+  const taxRows = normalizeArray(taxRowsSource).map((row) => {
     const source = row && typeof row === "object" ? row : {};
     const amount = source.amountPaise != null
       ? customerTrackPaiseValue(source.amountPaise)
       : Math.max(0, Number(source.amount || 0));
+    const addonTaxAmount = source.addonTaxAmountPaise != null
+      ? customerTrackPaiseValue(source.addonTaxAmountPaise)
+      : Math.max(0, Number(source.addonTaxAmount || 0));
     return {
       label: String(source.label || source.taxLabel || "GST & Service Fees"),
       note: String(source.note || source.taxNote || ""),
-      amount: Math.max(0, amount)
+      applicability: String(source.applicability || source.taxApplicability || "exclusive").toLowerCase() === "inclusive" ? "inclusive" : "exclusive",
+      taxCategory: String(source.taxCategory || source.category || "service").toLowerCase(),
+      amount: Math.max(0, amount),
+      addonTaxAmount: Math.max(0, addonTaxAmount)
     };
   }).filter((row) => row.amount > 0);
   if (!taxRows.length && fees > 0) taxRows.push({ label: "GST & Service Fees", note: "", amount: fees });
-  const paidAddOns = normalizeArray(metadata.paidAddOns).filter((item) => item && typeof item === "object" && (item.paidAt || String(item.kind || "").toLowerCase() === "extension"));
-  const baseTaxRows = taxRows.slice();
-  const baseTaxTotal = baseTaxRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
-  const extensionRows = paidAddOns.filter((addOn) => String(addOn.kind || "").toLowerCase() === "extension").map((addOn) => {
-    const addOnPricing = addOn.pricing || {};
-    const extensionTaxRows = normalizeArray(addOnPricing.taxRows).map((row) => {
-      const amount = row?.amountPaise != null ? customerTrackPaiseValue(row.amountPaise) : Math.max(0, Number(row?.amount || 0));
-      return { label: `Extension - ${String(row?.label || "GST & Service Fees")}`, note: String(row?.note || row?.taxNote || ""), amount: Math.max(0, amount) };
-    }).filter((row) => row.amount > 0);
-    const taxAmount = customerTrackPaiseValue(addOn.taxAmountPaise ?? addOnPricing.taxAmountPaise, extensionTaxRows.reduce((sum, row) => sum + row.amount, 0));
-    if (!extensionTaxRows.length && taxAmount > 0) extensionTaxRows.push({ label: "Extension - GST & Service Fees", note: "", amount: taxAmount });
-    const inclusiveTax = customerTrackPaiseValue(addOnPricing.inclusiveTaxAmountPaise);
-    const sellingAmount = customerTrackPaiseValue(addOn.sellingAmountPaise ?? addOnPricing.sellingAmountPaise);
-    const itemAmount = customerTrackPaiseValue(addOnPricing.itemTotalPaise, Math.max(0, sellingAmount - inclusiveTax));
-    const totalAmount = customerTrackPaiseValue(addOn.totalAmountPaise ?? addOnPricing.totalAmountPaise, itemAmount + taxAmount);
-    return { ...addOn, itemAmount, taxAmount, totalAmount, taxRows: extensionTaxRows, label: `Service extension (${customerTrackDurationCapsuleText(addOn.durationMinutes || 0)})` };
-  });
-  const allTaxRows = baseTaxRows.concat(extensionRows.flatMap((row) => row.taxRows));
-  const extensionItemTotal = extensionRows.reduce((sum, row) => sum + row.itemAmount, 0);
-  const extensionTotal = extensionRows.reduce((sum, row) => sum + row.totalAmount, 0);
-  const itemRows = [{ label: "Booking amount", amount: itemTotal }, ...extensionRows.map((row) => ({ label: row.label, amount: row.itemAmount }))].filter((row) => row.amount > 0);
-  const discountFromItems = normalizeArray(items).reduce((sum, item) => {
-    const base = Number(item.basePrice || 0);
-    const selling = Number(item.sellingPrice || 0);
-    return sum + Math.max(0, base - selling);
-  }, 0);
-  const bookingDiscount = customerTrackPaiseValue(
-    metadata.baseBookingDiscountPaise
-    ?? booking.discountPaise
-    ?? metadata.discountPaise
-    ?? pricing.discountAmountPaise,
-    discountFromItems
-  ) || discountFromItems;
-  const extensionDiscount = extensionRows.reduce((sum, row) => sum + customerTrackPaiseValue(
-    row.discountAmountPaise
-    ?? row.extensionDiscountPaise
-    ?? row.pricing?.discountAmountPaise
-    ?? row.pricing?.extensionDiscountPaise
-  ), 0);
-  const discount = Math.max(0, bookingDiscount + extensionDiscount);
+  const storedAddonLines = normalizeArray(booking.billingAddonLines).length
+    ? normalizeArray(booking.billingAddonLines)
+    : normalizeArray(pricing.addonLines);
+  const billingAddOnRows = storedAddonLines.map((line) => {
+    const source = line && typeof line === "object" ? line : {};
+    const discountAmount = storedAmount(source.discountAmountPaise ?? source.discountPaise);
+    const netAmount = storedPositiveAmount(source.amountAfterDiscountPaise, source.netAmountPaise, source.sellingAmountPaise);
+    const grossAmount = storedPositiveAmount(source.rawGrossAmountPaise, source.grossAmountPaise, source.baseAmountPaise) || netAmount + discountAmount;
+    const kind = String(source.addonType || source.kind || source.type || "service").toLowerCase();
+    return {
+      ...source,
+      kind,
+      label: String(source.label || source.title || (kind === "delivery" ? "Delivery charges" : "Add-ons Charges")),
+      grossAmount,
+      netAmount,
+      discountAmount: Math.max(0, discountAmount),
+      taxAmount: storedAmount(source.taxAmountPaise),
+      totalAmount: storedPositiveAmount(source.totalAmountPaise, source.amountAfterDiscountPaise, source.netAmountPaise),
+      paymentStatus: "paid"
+    };
+  }).filter((row) => row.grossAmount > 0 || row.netAmount > 0);
+  const paymentAddOnRows = normalizeArray(booking.addOnPayments)
+    .filter((row) => row && typeof row === "object" && String(row.kind || "").toLowerCase() !== "tip")
+    .map((row) => {
+      const source = row.pricing && typeof row.pricing === "object" ? row.pricing : {};
+      const baseAmount = storedAmount(row.baseAmountPaise ?? source.baseAmountPaise);
+      const discountAmount = storedAmount(row.discountAmountPaise ?? source.discountAmountPaise);
+      const netAmount = storedAmount(row.sellingAmountPaise ?? source.sellingAmountPaise);
+      const taxAmount = storedAmount(row.taxAmountPaise ?? source.taxAmountPaise);
+      const kind = String(row.kind || "add-on").toLowerCase();
+      const rawGrossAmount = storedPositiveAmount(row.rawGrossAmountPaise, source.rawGrossAmountPaise, baseAmount);
+      const rawNetAmount = storedPositiveAmount(row.rawNetAmountPaise, source.rawNetAmountPaise, netAmount);
+      const amountAfterDiscount = storedPositiveAmount(row.amountAfterDiscountPaise, source.amountAfterDiscountPaise, netAmount);
+      return {
+        ...row,
+        kind,
+        label: kind === "extension"
+          ? `Service extension (${customerTrackDurationCapsuleText(row.durationMinutes || 0)})`
+          : kind === "stop" ? "New stop" : "Add-ons Charges",
+        grossAmount: rawGrossAmount || Math.max(baseAmount, netAmount + discountAmount),
+        netAmount: amountAfterDiscount,
+        discountAmount,
+        taxAmount,
+        totalAmount: storedPositiveAmount(row.totalAmountPaise, source.totalAmountPaise, amountAfterDiscount),
+        paymentStatus: String(row.statusCode || row.status || "due").toLowerCase()
+      };
+    });
+  const addOns = billingAddOnRows.concat(paymentAddOnRows);
+  const addonTotal = storedPositiveAmount(booking.addonTotalPaise, booking.billingSnapshot?.addonTotalPaise, pricing.addonTotalPaise, metadataPricing.addonTotalPaise);
+  const addonDiscount = storedPositiveAmount(booking.addonDiscountPaise, booking.billingSnapshot?.addonDiscountPaise, pricing.addonDiscountPaise, metadataPricing.addonDiscountPaise);
+  const discount = storedPositiveAmount(booking.totalDiscountPaise, booking.billingSnapshot?.totalDiscountPaise, pricing.totalDiscountPaise, metadataPricing.totalDiscountPaise, booking.discountPaise);
+  const itemLines = normalizeArray(booking.billingItemLines);
+  const itemRows = itemLines.length
+    ? itemLines.map((row) => ({
+      label: String(row.categoryName || row.serviceName || "Booking item"),
+      amount: storedAmount(row.itemTotalPaise ?? row.totalAmountPaise ?? row.sellingPricePaise)
+    })).filter((row) => row.amount > 0)
+    : [{ label: "Booking amount", amount: itemTotal }].filter((row) => row.amount > 0);
   return {
-    total: Math.max(0, itemTotal + baseTaxTotal + extensionTotal + waiting.charges + tipAmount),
-    itemTotal: itemTotal + extensionItemTotal,
-    fees: allTaxRows.reduce((sum, row) => sum + Number(row.amount || 0), 0),
-    taxRows: allTaxRows,
+    total,
+    itemTotal,
+    fees,
+    taxRows,
     itemRows,
-    addOns: extensionRows,
+    addOns,
+    addonTotal,
     discount,
+    hasDueAddOns: paymentAddOnRows.some((row) => ["due", "cash"].includes(String(row.paymentStatus || "").toLowerCase())),
+    hasPendingAddOns: paymentAddOnRows.some((row) => ["pending", "processing", "created"].includes(String(row.paymentStatus || "").toLowerCase())),
     tipAmount,
-    waitingMinutes: waiting.minutes,
-    waitingCharges: waiting.charges
+    waitingMinutes,
+    waitingCharges,
+    addonTaxTotal: storedPositiveAmount(booking.addonTaxPaise, pricing.addonTaxPaise)
   };
 }
 
@@ -14686,27 +15233,67 @@ function customerTrackItemInfoModalHtml(bill = {}) {
   </div>`;
 }
 
+function customerTrackAddOnInfoModalHtml(bill = {}) {
+  const addOns = normalizeArray(bill.addOns);
+  if (addOns.length <= 1) return "";
+  return `<div class="customer-cart-tax-modal hidden" data-track-addon-modal role="dialog" aria-modal="true" aria-labelledby="customerTrackAddOnTitle">
+    <div class="customer-cart-tax-modal-backdrop" data-track-addon-close></div>
+    <section class="customer-cart-tax-modal-card">
+      <h2 id="customerTrackAddOnTitle">Add-ons Charges</h2>
+      <div class="customer-cart-tax-modal-rows">
+        ${addOns.map((row) => {
+          const discount = Number(row.discountAmount || 0) > 0;
+          const status = row.paymentStatus && row.paymentStatus !== "paid" ? ` <small>(${escapeHtml(row.paymentStatus)})</small>` : "";
+          const distance = row.distanceText ? ` <small>(${escapeHtml(row.distanceText)})</small>` : "";
+          return `<div class="customer-cart-addon-detail-row">
+            <span>${escapeHtml(row.label || "Add-on charges")}${distance}${status}</span>
+            <b class="customer-cart-addon-pricing">
+              ${discount ? `<span class="customer-cart-addon-discount-badge">${escapeHtml(customerTrackMoney(row.discountAmount, 2))} Off</span>` : ""}
+              <span class="customer-cart-addon-price-line">${discount ? `<del>${escapeHtml(customerTrackMoney(row.grossAmount, 2))}</del>` : ""}<strong>${escapeHtml(customerTrackMoney(row.netAmount, 2))}</strong></span>
+            </b>
+          </div>`;
+        }).join("")}
+        <div class="customer-cart-tax-modal-total"><strong>Total</strong><b>${escapeHtml(customerTrackMoney(bill.addonTotal, 2))}</b></div>
+      </div>
+      <button class="customer-cart-tax-modal-ok" type="button" data-track-addon-close>Okay</button>
+    </section>
+  </div>`;
+}
+
 function customerTrackBillDetailsHtml(booking = {}, items = []) {
   const bill = customerTrackBillSummary(booking, items);
   const payment = customerBookingPaymentState(booking);
-  const paymentClass = payment.paid ? "paid" : payment.pending ? "pending" : "due";
   const bookingId = booking.id || booking.bookingId || "";
   const expanded = Boolean(state.customerTrackBillExpanded);
   const controlsLocked = customerTrackControlsLocked(booking);
+  const singleAddOn = bill.addOns.length === 1 ? bill.addOns[0] : null;
+  const singleAddOnDiscount = Math.max(0, Number(singleAddOn?.discountAmount || 0));
+  const singleAddOnHasDiscount = singleAddOnDiscount > 0;
+  const singleAddOnPrice = singleAddOnHasDiscount
+    ? `<b class="customer-cart-addon-pricing">
+          <span class="customer-cart-addon-discount-badge">${escapeHtml(customerTrackMoney(singleAddOnDiscount, 2))} Off</span>
+          <span class="customer-cart-addon-price-line"><del>${escapeHtml(customerTrackMoney(singleAddOn.grossAmount, 2))}</del><strong>${escapeHtml(customerTrackMoney(singleAddOn.netAmount, 2))}</strong></span>
+        </b>`
+    : singleAddOn ? `<b>${escapeHtml(customerTrackMoney(singleAddOn.netAmount, 2))}</b>` : "";
+  const addOnBillRow = bill.addOns.length > 1
+    ? `<div class="customer-track-bill-row customer-track-addon-row"><span>Add-ons Charges<button class="customer-cart-tax-info-btn" type="button" data-track-addon-info aria-label="View add-on charges">${customerIcon("info")}</button></span><b>${escapeHtml(customerTrackMoney(bill.addonTotal, 2))}</b></div>`
+    : singleAddOn
+      ? `<div class="customer-track-bill-row customer-track-addon-row"><span>${escapeHtml(singleAddOn.label || "Add-on charges")}${singleAddOn.distanceText ? ` <small>(${escapeHtml(singleAddOn.distanceText)})</small>` : ""}</span>${singleAddOnPrice}</div>`
+      : "";
   return `<section class="customer-track-section customer-track-bill">
     <h2>Bill details</h2>
     <div class="customer-track-bill-card ${expanded ? "" : "is-collapsed"}">
       <div class="customer-track-bill-head">
-        <span>${customerTrackIcon("receiptFill")}</span>
-        <div>
-          <b>To pay ${escapeHtml(customerTrackMoney(bill.total, 2))} <em class="customer-track-payment-pill ${escapeHtml(paymentClass)}">${escapeHtml(payment.label)}</em></b>
-          ${bill.discount > 0 ? `<small>${escapeHtml(customerTrackMoney(bill.discount, 0))} saved on the total bill</small>` : ""}
+        <div class="customer-track-bill-head-copy">
+          <b>To pay ${escapeHtml(customerTrackMoney(bill.total, 2))}</b>
+          ${bill.discount > 0 ? `<small>${escapeHtml(customerTrackMoney(bill.discount, 2))} saved on the total!</small>` : ""}
         </div>
         <button type="button" data-track-bill-toggle aria-expanded="${expanded ? "true" : "false"}" aria-label="${expanded ? "Collapse" : "Expand"} bill details">${customerTrackIcon(expanded ? "chevronUp" : "chevronDown")}</button>
       </div>
       <div class="customer-track-bill-rows">
-        <div class="customer-track-bill-row"><span>Item total<button class="customer-cart-tax-info-btn" type="button" data-track-item-info aria-label="View item total details">${customerIcon("info")}</button></span><b>${escapeHtml(customerTrackMoney(bill.itemTotal, 2))}</b></div>
-        ${bill.fees > 0 ? `<div class="customer-track-bill-row customer-track-tax-row"><span>GST & Service Fees<button class="customer-cart-tax-info-btn" type="button" data-track-tax-info aria-label="View tax details">${customerIcon("info")}</button></span><b>${escapeHtml(customerTrackMoney(bill.fees, 2))}</b></div>` : ""}
+        <div class="customer-track-bill-row"><span>Item total</span><b>${escapeHtml(customerTrackMoney(bill.itemTotal, 2))}</b></div>
+        ${addOnBillRow}
+        ${bill.taxRows.length ? `<div class="customer-track-bill-row customer-track-tax-row"><span>GST (govt. taxes)<button class="customer-cart-tax-info-btn" type="button" data-track-tax-info aria-label="View tax details">${customerIcon("info")}</button></span><b>${escapeHtml(customerTrackMoney(bill.fees, 2))}</b></div>` : ""}
         ${bill.tipAmount > 0 ? `<div class="customer-track-bill-row"><span>Tip <small>(tax not applicable)</small></span><b>Paid ${escapeHtml(customerTrackMoney(bill.tipAmount, 2))}</b></div>` : ""}
         ${payment.paid && payment.remarks ? `<div class="customer-track-bill-row"><span>Payment Remarks</span><b>${escapeHtml(payment.remarks)}</b></div>` : ""}
         ${payment.paid && normalizeArray(payment.proofMediaUrls).length ? `<div class="customer-track-bill-row"><span>Payment Proof</span><b>${normalizeArray(payment.proofMediaUrls).slice(0, 2).map((url, index) => {
@@ -14714,7 +15301,7 @@ function customerTrackBillDetailsHtml(booking = {}, items = []) {
           return `<a href="${escapeHtml(viewUrl)}" target="_blank" rel="noreferrer" ${customerTrackPreviewTriggerAttrs(viewUrl, `Payment proof ${index + 1}`, customerTrackPreviewKind(viewUrl, "image"))}>View</a>`;
         }).join(" ")}</b></div>` : ""}
         ${bill.waitingCharges > 0 || bill.waitingMinutes > 0 ? `<div class="customer-track-bill-row"><span>Waiting charges (${escapeHtml(customerTrackDurationUnitText(bill.waitingMinutes))})</span><b>${escapeHtml(customerTrackMoney(bill.waitingCharges, 2))}</b></div>` : ""}
-        <div class="customer-track-bill-row total"><span>To Pay</span><b>${escapeHtml(customerTrackMoney(bill.total, 2))}</b></div>
+        <div class="customer-track-bill-row total"><span>To pay</span><b>${escapeHtml(customerTrackMoney(bill.total, 2))}</b></div>
         ${!controlsLocked && !payment.paid && !payment.pending && bookingId ? `<div class="customer-track-pay-now-row">
           <b>${escapeHtml(customerTrackMoney(bill.total, 2))}</b>
           <button class="primary-btn" data-customer-pay-now data-payment-booking-id="${escapeHtml(bookingId)}" data-payment-assignment-id="${escapeHtml(booking.assignmentId || "")}" data-payment-amount="${escapeHtml(bill.total)}" type="button">Pay Now</button>
@@ -14722,7 +15309,7 @@ function customerTrackBillDetailsHtml(booking = {}, items = []) {
       </div>
     </div>
   </section>
-  ${customerTrackItemInfoModalHtml(bill)}${customerTrackTaxInfoModalHtml(bill)}`;
+  ${customerTrackItemInfoModalHtml(bill)}${customerTrackAddOnInfoModalHtml(bill)}${customerTrackTaxInfoModalHtml(bill)}`;
 }
 
 function customerTrackCustomTipValue(value = "") {
@@ -14876,6 +15463,7 @@ function renderTrackPreservingTipScroll(focusSelector = "") {
   const currentBill = root.querySelector(".customer-track-bill");
   if (currentBill) {
     root.querySelector("[data-track-item-modal]")?.remove();
+    root.querySelector("[data-track-addon-modal]")?.remove();
     root.querySelector("[data-track-tax-modal]")?.remove();
     const billTemplate = document.createElement("template");
     billTemplate.innerHTML = customerTrackBillDetailsHtml(booking, customerTrackBookingItems(booking)).trim();
@@ -16008,29 +16596,38 @@ function customerTrackServiceRowHtml(item = {}, index = 0, booking = {}, trackIt
   const base = Number(item.basePrice || 0);
   const priceText = customerTrackMoney(selling, 0);
   const basePriceText = base > selling && base > 0 ? customerTrackMoney(base, 0) : "";
-  const category = customerCategoryMasterDisplayName(item, booking) || item.categoryName || item.serviceName || "";
-  const tone = customerTrackCategoryTone(category);
-  const showCategoryPill = Boolean(item.hasStore && category);
+  const discountText = base > selling ? customerTrackMoney(base - selling, 0) : "";
+  const bookingType = customerTrackBookingTypeInfo(booking);
   const itemDurationMinutes = Math.max(1, Number(item.durationMinutes || 30));
   const effectiveDurationMinutes = normalizeArray(trackItems).length <= 1
     ? Math.max(itemDurationMinutes, customerTrackBaseDurationMinutes(booking, trackItems))
     : itemDurationMinutes;
   const durationText = customerTrackDurationCapsuleText(effectiveDurationMinutes);
-  const timeframe = customerTrackTaskTimeRangeHtml(booking, trackItems);
-  const inlineTiming = [durationText, timeframe].filter(Boolean).join(" . ");
-  return `<div class="track-service-row">
-    <div class="track-service-image">${customerTrackServiceImageHtml(item, index)}</div>
-    <div class="track-service-copy">
-      <h3 class="track-service-title-line">${customerTrackCategoryTitleHtml(item, index, booking)}</h3>
-      <div class="track-service-meta ${showCategoryPill ? "" : "duration-only"}">
-        ${showCategoryPill ? `<b class="${escapeHtml(tone)}">${escapeHtml(category)}</b>` : ""}
-        <span class="track-service-duration">${customerTrackIcon("watch")}${escapeHtml(inlineTiming)}</span>
+  const plannedStartAt = customerTrackPlannedStartDate(booking);
+  const bookedForAt = customerTrackDateValue(
+    bookingType.type === "schedule" ? booking.scheduledAt : plannedStartAt,
+    bookingType.type === "schedule" ? booking.metadata?.scheduledAt : null,
+    plannedStartAt
+  );
+  const timingRows = customerBookingTimingRowsHtml([
+    { label: "Booked For", value: customerBookingTimingDateText(bookedForAt, bookingType.type === "schedule") },
+    { label: "Scheduled", value: customerTrackPlannedTimeRangeHtml(booking, trackItems) }
+  ], "track-service-timing");
+  return `<div class="track-service-item">
+    <div class="track-service-row">
+      <div class="track-service-image">${customerTrackServiceImageHtml(item, index)}</div>
+      <div class="track-service-copy">
+        <h3 class="track-service-title-line">${customerTrackCategoryTitleHtml(item, index, booking)}</h3>
+        <div class="track-service-booking-mode">${customerTrackIcon(bookingType.icon)}<span>${escapeHtml(bookingType.label)}</span></div>
+        <div class="track-service-duration">${escapeHtml(durationText)}</div>
+      </div>
+      <div class="track-service-price">
+        <strong>${escapeHtml(priceText)}</strong>
+        ${basePriceText ? `<del>${escapeHtml(basePriceText)}</del>` : ""}
+        ${discountText ? `<small>Save ${escapeHtml(discountText)}</small>` : ""}
       </div>
     </div>
-    <div class="track-service-price">
-      ${basePriceText ? `<del>${escapeHtml(basePriceText)}</del>` : ""}
-      <strong>${escapeHtml(priceText)}</strong>
-    </div>
+    ${timingRows}
   </div>`;
 }
 
@@ -20947,10 +21544,23 @@ async function validateCustomerCartLocationRoute(stops) {
   });
 }
 
+async function syncCustomerBookingPricingBeforeConfirm() {
+  const before = customerCartBillingFingerprint(cartTotals());
+  await refreshCustomerCartAuthoritativePricing({ forceRefresh: true });
+  if (state.customerServerBillingQuoteError) {
+    throw new Error("Unable to verify the latest booking price. Please try again.");
+  }
+  if (customerCartBillingFingerprint(cartTotals()) === before) return;
+  const error = new Error("Pricing was updated. Please review the new bill before confirming.");
+  error.code = "booking_price_changed";
+  throw error;
+}
+
 async function prepareCustomerBookingCoverage() {
   if (!state.cart.length) throw new Error("Add at least one service.");
   const selectedLocation = state.selectedLocation;
   if (!selectedLocation?.clusterId) throw new Error("Pick a serviceable location before booking.");
+  await syncCustomerBookingPricingBeforeConfirm();
   const locationRequirement = customerCartLocationRequirement();
   const locationStops = customerCartLocationStopsForPayload();
   if (!locationStops.length) throw new Error("Add a start point before booking.");
@@ -20983,6 +21593,15 @@ async function prepareCustomerBookingCoverage() {
   }
   setCustomerCartRouteOrder(validatedStops);
   invalidateCustomerAvailabilityDecision();
+  const pricingChanged = await refreshCustomerCartAuthoritativePricing({ forceRefresh: true });
+  if (state.customerServerBillingQuoteError) {
+    throw new Error("Unable to verify the latest delivery price. Please try again.");
+  }
+  if (pricingChanged) {
+    const error = new Error("Delivery pricing was updated. Please review the new bill before confirming.");
+    error.code = "booking_price_changed";
+    throw error;
+  }
   return validatedStops;
 }
 
@@ -22658,6 +23277,22 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const trackAddOnInfoButton = event.target.closest("[data-track-addon-info]");
+  if (trackAddOnInfoButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    root.querySelector("[data-track-addon-modal]")?.classList.remove("hidden");
+    return;
+  }
+
+  const trackAddOnCloseButton = event.target.closest("[data-track-addon-close]");
+  if (trackAddOnCloseButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    trackAddOnCloseButton.closest("[data-track-addon-modal]")?.classList.add("hidden");
+    return;
+  }
+
   const trackTaxInfoButton = event.target.closest("[data-track-tax-info]");
   if (trackTaxInfoButton) {
     event.preventDefault();
@@ -22699,11 +23334,29 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const customerCartAddOnInfoButton = event.target.closest("[data-customer-cart-addon-info]");
+  if (customerCartAddOnInfoButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const modal = root.querySelector("[data-customer-cart-addon-modal]");
+    if (modal) modal.classList.remove("hidden");
+    return;
+  }
+
   const customerCartTaxCloseButton = event.target.closest("[data-customer-cart-tax-close]");
   if (customerCartTaxCloseButton) {
     event.preventDefault();
     event.stopPropagation();
     const modal = customerCartTaxCloseButton.closest("[data-customer-cart-tax-modal]");
+    if (modal) modal.classList.add("hidden");
+    return;
+  }
+
+  const customerCartAddOnCloseButton = event.target.closest("[data-customer-cart-addon-close]");
+  if (customerCartAddOnCloseButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const modal = customerCartAddOnCloseButton.closest("[data-customer-cart-addon-modal]");
     if (modal) modal.classList.add("hidden");
     return;
   }

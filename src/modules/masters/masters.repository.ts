@@ -79,6 +79,7 @@ let surgeRuleSchemaReady: Promise<void> | null = null;
 let priceMasterSchemaReady: Promise<void> | null = null;
 let taxMasterSchemaReady: Promise<void> | null = null;
 let paymentModeSchemaReady: Promise<void> | null = null;
+let pgTransactionChargeSchemaReady: Promise<void> | null = null;
 let categoryServiceMasterSchemaReady: Promise<void> | null = null;
 let categoryPriceSchemaReady: Promise<void> | null = null;
 let bookingTypeSchemaReady: Promise<void> | null = null;
@@ -660,6 +661,7 @@ async function ensureTaxMasterSchema() {
     taxMasterSchemaReady = pool.query(`
       create table if not exists zigo.tax_master_rules (
         id uuid primary key default gen_random_uuid(),
+        tax_category text not null default 'service',
         tax_applicable_on text not null default 'selling_price',
         tax_applicability text not null default 'exclusive',
         tax_type text not null default 'percent',
@@ -678,6 +680,7 @@ async function ensureTaxMasterSchema() {
         is_deleted boolean not null default false
       );
       alter table zigo.tax_master_rules
+        add column if not exists tax_category text not null default 'service',
         add column if not exists tax_applicable_on text not null default 'selling_price',
         add column if not exists tax_applicability text not null default 'exclusive',
         add column if not exists tax_type text not null default 'percent',
@@ -759,6 +762,60 @@ async function ensurePaymentModeSchema() {
     });
   }
   await paymentModeSchemaReady;
+}
+
+async function ensurePgTransactionChargeSchema() {
+  if (!pgTransactionChargeSchemaReady) {
+    pgTransactionChargeSchemaReady = pool.query(`
+      create table if not exists zigo.pg_transaction_charge_masters (
+        id uuid primary key default gen_random_uuid(),
+        payment_mode text not null,
+        charge_type text not null default 'percent',
+        charge_value numeric(12,4) not null default 0,
+        description text,
+        is_active boolean not null default true,
+        created_by uuid references zigo.users(id),
+        created_at timestamptz not null default now(),
+        updated_by uuid references zigo.users(id),
+        updated_at timestamptz not null default now(),
+        deleted_by uuid references zigo.users(id),
+        deleted_at timestamptz,
+        is_deleted boolean not null default false
+      );
+      alter table zigo.pg_transaction_charge_masters
+        add column if not exists payment_mode text not null default 'other',
+        add column if not exists charge_type text not null default 'percent',
+        add column if not exists charge_value numeric(12,4) not null default 0,
+        add column if not exists description text,
+        add column if not exists is_active boolean not null default true,
+        add column if not exists created_by uuid references zigo.users(id),
+        add column if not exists created_at timestamptz not null default now(),
+        add column if not exists updated_by uuid references zigo.users(id),
+        add column if not exists updated_at timestamptz not null default now(),
+        add column if not exists deleted_by uuid references zigo.users(id),
+        add column if not exists deleted_at timestamptz,
+        add column if not exists is_deleted boolean not null default false;
+      create unique index if not exists ux_pg_transaction_charge_masters_mode
+        on zigo.pg_transaction_charge_masters(lower(payment_mode))
+        where coalesce(is_deleted, false) = false;
+      create index if not exists idx_pg_transaction_charge_masters_active
+        on zigo.pg_transaction_charge_masters(is_deleted, is_active, payment_mode);
+      insert into zigo.pg_transaction_charge_masters (payment_mode, charge_type, charge_value, description)
+      values
+        ('upi', 'percent', 0, 'UPI payment processing cost'),
+        ('debit_card', 'percent', 0.95, 'Debit card payment processing cost'),
+        ('credit_card', 'percent', 2.50, 'Credit card payment processing cost'),
+        ('net_banking', 'percent', 0.95, 'Net banking payment processing cost'),
+        ('wallet', 'percent', 0, 'Wallet payment processing cost'),
+        ('cash', 'percent', 0, 'Cash has no payment gateway cost'),
+        ('other', 'percent', 0, 'Fallback payment gateway cost')
+      on conflict do nothing;
+    `).then(() => undefined).catch((error) => {
+      pgTransactionChargeSchemaReady = null;
+      throw error;
+    });
+  }
+  await pgTransactionChargeSchemaReady;
 }
 
 export async function listStates() {
@@ -3085,8 +3142,11 @@ export async function deletePriceMasterRule(id: string, userId: string) {
 }
 
 const TAX_MASTER_FORMULA = "(taxApplicablePrice * taxValue / (100 + taxValue))";
+const TAX_MASTER_CATEGORIES = ["task", "delivery", "packaging", "platform", "weather", "service", "handling"] as const;
+type TaxMasterCategory = typeof TAX_MASTER_CATEGORIES[number];
 
 type TaxMasterInput = {
+  taxCategory?: TaxMasterCategory;
   taxApplicableOn?: "base_price" | "selling_price";
   taxApplicability?: "inclusive" | "exclusive";
   taxType?: "percent" | "flat";
@@ -3100,6 +3160,7 @@ type TaxMasterInput = {
 
 function normalizeTaxMasterInput(input: TaxMasterInput) {
   return {
+    taxCategory: TAX_MASTER_CATEGORIES.includes(input.taxCategory as TaxMasterCategory) ? input.taxCategory : "service",
     taxApplicableOn: input.taxApplicableOn === "base_price" ? "base_price" : "selling_price",
     taxApplicability: input.taxApplicability === "inclusive" ? "inclusive" : "exclusive",
     taxType: input.taxType === "flat" ? "flat" : "percent",
@@ -3118,6 +3179,7 @@ export async function listTaxMasterRules() {
   const result = await pool.query(`
     select
       id,
+      tax_category as "taxCategory",
       tax_applicable_on as "taxApplicableOn",
       tax_applicability as "taxApplicability",
       tax_type as "taxType",
@@ -3142,12 +3204,13 @@ export async function createTaxMasterRule(input: TaxMasterInput) {
   const result = await pool.query(
     `
       insert into zigo.tax_master_rules
-        (tax_applicable_on, tax_applicability, tax_type, tax_value, formula, tax_label, tax_note,
+        (tax_category, tax_applicable_on, tax_applicability, tax_type, tax_value, formula, tax_label, tax_note,
          metadata, is_active, created_by, updated_by)
-      values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $10)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $11)
       returning id
     `,
     [
+      normalized.taxCategory,
       normalized.taxApplicableOn,
       normalized.taxApplicability,
       normalized.taxType,
@@ -3169,22 +3232,24 @@ export async function updateTaxMasterRule(id: string, input: TaxMasterInput) {
   const result = await pool.query(
     `
       update zigo.tax_master_rules
-      set tax_applicable_on = $2,
-          tax_applicability = $3,
-          tax_type = $4,
-          tax_value = $5,
-          formula = $6,
-          tax_label = $7,
-          tax_note = $8,
-          metadata = $9::jsonb,
-          is_active = $10,
-          updated_by = $11,
+      set tax_category = $2,
+          tax_applicable_on = $3,
+          tax_applicability = $4,
+          tax_type = $5,
+          tax_value = $6,
+          formula = $7,
+          tax_label = $8,
+          tax_note = $9,
+          metadata = $10::jsonb,
+          is_active = $11,
+          updated_by = $12,
           updated_at = now()
       where id = $1 and coalesce(is_deleted, false) = false
       returning id
     `,
     [
       id,
+      normalized.taxCategory,
       normalized.taxApplicableOn,
       normalized.taxApplicability,
       normalized.taxType,
@@ -3357,6 +3422,143 @@ export async function updatePaymentModeRule(id: string, input: PaymentModeInput)
 export async function deletePaymentModeRule(id: string, userId: string) {
   await ensurePaymentModeSchema();
   return softDelete("zigo.payment_mode_masters", id, userId);
+}
+
+type PgTransactionChargeInput = {
+  paymentMode: string;
+  chargeType?: "percent" | "flat";
+  chargeValue?: number;
+  description?: string | null;
+  isActive?: boolean;
+  userId: string;
+};
+
+function normalizePgTransactionChargeInput(input: PgTransactionChargeInput) {
+  const paymentMode = String(input.paymentMode || "other").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const chargeType = input.chargeType === "flat" ? "flat" : "percent";
+  const chargeValue = Math.max(0, Number(input.chargeValue || 0));
+  return {
+    paymentMode: paymentMode || "other",
+    chargeType,
+    chargeValue: Number.isFinite(chargeValue) ? Math.round(chargeValue * 10000) / 10000 : 0,
+    description: input.description?.trim() || null,
+    isActive: input.isActive ?? true
+  };
+}
+
+export function normalizePgTransactionPaymentMode(paymentMode: unknown, cardType?: unknown) {
+  const method = String(paymentMode || "other").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (method === "upi") return "upi";
+  if (["netbanking", "net_banking", "internet_banking"].includes(method)) return "net_banking";
+  if (["wallet", "paylater"].includes(method)) return "wallet";
+  if (method === "cash" || method === "cod" || method === "cash_on_delivery") return "cash";
+  if (method === "card" || method === "cards") {
+    const type = String(cardType || "").trim().toLowerCase();
+    if (type === "debit") return "debit_card";
+    if (type === "credit") return "credit_card";
+  }
+  if (["debit", "debit_card"].includes(method)) return "debit_card";
+  if (["credit", "credit_card"].includes(method)) return "credit_card";
+  return method || "other";
+}
+
+export async function listPgTransactionChargeMasters() {
+  await ensurePgTransactionChargeSchema();
+  const result = await pool.query(`
+    select id,
+      payment_mode as "paymentMode",
+      charge_type as "chargeType",
+      charge_value as "chargeValue",
+      description,
+      is_active as "isActive",
+      created_at as "createdAt",
+      updated_at as "updatedAt"
+    from zigo.pg_transaction_charge_masters
+    where coalesce(is_deleted, false) = false
+    order by is_active desc, payment_mode
+  `);
+  return result.rows.map((row) => ({
+    ...row,
+    chargeValue: Number(row.chargeValue || 0)
+  }));
+}
+
+export async function createPgTransactionChargeMaster(input: PgTransactionChargeInput) {
+  await ensurePgTransactionChargeSchema();
+  const normalized = normalizePgTransactionChargeInput(input);
+  const result = await pool.query(
+    `
+      insert into zigo.pg_transaction_charge_masters
+        (payment_mode, charge_type, charge_value, description, is_active, created_by, updated_by)
+      values ($1, $2, $3, $4, $5, $6, $6)
+      returning id
+    `,
+    [normalized.paymentMode, normalized.chargeType, normalized.chargeValue, normalized.description, normalized.isActive, input.userId]
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function updatePgTransactionChargeMaster(id: string, input: PgTransactionChargeInput) {
+  await ensurePgTransactionChargeSchema();
+  const normalized = normalizePgTransactionChargeInput(input);
+  const result = await pool.query(
+    `
+      update zigo.pg_transaction_charge_masters
+      set payment_mode = $2,
+          charge_type = $3,
+          charge_value = $4,
+          description = $5,
+          is_active = $6,
+          updated_by = $7,
+          updated_at = now()
+      where id = $1 and coalesce(is_deleted, false) = false
+      returning id
+    `,
+    [id, normalized.paymentMode, normalized.chargeType, normalized.chargeValue, normalized.description, normalized.isActive, input.userId]
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function deletePgTransactionChargeMaster(id: string, userId: string) {
+  await ensurePgTransactionChargeSchema();
+  return softDelete("zigo.pg_transaction_charge_masters", id, userId);
+}
+
+export async function resolvePgTransactionCharge(input: {
+  paymentMode?: unknown;
+  cardType?: unknown;
+  amountPaise: number;
+}) {
+  await ensurePgTransactionChargeSchema();
+  const paymentMode = normalizePgTransactionPaymentMode(input.paymentMode, input.cardType);
+  const result = await pool.query(`
+    select id,
+      payment_mode as "paymentMode",
+      charge_type as "chargeType",
+      charge_value as "chargeValue"
+    from zigo.pg_transaction_charge_masters
+    where lower(payment_mode) = $1
+      and coalesce(is_deleted, false) = false
+      and is_active = true
+    order by updated_at desc
+    limit 1
+  `, [paymentMode]);
+  const row = result.rows[0] || null;
+  const chargeType = row?.chargeType === "flat" ? "flat" : "percent";
+  const chargeValue = Math.max(0, Number(row?.chargeValue || 0));
+  const baseAmountPaise = Math.max(0, Math.round(Number(input.amountPaise || 0)));
+  const chargeAmountPaise = chargeType === "flat"
+    ? Math.max(0, Math.round(chargeValue * 100))
+    : Math.max(0, Math.round(baseAmountPaise * Math.min(100, chargeValue) / 100));
+  return {
+    masterId: row?.id || null,
+    paymentMode,
+    chargeType,
+    chargeValue: Number.isFinite(chargeValue) ? Math.round(chargeValue * 10000) / 10000 : 0,
+    baseAmountPaise,
+    chargeAmountPaise,
+    configured: Boolean(row)
+  };
 }
 
 type CategoryPriceInput = {

@@ -11,11 +11,12 @@ import { runBookingOrchestrationCycle } from "../operations/bookingEngine.js";
 import { enqueueTrackingOutboxEvent } from "../operations/trackingOutbox.js";
 import { pokeBookingOrchestrationWorker } from "../operations/bookingOrchestrator.js";
 import { getBookingEngineSetting } from "../settings/settings.repository.js";
-import { addCustomerPortalCartItem, assertActivePortalSession, approvePortalTimeExtension, cancelCustomerPortalBooking, createCustomerPortalBooking, createCustomerPortalBookingAddOnOrder, createCustomerPortalCashExtension, createCustomerPortalTipOrder, completeCustomerPortalBookingAddOn, createCustomerPortalDispute, createPortalTaskUpdate, deleteCustomerPortalCartItem, deleteCustomerPortalAddress, getCustomerPortalBookingAvailability, getCustomerPortalDefaultLocation, getCustomerPortalBooking, getCustomerPortalCatalog, getCustomerPortalWallet, getCustomerPortalWalletTransaction, getCustomerPortalCart, getPortalConfig, getPortalMe, geocodeCustomerPortalLocation, listPortalBookingQuickReplies, listCustomerPortalAddresses, listCustomerPortalPreviousUsedLocations, listCustomerPortalServiceBoundaries, recordAssistantPortalLocationPing, confirmAssistantPortalArrival, getAssistantPortalLiveTracking, recordCustomerPortalUnserviceableLocation, refreshPortalSession, listAssistantPortalTasks, getAssistantPortalDashboard, listCustomerPortalAssistants, listCustomerPortalBookings, listCustomerPortalWalletTransactions, loginAssistantPortalWithPassword, markPortalBookingTaskUpdatesRead, requestPortalCode, reverseCustomerPortalLocation, saveCustomerPortalAddress, saveCustomerPortalDefaultLocation, saveCustomerPortalPreviousUsedLocation, setCustomerPortalDefaultAddress, saveCustomerPortalCart, searchCustomerPortalLocations, sendAssistantPasswordResetCode, setAssistantPortalOnline, startAssistantPortalJob, saveCustomerPortalBookingReview, saveCustomerPortalFavorites, updateAssistantPortalTaskStatus, updateCustomerPortalProfile, updateCustomerPortalBookingTip, updateCustomerPortalAddress, validateCustomerPortalLocation, verifyAssistantPasswordResetCode, verifyPortalCode, verifyPortalToken } from "./portal.repository.js";
+import { addCustomerPortalCartItem, assertActivePortalSession, approvePortalTimeExtension, cancelCustomerPortalBooking, createCustomerPortalBooking, quoteCustomerPortalBooking, createCustomerPortalBookingAddOnOrder, createCustomerPortalBookingStopOrder, createCustomerPortalCashExtension, createCustomerPortalCashStopAddition, createCustomerPortalTipOrder, completeCustomerPortalBookingAddOn, createCustomerPortalDispute, createPortalTaskUpdate, deleteCustomerPortalCartItem, deleteCustomerPortalAddress, getCustomerPortalBookingAvailability, getCustomerPortalDeliveryQuote, quoteCustomerPortalBookingStop, getCustomerPortalDefaultLocation, getCustomerPortalBooking, getCustomerPortalCatalog, getCustomerPortalWallet, getCustomerPortalWalletTransaction, getCustomerPortalCart, getPortalConfig, getPortalMe, geocodeCustomerPortalLocation, listPortalBookingQuickReplies, listCustomerPortalAddresses, listCustomerPortalPreviousUsedLocations, listCustomerPortalServiceBoundaries, recordAssistantPortalLocationPing, confirmAssistantPortalArrival, getAssistantPortalLiveTracking, recordCustomerPortalUnserviceableLocation, refreshPortalSession, listAssistantPortalTasks, getAssistantPortalDashboard, listCustomerPortalAssistants, listCustomerPortalBookings, listCustomerPortalWalletTransactions, loginAssistantPortalWithPassword, markPortalBookingTaskUpdatesRead, requestPortalCode, reverseCustomerPortalLocation, saveCustomerPortalAddress, saveCustomerPortalDefaultLocation, saveCustomerPortalPreviousUsedLocation, setCustomerPortalDefaultAddress, saveCustomerPortalCart, searchCustomerPortalLocations, sendAssistantPasswordResetCode, setAssistantPortalOnline, startAssistantPortalJob, saveCustomerPortalBookingReview, saveCustomerPortalFavorites, updateAssistantPortalTaskStatus, updateCustomerPortalProfile, updateCustomerPortalBookingTip, updateCustomerPortalAddress, validateCustomerPortalLocation, verifyAssistantPasswordResetCode, verifyPortalCode, verifyPortalToken } from "./portal.repository.js";
 import { pokeBookingInvoiceEmailWorker } from "./bookingInvoice.worker.js";
 import { saveDocumentUpload } from "../settings/settings.repository.js";
 import { createRazorpayPaymentOrder, getCustomerRazorpayOrderStatus, verifyAndSaveRazorpayPayment } from "../payments/payments.repository.js";
 import { addAssistantSupportMessage, addCustomerSupportMessage, createAssistantSupportTicket, createCustomerSupportTicket, getAssistantSupportTicket, getCustomerSupportTicket, listCustomerSupportTickets } from "../support/support.repository.js";
+import { identifyCustomerServices } from "../ai/serviceIdentifier.js";
 export const portalRouter = Router();
 const actorParamsSchema = z.object({ actor: z.enum(["customer", "assistant"]) });
 const codeRequestBodySchema = z.object({
@@ -56,6 +57,10 @@ const customerCatalogQuerySchema = z.object({
     serviceId: z.string().uuid().optional(),
     categoryId: z.string().uuid().optional(),
     q: z.string().trim().max(120).optional()
+});
+const customerAiServiceIdentificationSchema = z.object({
+    query: z.string().trim().min(3, "Tell us what you need.").max(2000),
+    clusterId: z.string().uuid().nullable().optional()
 });
 const customerBookingsQuerySchema = z.object({
     tab: z.enum(["all", "working", "assigned", "upcoming", "completed", "cancelled"]).default("all"),
@@ -168,6 +173,28 @@ const customerBookingAvailabilityBodySchema = z.object({
     waitWindowMinutes: z.coerce.number().int().min(0).max(1440).optional().default(0),
     latitude: z.coerce.number().min(-90).max(90).nullable().optional(),
     longitude: z.coerce.number().min(-180).max(180).nullable().optional()
+});
+const customerDeliveryQuoteBodySchema = z.object({
+    clusterId: z.string().uuid().nullable().optional(),
+    locations: z.array(z.object({
+        address: z.string().trim().max(2000).optional(),
+        label: z.string().trim().max(200).optional(),
+        latitude: z.coerce.number().min(-90).max(90),
+        longitude: z.coerce.number().min(-180).max(180)
+    }).passthrough()).min(1).max(50)
+});
+const customerLiveBookingStopSchema = z.object({
+    address: z.string().trim().min(3).max(2000),
+    label: z.string().trim().max(200).nullable().optional(),
+    latitude: z.coerce.number().min(-90).max(90),
+    longitude: z.coerce.number().min(-180).max(180),
+    addressId: z.string().uuid().nullable().optional(),
+    clusterId: z.string().uuid().nullable().optional(),
+    source: z.string().trim().max(40).nullable().optional()
+});
+const customerLiveBookingStopBodySchema = z.object({
+    stop: customerLiveBookingStopSchema,
+    extensionMinutes: z.coerce.number().int().min(0).max(240).default(0)
 });
 const customerBookingTipBodySchema = z.object({
     amountPaise: z.coerce.number().int().min(0).max(100000)
@@ -329,6 +356,16 @@ async function customerCanAccessBooking(bookingId, customerUserId) {
       ) as "exists"
     `, [bookingId, customerUserId]);
     return Boolean(result.rows[0]?.exists);
+}
+async function assignedAssistantIdForBooking(bookingId) {
+    const result = await pool.query(`
+    select ta.assistant_id as "assistantId"
+    from zigo.service_requests sr
+    left join zigo.task_assignments ta on ta.id = sr.accepted_assignment_id
+    where sr.id = $1::uuid
+    limit 1
+  `, [bookingId]);
+    return result.rows[0]?.assistantId || null;
 }
 async function listCustomerBookingRealtimeEventsAfter(customerUserId, lastEventId, limit = 100) {
     const afterId = Math.max(0, Math.floor(Number(lastEventId || 0)) || 0);
@@ -809,6 +846,15 @@ portalRouter.get("/customer/catalog", requirePortalAuth("customer"), async (req,
         next(error);
     }
 });
+portalRouter.post("/customer/ai/identify-services", requirePortalAuth("customer"), async (req, res, next) => {
+    try {
+        const body = customerAiServiceIdentificationSchema.parse(req.body);
+        res.json({ data: await identifyCustomerServices(body.query, body.clusterId || null) });
+    }
+    catch (error) {
+        next(error);
+    }
+});
 portalRouter.get("/customer/locations/search", requirePortalAuth("customer"), async (req, res, next) => {
     try {
         const query = locationSearchQuerySchema.parse(req.query);
@@ -1026,10 +1072,28 @@ portalRouter.post("/customer/bookings", requirePortalAuth("customer"), async (re
         next(error);
     }
 });
+portalRouter.post("/customer/bookings/quote", requirePortalAuth("customer"), async (req, res, next) => {
+    try {
+        const body = bookingBodySchema.parse(req.body);
+        res.json({ data: await quoteCustomerPortalBooking(req.portalAuth.userId, body) });
+    }
+    catch (error) {
+        next(error);
+    }
+});
 portalRouter.post("/customer/bookings/availability", requirePortalAuth("customer"), async (req, res, next) => {
     try {
         const body = customerBookingAvailabilityBodySchema.parse(req.body);
         res.json({ data: await getCustomerPortalBookingAvailability(req.portalAuth.userId, body) });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+portalRouter.post("/customer/bookings/delivery-quote", requirePortalAuth("customer"), async (req, res, next) => {
+    try {
+        const body = customerDeliveryQuoteBodySchema.parse(req.body);
+        res.json({ data: await getCustomerPortalDeliveryQuote(req.portalAuth.userId, body) });
     }
     catch (error) {
         next(error);
@@ -1059,7 +1123,41 @@ portalRouter.post("/customer/bookings/:bookingId/extensions/cash", requirePortal
         const params = z.object({ bookingId: z.string().uuid() }).parse(req.params);
         const body = z.object({ durationMinutes: z.coerce.number().int().min(1).max(240) }).parse(req.body);
         const data = await createCustomerPortalCashExtension(req.portalAuth.userId, { bookingId: params.bookingId, durationMinutes: body.durationMinutes });
-        await emitBookingRealtimeEvent({ type: "booking.updated", bookingId: params.bookingId, message: "Service extension added for cash payment", payload: { bookingId: params.bookingId, customerUserId: req.portalAuth.userId, addOn: data } });
+        const assistantId = await assignedAssistantIdForBooking(params.bookingId);
+        await emitBookingRealtimeEvent({ type: "booking.updated", bookingId: params.bookingId, assistantId: assistantId || undefined, message: "Service extension added for cash payment", payload: { bookingId: params.bookingId, customerUserId: req.portalAuth.userId, assistantId, addOn: data } });
+        res.status(201).json({ data });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+portalRouter.post("/customer/bookings/:bookingId/stops/quote", requirePortalAuth("customer"), async (req, res, next) => {
+    try {
+        const params = z.object({ bookingId: z.string().uuid() }).parse(req.params);
+        const body = customerLiveBookingStopBodySchema.parse(req.body);
+        res.json({ data: await quoteCustomerPortalBookingStop(req.portalAuth.userId, { bookingId: params.bookingId, stop: body.stop, extensionMinutes: body.extensionMinutes }) });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+portalRouter.post("/customer/bookings/:bookingId/stops/razorpay-order", requirePortalAuth("customer"), async (req, res, next) => {
+    try {
+        const params = z.object({ bookingId: z.string().uuid() }).parse(req.params);
+        const body = customerLiveBookingStopBodySchema.parse(req.body);
+        res.status(201).json({ data: await createCustomerPortalBookingStopOrder(req.portalAuth.userId, { bookingId: params.bookingId, stop: body.stop, extensionMinutes: body.extensionMinutes }) });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+portalRouter.post("/customer/bookings/:bookingId/stops/cash", requirePortalAuth("customer"), async (req, res, next) => {
+    try {
+        const params = z.object({ bookingId: z.string().uuid() }).parse(req.params);
+        const body = customerLiveBookingStopBodySchema.parse(req.body);
+        const data = await createCustomerPortalCashStopAddition(req.portalAuth.userId, { bookingId: params.bookingId, stop: body.stop, extensionMinutes: body.extensionMinutes });
+        const assistantId = await assignedAssistantIdForBooking(params.bookingId);
+        await emitBookingRealtimeEvent({ type: "booking.updated", bookingId: params.bookingId, assistantId: assistantId || undefined, message: "New stop added to booking", payload: { bookingId: params.bookingId, customerUserId: req.portalAuth.userId, assistantId, addOn: data, stop: data.stop } });
         res.status(201).json({ data });
     }
     catch (error) {
@@ -1080,7 +1178,8 @@ portalRouter.post("/customer/bookings/:bookingId/add-ons/:addOnId/complete", req
     try {
         const params = z.object({ bookingId: z.string().uuid(), addOnId: z.string().uuid() }).parse(req.params);
         const data = await completeCustomerPortalBookingAddOn(req.portalAuth.userId, params);
-        await emitBookingRealtimeEvent({ type: "booking.updated", bookingId: params.bookingId, message: data.kind === "tip" ? "Customer tip paid" : "Service extension paid", payload: { bookingId: params.bookingId, customerUserId: req.portalAuth.userId, addOn: data } });
+        const assistantId = await assignedAssistantIdForBooking(params.bookingId);
+        await emitBookingRealtimeEvent({ type: "booking.updated", bookingId: params.bookingId, assistantId: assistantId || undefined, message: data.kind === "tip" ? "Customer tip paid" : data.kind === "stop" ? "New stop added to booking" : "Service extension paid", payload: { bookingId: params.bookingId, customerUserId: req.portalAuth.userId, assistantId, addOn: data } });
         res.json({ data });
     }
     catch (error) {
@@ -1178,9 +1277,14 @@ portalRouter.post("/customer/bookings/:bookingId/cancel", requirePortalAuth("cus
                     bookingId: data.bookingId,
                     customerUserId: req.portalAuth.userId,
                     assistantId: data.assistantId,
-                    reason: body.reason,
+                    reason: data.reason,
                     reasonCode: data.reasonCode,
                     delayMinutes: data.delayMinutes,
+                    cancelledBy: data.cancelledBy || "customer",
+                    cancellationSource: data.cancellationSource || "customer_portal",
+                    cancellationType: data.cancellationType || "customer_cancelled",
+                    autoCancelled: false,
+                    cancelledAt: data.cancelledAt,
                     source: "customer_portal"
                 }
             });

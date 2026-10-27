@@ -14166,6 +14166,179 @@ body.portal-customer .customer-review-notification-stack > .portal-toast.is-revi
   font-size: 12px;
 }
 
+.portal-customer .customer-ai-finder {
+  display: grid;
+  gap: 10px;
+  margin: 14px 14px 4px;
+  padding: 14px;
+  border: 1px solid #dce8fb;
+  border-radius: 18px;
+  background: #f7faff;
+}
+
+.portal-customer .customer-ai-finder-heading {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.portal-customer .customer-ai-finder-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.portal-customer .customer-ai-finder-heading b {
+  color: #111936;
+  font-family: "Inter_bold", Inter, ui-sans-serif, system-ui;
+  font-size: 14px;
+}
+
+.portal-customer .customer-ai-finder-heading small {
+  color: #66708a;
+  font-size: 11px;
+}
+
+.portal-customer .customer-ai-finder-icon,
+.portal-customer .customer-ai-result-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border-radius: 50%;
+  background: #e3efff;
+  color: #075eea;
+}
+
+.portal-customer .customer-ai-finder textarea {
+  width: 100%;
+  min-height: 62px;
+  resize: vertical;
+  padding: 11px 12px;
+  border: 1px solid #dce5f2;
+  border-radius: 12px;
+  outline: 0;
+  background: #fff;
+  color: #111936;
+  font: 13px/1.4 "Inter_regular", Inter, ui-sans-serif, system-ui;
+}
+
+.portal-customer .customer-ai-finder textarea:focus {
+  border-color: #075eea;
+  box-shadow: 0 0 0 3px rgba(7, 94, 234, 0.1);
+}
+
+.portal-customer .customer-ai-find-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
+  border: 0;
+  border-radius: 11px;
+  background: #075eea;
+  color: #fff;
+  font-family: "Inter_bold", Inter, ui-sans-serif, system-ui;
+  font-size: 13px;
+}
+
+.portal-customer .customer-ai-find-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.portal-customer .customer-ai-state {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 2px 0;
+  color: #53627d;
+  font-size: 12px;
+}
+
+.portal-customer .customer-ai-state.error {
+  color: #b42318;
+}
+
+.portal-customer .customer-ai-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid #b9d2f8;
+  border-top-color: #075eea;
+  border-radius: 50%;
+  animation: customer-ai-spin 0.7s linear infinite;
+}
+
+@keyframes customer-ai-spin {
+  to { transform: rotate(360deg); }
+}
+
+.portal-customer .customer-ai-results {
+  display: grid;
+  gap: 8px;
+  padding-top: 3px;
+}
+
+.portal-customer .customer-ai-results-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #111936;
+  font-size: 12px;
+}
+
+.portal-customer .customer-ai-results-heading small {
+  color: #66708a;
+  font-size: 11px;
+}
+
+.portal-customer .customer-ai-result-card {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 18px;
+  gap: 9px;
+  align-items: center;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #e0e9f6;
+  border-radius: 13px;
+  background: #fff;
+  color: #111936;
+  text-align: left;
+}
+
+.portal-customer .customer-ai-result-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.portal-customer .customer-ai-result-copy b {
+  overflow: hidden;
+  font-family: "Inter_bold", Inter, ui-sans-serif, system-ui;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portal-customer .customer-ai-result-copy small,
+.portal-customer .customer-ai-result-copy em {
+  overflow: hidden;
+  color: #66708a;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portal-customer .customer-ai-result-copy em {
+  color: #075eea;
+}
+
+.portal-customer .customer-ai-result-arrow {
+  color: #075eea;
+}
+
 .portal-customer .zigo-commerce-home .zigo-home-body {
   gap: 14px;
   padding: 14px 14px calc(28px + var(--safe-bottom));
@@ -19382,6 +19555,17 @@ body.portal-customer .customer-review-notification-stack > .portal-toast.is-revi
   white-space: nowrap;
 }
 
+.portal-customer .customer-track-cancellation-source {
+  display: block;
+  max-width: 100%;
+  color: #be123c;
+  font-size: 11px;
+  line-height: 1.2;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .portal-customer .customer-track-chat-name-row {
   min-width: 0;
   display: flex;
@@ -20519,6 +20703,19 @@ body.portal-customer:has(.customer-track-page)::-webkit-scrollbar {
 .portal-customer .customer-track-page .customer-track-media-card .customer-track-location-card {
   max-height: 172px;
   padding: 10px 8px 10px 10px;
+}
+
+.portal-customer .customer-track-page .customer-track-location-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #edf1f7;
+}
+
+.portal-customer .customer-track-page .customer-track-location-actions .customer-route-add-stop {
+  margin-top: 0;
 }
 
 .portal-customer .customer-track-page .customer-track-media-card .customer-track-upload-strip {
@@ -22139,6 +22336,17 @@ body.portal-customer .customer-cart-bill-summary small {
   font-weight: 700;
 }
 
+body.portal-customer .customer-cart-bill-summary .customer-cart-savings {
+  width: fit-content;
+  margin: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #e9f9ef;
+  color: #138a4b;
+  font-size: 11px;
+  font-weight: 800;
+}
+
 body.portal-customer .customer-cart-bill-summary button {
   width: 34px;
   height: 34px;
@@ -22185,10 +22393,19 @@ body.portal-customer .customer-cart-bill-row {
 }
 
 body.portal-customer .customer-cart-bill-row > span {
+  flex: 1 1 auto;
   min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.portal-customer .customer-cart-bill-row > span small {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 body.portal-customer .customer-cart-bill-row i {
@@ -22225,6 +22442,126 @@ body.portal-customer .customer-cart-bill-row strong {
   font-size: 14px;
   font-weight: 700;
   white-space: nowrap;
+}
+
+body.portal-customer .customer-cart-delivery-bill-amount {
+  display: inline-grid;
+  flex: 0 0 auto;
+  justify-items: end;
+  align-items: center;
+  grid-template-rows: auto auto;
+  gap: 3px;
+  width: max-content;
+  max-width: 100%;
+}
+
+body.portal-customer .customer-cart-delivery-price-line {
+  display: inline-flex;
+  grid-row: 2;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-cart-delivery-offer {
+  display: inline-flex;
+  grid-row: 1;
+  justify-self: end;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: #dcfce7;
+  color: #15803d;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+body.portal-customer .customer-cart-delivery-original {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+body.portal-customer .customer-cart-delivery-offer em {
+  color: #15803d;
+  font-style: normal;
+}
+
+body.portal-customer .customer-cart-addon-amount {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-cart-addon-amount del {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+body.portal-customer .customer-cart-addon-amount em {
+  color: #15803d;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+body.portal-customer .customer-cart-addon-detail-row {
+  align-items: flex-start;
+}
+
+body.portal-customer .customer-cart-addon-detail-row > span:first-child {
+  min-width: 0;
+  line-height: 1.35;
+}
+
+body.portal-customer .customer-cart-addon-pricing {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-cart-addon-discount-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #15803d;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+body.portal-customer .customer-cart-addon-price-line {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-cart-addon-price-line del {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+body.portal-customer .customer-cart-addon-price-line strong {
+  color: #111827;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+body.portal-customer .customer-cart-delivery-price-line > strong {
+  color: #111827;
 }
 
 body.portal-customer .customer-cart-bill-total {
@@ -22835,6 +23172,25 @@ body.portal-customer .customer-pay-amount em {
   font-size: 12px;
   font-style: normal;
   font-weight: 950;
+}
+
+body.portal-customer .customer-pay-amount {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+body.portal-customer .customer-pay-amount .customer-pay-savings {
+  order: 0;
+  margin: 0;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-pay-final-amount {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
 }
 
 body.portal-customer .customer-pay-submit {
@@ -24769,6 +25125,257 @@ body.portal-customer .customer-track-extension-loading {
 body.portal-customer .customer-track-extension-loading.is-error {
   color: #b42318;
 }
+
+body.portal-customer .customer-track-add-stop-sheet {
+  max-height: min(88dvh, 720px);
+}
+
+body.portal-customer .customer-track-add-stop-copy,
+body.portal-customer .customer-track-add-stop-question span {
+  color: #52627a;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+body.portal-customer .customer-track-add-stop-reminder {
+  display: grid;
+  margin: 0 0 12px;
+  padding: 11px 12px;
+  border: 1px solid #d7e5fb;
+  border-radius: 13px;
+  background: #f7fbff;
+  color: #52627a;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+body.portal-customer .customer-track-add-stop-reminder strong {
+  color: #0754c9;
+  font-size: 13px;
+}
+
+body.portal-customer .customer-track-add-stop-start-actions {
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  gap: 12px;
+  margin: 4px auto 12px;
+  padding-top: 14px;
+  border-top: 1px solid #e8edf5;
+}
+
+body.portal-customer .customer-track-add-stop-start-actions > button {
+  flex: 1 1 0;
+  max-width: none;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 17px;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-track-add-stop-start-actions > button .customer-lucide {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+
+body.portal-customer .customer-track-add-stop-extend {
+  border: 1px solid #123b75;
+  background: #123b75;
+  color: #ffffff;
+  font: inherit;
+  font-family: "Inter_bold", Inter, ui-sans-serif, system-ui;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+body.portal-customer .customer-track-add-stop-extend:active {
+  background: #0d2d58;
+}
+
+body.portal-customer .customer-track-add-stop-extend:disabled {
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+body.portal-customer .customer-track-add-stop-start-actions .customer-track-extension-proceed {
+  border: 1px solid var(--zigo-blue, #075eea);
+  background: #ffffff;
+  color: var(--zigo-blue, #075eea);
+}
+
+body.portal-customer .customer-track-add-stop-start-actions .customer-track-extension-proceed:active {
+  background: #f2f7ff;
+}
+
+body.portal-customer .customer-track-add-stop-start-actions .customer-track-extension-proceed:disabled {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #94a3b8;
+  opacity: 0.8;
+}
+
+body.portal-customer .customer-track-add-stop-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0 0 12px;
+  padding: 10px 11px;
+  border: 1px solid #e1e7f0;
+  border-radius: 11px;
+  background: #fff;
+  color: #52627a;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+body.portal-customer .customer-track-add-stop-consent input {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  margin: 1px 0 0;
+  accent-color: var(--zigo-blue, #075eea);
+}
+
+body.portal-customer .customer-track-add-stop-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  margin: 0 0 12px;
+  padding: 0 12px;
+  border: 1px solid #dfe4ec;
+  border-radius: 13px;
+  background: #f8fafc;
+}
+
+body.portal-customer .customer-track-add-stop-search svg {
+  width: 18px;
+  color: #075eea;
+  flex: 0 0 auto;
+}
+
+body.portal-customer .customer-track-add-stop-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #17233c;
+  font: inherit;
+}
+
+body.portal-customer .customer-track-add-stop-search button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #e5ebf4;
+  color: #52627a;
+}
+
+body.portal-customer .customer-track-add-stop-search button[hidden] { display: none; }
+
+body.portal-customer .customer-track-add-stop-results {
+  display: grid;
+  gap: 8px;
+  max-height: 42dvh;
+  overflow-y: auto;
+}
+
+body.portal-customer .customer-track-add-stop-result {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #e5eaf2;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #17233c;
+  text-align: left;
+  font: inherit;
+}
+
+body.portal-customer .customer-track-add-stop-result > span:first-child {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: #edf4ff;
+  color: #075eea;
+}
+
+body.portal-customer .customer-track-add-stop-result b,
+body.portal-customer .customer-track-add-stop-result small,
+body.portal-customer .customer-track-add-stop-selected span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-track-add-stop-result small {
+  margin-top: 3px;
+  color: #6b7890;
+  font-size: 12px;
+}
+
+body.portal-customer .customer-track-add-stop-selected,
+body.portal-customer .customer-track-add-stop-question {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 13px;
+  padding: 12px;
+  border-radius: 13px;
+  background: #f5f8fc;
+}
+
+body.portal-customer .customer-track-add-stop-selected span { color: #52627a; font-size: 13px; }
+body.portal-customer .customer-track-add-stop-question { border: 1px solid #d7e5fb; background: #f7fbff; }
+body.portal-customer .customer-track-add-stop-question strong { color: #17233c; font-size: 14px; }
+
+body.portal-customer .customer-track-add-stop-extension-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 190px;
+  overflow-y: auto;
+  margin: 0 -2px 14px;
+}
+
+body.portal-customer .customer-track-add-stop-extension-grid .customer-track-extension-duration {
+  min-height: 72px;
+  border-radius: 12px;
+}
+
+body.portal-customer .customer-track-add-stop-charge {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid #e8edf5;
+  color: #52627a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+body.portal-customer .customer-track-add-stop-charge strong { color: #07112b; }
 /* Track Booking: active service countdown, driven by the persisted task window. */
 .portal-customer .customer-track-working-countdown {
   display: grid;
@@ -26057,4 +26664,336 @@ body.portal-customer .customer-location-search-result-card.is-resolving::after {
 @media (max-width:380px) {
   .assistant-track-page .assistant-chat-dock { padding-left:10px; padding-right:10px; }
   .assistant-track-page .assistant-chat-name-status b { max-width:90px; }
+}
+
+/* Customer Track Booking: Review Booking-style service summary card. */
+body.portal-customer .customer-track-services-panel {
+  padding: 14px;
+  border: 1px solid #dfe5ee;
+  border-radius: 20px;
+  background: #ffffff;
+}
+
+body.portal-customer .customer-track-services-panel .track-services-list {
+  display: block;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-item {
+  padding: 12px 0 0;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-item + .track-service-item {
+  margin-top: 14px;
+  border-top: 1px solid #e8edf4;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  min-height: 72px;
+  padding: 0;
+  border: 0;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-item:first-child {
+  padding-top: 0;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-item:last-child {
+  padding-bottom: 0;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-image {
+  width: 72px;
+  height: 72px;
+  box-sizing: border-box;
+  padding: 4px;
+  border: 1px solid #dfe5ee;
+  border-radius: 16px;
+  background: #eef3f9;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-image img,
+body.portal-customer .customer-track-services-panel .track-service-photo-art {
+  width: 100%;
+  height: 100%;
+  border-radius: 12px;
+  object-fit: cover;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-copy {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-copy h3.track-service-title-line {
+  display: block;
+  margin: 0;
+  color: #07183c;
+  font-size: 18px;
+  line-height: 1.1;
+  font-weight: 850;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-title-part {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-booking-mode {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #075eea;
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 800;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-booking-mode .customer-track-svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.4;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-duration {
+  color: #65738a;
+  font-size: 13px;
+  line-height: 1.1;
+  font-weight: 500;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-price {
+  display: grid;
+  justify-items: end;
+  align-content: start;
+  gap: 4px;
+  padding-top: 3px;
+  color: #07183c;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-price strong {
+  color: #07183c;
+  font-size: 21px;
+  line-height: 1;
+  font-weight: 900;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-price del {
+  color: #8a95a8;
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 700;
+  text-decoration-thickness: 1px;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-price small {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #e4f7eb;
+  color: #21864d;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 850;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-timing {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  padding-top: 11px;
+  border-top: 1px solid #e8edf4;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-timing .customer-booking-timing-row {
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-timing .customer-booking-timing-row > span {
+  color: #6d7b91 !important;
+  font-size: 13px !important;
+  line-height: 1.25;
+  font-weight: 650 !important;
+}
+
+body.portal-customer .customer-track-services-panel .track-service-timing .customer-booking-timing-row > b {
+  overflow: hidden;
+  color: #07183c !important;
+  font-size: 14px !important;
+  line-height: 1.25;
+  font-weight: 850 !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 380px) {
+  body.portal-customer .customer-track-services-panel .track-service-row {
+    grid-template-columns: 62px minmax(0, 1fr) auto;
+    gap: 10px;
+  }
+
+  body.portal-customer .customer-track-services-panel .track-service-image {
+    width: 62px;
+    height: 62px;
+    border-radius: 14px;
+  }
+
+  body.portal-customer .customer-track-services-panel .track-service-copy h3.track-service-title-line {
+    font-size: 16px;
+  }
+
+  body.portal-customer .customer-track-services-panel .track-service-price strong {
+    font-size: 19px;
+  }
+
+  body.portal-customer .customer-track-services-panel .track-service-timing .customer-booking-timing-row {
+    grid-template-columns: 86px minmax(0, 1fr);
+  }
+}
+
+/* Track Booking bill card follows the compact Review Booking billing pattern. */
+body.portal-customer .customer-track-bill-card {
+  display: block;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid #dbe4f2;
+  border-radius: 18px;
+  background: #ffffff;
+}
+
+body.portal-customer .customer-track-bill-head {
+  min-height: 94px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  gap: 14px;
+  align-items: center;
+  padding: 18px 20px;
+  border: 0;
+}
+
+body.portal-customer .customer-track-bill-head-copy {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+body.portal-customer .customer-track-bill-head b {
+  color: #111936;
+  font-size: 17px;
+  line-height: 1.15;
+  font-weight: 850;
+}
+
+body.portal-customer .customer-track-bill-head small {
+  margin: 0;
+  color: #006cff;
+  font-size: 13px;
+  line-height: 1.15;
+  font-weight: 750;
+}
+
+body.portal-customer .customer-track-bill-head button {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #f1f5f9;
+  color: #111936;
+}
+
+body.portal-customer .customer-track-bill-head button .customer-track-svg {
+  width: 19px;
+  height: 19px;
+  stroke-width: 3;
+}
+
+body.portal-customer .customer-track-bill-rows {
+  max-height: 900px;
+  overflow: hidden;
+  padding: 0 20px 8px;
+  opacity: 1;
+  transition: max-height 280ms ease, opacity 200ms ease, padding 280ms ease;
+}
+
+body.portal-customer .customer-track-bill-row,
+body.portal-customer .customer-track-bill-rows .customer-track-bill-row:nth-of-type(2),
+body.portal-customer .customer-track-bill-rows .customer-track-bill-row:nth-of-type(3) {
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border-top: 1px dashed #dce5ef;
+  border-bottom: 0;
+  color: #253044;
+}
+
+body.portal-customer .customer-track-bill-row > span {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: #253044;
+  font-size: 14px;
+  line-height: 1.2;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-track-bill-row > b {
+  color: #111936;
+  font-size: 14px;
+  line-height: 1.2;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+body.portal-customer .customer-track-bill-row.total {
+  min-height: 76px;
+  border-top: 1px solid #dbe4f2;
+}
+
+body.portal-customer .customer-track-bill-row.total > span,
+body.portal-customer .customer-track-bill-row.total > b {
+  color: #111936;
+  font-size: 16px;
+  font-weight: 850;
+}
+
+body.portal-customer .customer-track-bill-card.is-collapsed .customer-track-bill-head {
+  min-height: 94px;
+  padding: 18px 20px;
+  border: 0;
+}
+
+body.portal-customer .customer-track-bill-card.is-collapsed .customer-track-bill-rows {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.portal-customer .customer-cart-tax-addon-note {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.2;
+  font-weight: 600;
 }

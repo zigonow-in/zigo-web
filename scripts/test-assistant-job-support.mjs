@@ -79,8 +79,9 @@ const startJobHandler = portalSource.slice(
   portalSource.indexOf('const earlyTaskButton = event.target.closest("[data-task-status]")')
 );
 assert.doesNotMatch(startJobHandler, /if \(!state\.assistantIsOnline\)[\s\S]*?return;/);
-assert.match(startJobHandler, /locationSync\?\.data\?\.onlineIntent === false/);
 assert.match(startJobHandler, /setAssistantOnlineStatus\(true, point, requestId\)/);
+assert.match(startJobHandler, /Refresh the server-side heartbeat\/GPS state/);
+assert.match(startJobHandler, /\/portal\/assistant\/location-pings/);
 
 assert.match(supportRepository, /zigo\.assistant_support_tickets/);
 assert.match(supportRepository, /zigo\.assistant_support_messages/);
@@ -100,7 +101,7 @@ assert.match(migration, /create table if not exists zigo\.assistant_support_mess
 assert.doesNotMatch(migration, /\b(drop|truncate|delete\s+from)\b/i);
 assert.match(portalHtml, /portal\.css\?v=[a-z0-9-]+/i);
 assert.match(portalHtml, /portal\.js\?v=[a-z0-9-]+/i);
-assert.match(adminHtml, /styles\.css\?v=assistant-support-20261015/);
-assert.match(adminHtml, /app\.js\?v=assistant-support-20261015/);
+assert.match(adminHtml, /styles\.css\?v=ai-work-query-20261018/);
+assert.match(adminHtml, /app\.js\?v=ai-work-query-20261018/);
 
 console.log("Assistant lifecycle and support: action gating, persisted travel phase, realtime chat, Admin workspace and additive migration passed");

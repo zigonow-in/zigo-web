@@ -16,6 +16,7 @@ const isLocalTarget = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(target
 const statusOnly = process.argv.includes("--status");
 const localMode = process.argv.includes("--local");
 const productionMode = process.argv.includes("--production");
+const allowDestructive = process.argv.includes("--allow-destructive");
 const confirmedHost = optionValue("--confirm-host");
 
 if (localMode && productionMode) throw new Error("Choose either --local or --production, not both.");
@@ -93,7 +94,7 @@ async function loadMigrations() {
   for (const name of names) {
     const filePath = path.join(migrationsDir, name);
     const sql = await readFile(filePath, "utf8");
-    assertAdditiveMigration(name, sql);
+    assertAdditiveMigration(name, sql, allowDestructive || statusOnly);
     const compatibleChecksums = migrationChecksumVariants(sql);
     migrations.push({
       id: name.replace(/\.sql$/, ""),
@@ -117,7 +118,7 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function assertAdditiveMigration(name, sql) {
+function assertAdditiveMigration(name, sql, allowDestructive) {
   const withoutComments = sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--.*$/gm, " ");
   const forbidden = [
     /\bdrop\s+(table|schema|database)\b/i,
@@ -126,7 +127,8 @@ function assertAdditiveMigration(name, sql) {
     /\balter\s+table[\s\S]{0,200}\bdrop\s+column\b/i,
     /\bvacuum\s+full\b/i
   ];
-  if (forbidden.some((pattern) => pattern.test(withoutComments))) {
+  const isExplicitlyDestructive = name.endsWith(".destructive.sql");
+  if (forbidden.some((pattern) => pattern.test(withoutComments)) && !(allowDestructive && isExplicitlyDestructive)) {
     throw new Error(`Destructive SQL is not allowed in release migration ${name}.`);
   }
   if (name.endsWith(".nontransactional.sql")) {
@@ -213,7 +215,65 @@ async function verifyReleaseSchema(database) {
     "wallet_settlements",
     "customer_wallet_transactions",
     "assistant_support_tickets",
-    "assistant_support_messages"
+    "assistant_support_messages",
+    "service_pillars",
+    "service_pillar_mappings",
+    "service_category_masters",
+    "service_category_pillar_mappings",
+    "service_category_service_mappings",
+    "task_definitions",
+    "service_task_mappings",
+    "task_input_definitions",
+    "workflow_templates",
+    "workflow_steps",
+    "capabilities",
+    "task_capability_requirements",
+    "validation_rules",
+    "duration_rules",
+    "task_pricing_rules",
+    "question_templates",
+    "completion_rules",
+    "policy_rules",
+    "exception_types",
+    "service_zones",
+    "task_zone_availability",
+    "booking_modes",
+    "assistant_capabilities",
+    "assistant_availability_windows",
+    "customer_requests",
+    "bookings",
+    "booking_tasks",
+    "booking_task_inputs",
+    "booking_task_dependencies",
+    "quotes",
+    "quote_lines",
+    "assignments",
+    "booking_task_events",
+    "completion_evidence",
+    "expense_items",
+    "operational_exceptions",
+    "ai_conversations",
+    "ai_messages",
+    "ai_interpretations",
+    "clarification_requests",
+    "validation_results",
+    "audit_logs",
+    "system_settings",
+    "task_primitives",
+    "task_primitive_mappings",
+    "task_templates",
+    "task_template_steps",
+    "intent_catalogue",
+    "intent_task_mappings",
+    "intent_examples",
+    "unmatched_request_queue",
+    "support_decisions",
+    "master_change_proposals",
+    "master_versions",
+    "booking_pricing_policies",
+    "booking_execution_plans",
+    "pg_transaction_charge_masters",
+    "booking_item_charge_lines"
   ];
   const requiredColumns = [
     ["booking_task_update_reads", "delivered_at"],
@@ -232,7 +292,19 @@ async function verifyReleaseSchema(database) {
     ["nano_markets", "polygon_description"],
     ["nano_markets", "market_type_id"],
     ["market_types", "color"],
-    ["nano_market_types", "sort_order"]
+    ["nano_market_types", "sort_order"],
+    ["services", "default_booking_mode"],
+    ["services", "status"],
+    ["payments", "booking_id"],
+    ["payments", "quote_id"],
+    ["refunds", "reason"],
+    ["refunds", "status"],
+    ["booking_billing_snapshots", "pg_transaction_charge_master_id"],
+    ["booking_billing_snapshots", "pg_transaction_payment_mode"],
+    ["booking_billing_snapshots", "pg_transaction_charge_type"],
+    ["booking_billing_snapshots", "pg_transaction_charge_value"],
+    ["booking_billing_snapshots", "pg_transaction_charge_base_paise"],
+    ["booking_billing_snapshots", "pg_transaction_charge_paise"]
   ];
   const columns = await database.query(`
     select table_name, column_name
@@ -269,7 +341,8 @@ async function verifyReleaseSchema(database) {
     "idx_wallet_settlements_customer_created",
     "idx_service_requests_created_at",
     "idx_service_requests_customer_created_at",
-    "idx_service_requests_paid_created_at"
+    "idx_service_requests_paid_created_at",
+    "idx_booking_billing_snapshots_pg_charge"
   ];
   const indexes = await database.query(`
     select ci.relname as indexname

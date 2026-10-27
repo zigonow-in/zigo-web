@@ -5,7 +5,7 @@ import { isSuperAdmin, requirePermission } from "../../http/auth.js";
 import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
 import { getAssistantMasterSetting, getBookingCartMixSetting, getBookingEngineSetting, getBookingExtensionPolicy, getBookingLiveSyncSetting, getBookingTypeAutomationSetting, getMediaPaths, getOtpProviderSettings, saveDocumentUpload, saveImageUpload, updateAssistantMasterSetting, updateBookingCartMixSetting, updateBookingEngineSetting, updateBookingExtensionPolicy, updateBookingLiveSyncSetting, updateBookingTypeAutomationSetting, updateMediaPaths, updateOtpProviderSettings } from "./settings.repository.js";
-import { validateAssistantDistanceSlabs } from "./assistantMasterSettings.js";
+import { validateAssistantDistanceOfferSlabs, validateAssistantDistanceSlabs } from "./assistantMasterSettings.js";
 
 export const settingsRouter = Router();
 
@@ -155,18 +155,26 @@ const assistantDistanceSlabSchema = z.object({
   rateType: z.enum(["fixed", "per_km"]),
   ratePaise: z.number().int().min(0).max(100_000_000)
 });
+const assistantDistanceOfferSlabSchema = z.object({
+  maxDistanceKm: z.coerce.number().gt(0).max(10000),
+  discountType: z.enum(["percent", "flat"]),
+  discountValue: z.coerce.number().min(0).max(100_000_000)
+});
 const assistantMasterBodySchema = z.object({
   broadcastTimeSeconds: z.coerce.number().int().min(5).max(600),
   autoArrivedRadiusMeters: z.coerce.number().int().min(10).max(5000),
   dryRunDistanceKm: z.coerce.number().min(0).max(500),
   travelCostBasePaise: z.coerce.number().int().min(0).max(100_000_000).default(3000),
   travelCostSlabs: z.array(assistantDistanceSlabSchema).min(1).max(20),
-  assistantTravelPayoutSlabs: z.array(assistantDistanceSlabSchema).min(1).max(20)
+  assistantTravelPayoutSlabs: z.array(assistantDistanceSlabSchema).min(1).max(20),
+  deliveryOfferSlabs: z.array(assistantDistanceOfferSlabSchema).max(20).default([])
 }).superRefine((value, context) => {
   const costError = validateAssistantDistanceSlabs(value.travelCostSlabs);
   if (costError) context.addIssue({ code: z.ZodIssueCode.custom, message: costError, path: ["travelCostSlabs"] });
   const payoutError = validateAssistantDistanceSlabs(value.assistantTravelPayoutSlabs);
   if (payoutError) context.addIssue({ code: z.ZodIssueCode.custom, message: payoutError, path: ["assistantTravelPayoutSlabs"] });
+  const offerError = validateAssistantDistanceOfferSlabs(value.deliveryOfferSlabs);
+  if (offerError) context.addIssue({ code: z.ZodIssueCode.custom, message: offerError, path: ["deliveryOfferSlabs"] });
 });
 
 function requireAnyPermission(permissionCodes: string[]) {

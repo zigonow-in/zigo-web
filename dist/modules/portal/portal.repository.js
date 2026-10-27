@@ -15,9 +15,13 @@ import { createBookingByAdmin, geocodeBookingLocation, getBookingAvailabilityDec
 import { olaBrowserConfig, requestOlaJson } from "../maps/olaMaps.service.js";
 import { createRazorpayPaymentOrder, findCustomerPaidRazorpayPaymentByReference, getCustomerRazorpayOrderStatus, linkRazorpayPaymentToBooking } from "../payments/payments.repository.js";
 import { getAssistantMasterSetting, getBookingEngineSetting } from "../settings/settings.repository.js";
+import { calculateAssistantDistanceSlabs } from "../settings/assistantMasterSettings.js";
 import { getCustomerWallet, getCustomerWalletTransaction, listCustomerWalletTransactions } from "../wallets/wallet.repository.js";
 import { getUserById, sendEmailOtp, sendUserOtpChallenge, verifyUserOtpChallenge } from "../users/users.repository.js";
 import { enqueueCustomerBookingInvoice } from "./bookingInvoice.service.js";
+import { ensureAddOnChargeSchema, listActiveAddOnChargeMasters } from "../addons/addons.repository.js";
+import { parseWktPolygon, isPointInPolygon } from "../../utils/geofence.js";
+import { locationClustersCanInterserve } from "../masters/locationHierarchy.repository.js";
 function normalizeCustomerPaymentType(value) {
     const normalized = String(value || "cash").trim().toLowerCase().replace(/[\s-]+/g, "_");
     if (["cash", "cod", "cash_on_delivery"].includes(normalized))
@@ -57,6 +61,14 @@ function addMinutes(date, minutes) {
 function isRunningCustomerExtensionStatus(value) {
     const status = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
     return ["working", "in_progress", "approval_pending"].includes(status);
+}
+function isCustomerLiveStopBookingStatus(value) {
+    const status = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    return [
+        "pending", "queued", "confirmed", "payment_pending", "paid", "hold", "on_hold",
+        "reserved", "offered", "assigned", "accepted", "processing", "working",
+        "in_progress", "on_the_way", "approval_pending", "active", "started", "start_working"
+    ].includes(status);
 }
 function assertCustomerExtensionCutoff(booking, policy) {
     if (!policy.disableExtendBeforeEndEnabled)
@@ -248,7 +260,7 @@ function ensurePortalSchema(_client = pool) {
       id uuid primary key default gen_random_uuid(),
       service_request_id uuid not null references zigo.service_requests(id) on delete cascade,
       customer_user_id uuid not null references zigo.users(id) on delete cascade,
-      kind text not null check (kind in ('extension', 'tip')),
+      kind text not null check (kind in ('extension', 'tip', 'stop')),
       duration_minutes integer,
       base_amount_paise integer not null default 0,
       discount_amount_paise integer not null default 0,
@@ -265,6 +277,53 @@ function ensurePortalSchema(_client = pool) {
       updated_at timestamptz not null default now()
     );
     create index if not exists idx_booking_add_on_payments_booking on zigo.booking_add_on_payments(service_request_id, created_at desc);
+    alter table zigo.booking_add_on_payments
+      add column if not exists raw_gross_amount_paise bigint not null default 0,
+      add column if not exists raw_net_amount_paise bigint not null default 0,
+      add column if not exists taxable_after_discount_paise bigint not null default 0,
+      add column if not exists amount_after_discount_paise bigint not null default 0,
+      add column if not exists inclusive_tax_amount_paise bigint not null default 0,
+      add column if not exists exclusive_tax_amount_paise bigint not null default 0,
+      add column if not exists rounding_adjustment_paise bigint not null default 0;
+
+    alter table zigo.booking_add_on_payments drop constraint if exists booking_add_on_payments_kind_check;
+    alter table zigo.booking_add_on_payments add constraint booking_add_on_payments_kind_check check (kind in ('extension', 'tip', 'stop'));
+
+    create table if not exists zigo.booking_extension_slots (
+      id uuid primary key default gen_random_uuid(),
+      service_request_id uuid not null references zigo.service_requests(id) on delete cascade,
+      customer_user_id uuid references zigo.users(id) on delete set null,
+      sequence_no integer not null default 1,
+      previous_duration_minutes integer not null default 0,
+      added_duration_minutes integer not null default 0,
+      total_duration_minutes integer not null default 0,
+      previous_end_at timestamptz,
+      extended_end_at timestamptz,
+      previous_available_at timestamptz,
+      extended_available_at timestamptz,
+      amount_paise integer not null default 0,
+      metadata jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now()
+    );
+    create index if not exists idx_booking_extension_slots_booking on zigo.booking_extension_slots(service_request_id, sequence_no, created_at desc);
+
+    create table if not exists zigo.booking_stop_additions (
+      id uuid primary key default gen_random_uuid(),
+      service_request_id uuid not null references zigo.service_requests(id) on delete cascade,
+      customer_user_id uuid references zigo.users(id) on delete set null,
+      request_location_id uuid references zigo.request_locations(id) on delete set null,
+      sequence_no integer not null,
+      address text not null,
+      latitude numeric(10,7),
+      longitude numeric(10,7),
+      distance_meters integer not null default 0,
+      delivery_amount_paise integer not null default 0,
+      extension_minutes integer not null default 0,
+      total_amount_paise integer not null default 0,
+      metadata jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now()
+    );
+    create index if not exists idx_booking_stop_additions_booking on zigo.booking_stop_additions(service_request_id, sequence_no, created_at desc);
   `).then(() => undefined).catch((error) => {
         portalSchemaReady = null;
         throw error;
@@ -457,6 +516,9 @@ function rupeeToPaise(value, fallback = 0) {
     if (!Number.isFinite(amount))
         return fallback;
     return Math.max(0, Math.round(amount * 100));
+}
+function roundPaiseToRupee(value) {
+    return Math.max(0, Math.round(paiseValue(value) / 100) * 100);
 }
 function dateValue(...values) {
     for (const value of values) {
@@ -1146,6 +1208,7 @@ export async function getPortalConfig() {
         listTaxMasterRules(),
         listPaymentModeRules()
     ]);
+    const addonCharges = await listActiveAddOnChargeMasters();
     return {
         serverNow: new Date().toISOString(),
         bookingEngine: {
@@ -1162,6 +1225,7 @@ export async function getPortalConfig() {
         adminOverride: settings.adminOverride,
         communication: settings.communication,
         taxRules: taxRules.filter((rule) => rule.isActive),
+        addonCharges,
         paymentMethodsConfigured: paymentModes.length > 0,
         paymentMethods: paymentModes.filter((method) => method.isActive)
     };
@@ -1649,35 +1713,332 @@ function portalBookingMoneyPaise(value, fallback = 0) {
 function portalBookingRecord(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
-async function resolveCustomerPortalTaxPricing(baseAmount, sellingAmount) {
+function customerBookingLocationsMetadata(metadata, stops) {
+    const current = portalBookingRecord(metadata?.bookingLocations) || {};
+    return {
+        ...current,
+        mode: stops.length > 1 ? "multi" : String(current.mode || "current"),
+        selectedCount: stops.length,
+        stops: stops.map((stop) => ({
+            addressId: stop.addressId || null,
+            label: stop.label || "Stop",
+            address: stop.address || "",
+            latitude: stop.latitude ?? null,
+            longitude: stop.longitude ?? null,
+            clusterId: stop.clusterId || null,
+            clusterName: stop.clusterName || "",
+            cityName: stop.cityName || "",
+            zoneName: stop.zoneName || "",
+            source: stop.source || "customer_portal",
+            sequence: stop.sequence,
+            isPrimary: Boolean(stop.isPrimary),
+            locationType: stop.locationType || "stop_point"
+        }))
+    };
+}
+function portalAddOnScopeMatches(addon, locationScope = {}) {
+    const scopeType = String(addon.scopeType || "all").toLowerCase();
+    if (scopeType === "all")
+        return true;
+    const fieldByScope = {
+        state: "stateId",
+        city: "cityId",
+        zone: "zoneId",
+        cluster: "clusterId",
+        micro_market: "microMarketId",
+        nano_market: "nanoMarketId"
+    };
+    const field = fieldByScope[scopeType];
+    if (!field)
+        return true;
+    const configuredId = addon[field];
+    const locationId = locationScope[field];
+    return Boolean(configuredId && locationId && String(configuredId) === String(locationId));
+}
+async function resolvePortalLocationScope(input) {
+    const clusterId = String(input.clusterId || "").trim();
+    if (!clusterId)
+        return {};
+    const latitude = Number(input.latitude);
+    const longitude = Number(input.longitude);
+    const result = await pool.query(`
+    select
+      city.state_id as "stateId",
+      cl.city_id as "cityId",
+      cl.zone_id as "zoneId",
+      cl.id as "clusterId",
+      micro.id as "microMarketId",
+      micro.polygon_description as "microPolygon",
+      nano.id as "nanoMarketId",
+      nano.polygon_description as "nanoPolygon"
+    from zigo.clusters cl
+    left join zigo.cities city on city.id = cl.city_id
+    left join zigo.micro_markets micro on micro.cluster_id = cl.id and coalesce(micro.is_deleted, false) = false
+    left join zigo.nano_markets nano on nano.micro_market_id = micro.id and coalesce(nano.is_deleted, false) = false
+    where cl.id = $1::uuid and coalesce(cl.is_deleted, false) = false
+    order by micro.name, nano.name
+  `, [clusterId]);
+    const first = result.rows[0];
+    if (!first)
+        return {};
+    const scope = {
+        stateId: first.stateId,
+        cityId: first.cityId,
+        zoneId: first.zoneId,
+        clusterId: first.clusterId
+    };
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude))
+        return scope;
+    for (const row of result.rows) {
+        if (!row.microMarketId || !row.microPolygon)
+            continue;
+        const microPolygon = parseWktPolygon(row.microPolygon);
+        if (microPolygon.length < 4 || !isPointInPolygon(latitude, longitude, microPolygon))
+            continue;
+        scope.microMarketId = row.microMarketId;
+        if (row.nanoMarketId && row.nanoPolygon) {
+            const nanoPolygon = parseWktPolygon(row.nanoPolygon);
+            if (nanoPolygon.length >= 4 && isPointInPolygon(latitude, longitude, nanoPolygon)) {
+                scope.nanoMarketId = row.nanoMarketId;
+            }
+        }
+        break;
+    }
+    return scope;
+}
+function portalAddOnAppliesToCustomer(addon, bookingCount = 0) {
+    const applicableOn = String(addon.applicableOn || "all_customer").toLowerCase();
+    if (applicableOn === "new_customer")
+        return bookingCount === 0;
+    if (applicableOn === "old_customer")
+        return bookingCount > 1;
+    return true;
+}
+function portalAddOnDiscount(grossAmountPaise, slabs) {
+    const amount = Math.max(0, Math.round(grossAmountPaise));
+    if (!Array.isArray(slabs) || amount <= 0)
+        return { type: "none", value: 0, amountPaise: 0 };
+    const match = slabs
+        .map((slab) => slab && typeof slab === "object" ? slab : null)
+        .filter(Boolean)
+        .sort((left, right) => Number(left?.maxAmount || 0) - Number(right?.maxAmount || 0))
+        .find((slab) => amount / 100 <= Number(slab?.maxAmount || 0));
+    if (!match)
+        return { type: "none", value: 0, amountPaise: 0 };
+    const type = match.discountType === "flat" ? "flat" : "percent";
+    const value = Math.max(0, Number(match.discountValue || 0));
+    const amountPaise = type === "flat"
+        ? Math.min(amount, Math.round(value * 100))
+        : Math.min(amount, Math.round(amount * Math.min(100, value) / 100));
+    return { type, value: type === "percent" ? Math.min(100, value) : value, amountPaise };
+}
+function portalAddOnBaseAmount(addon, baseAmount, sellingAmount) {
+    const percentageBase = String(addon.percentageBase || "selling_price");
+    if (percentageBase === "task_base_price")
+        return Math.max(0, Number(baseAmount || 0));
+    if (percentageBase === "customer_price")
+        return Math.max(0, Number(addon.customerPrice || 0));
+    return Math.max(0, Number(sellingAmount || 0));
+}
+function resolvePortalAddOnLines(input) {
+    const lines = [];
+    for (const addon of input.addons) {
+        if (addon.isActive === false
+            || !portalAddOnAppliesToCustomer(addon, input.customerBookingCount)
+            || !portalAddOnScopeMatches(addon, input.locationScope))
+            continue;
+        const addonType = String(addon.addonType || "service").toLowerCase();
+        if (addonType === "delivery") {
+            if (String(input.deliveryQuote.deliveryOfferAddonId || "") !== String(addon.id || ""))
+                continue;
+            const grossAmountPaise = Math.max(0, Math.round(Number(input.deliveryQuote.originalDeliveryChargesPaise || 0)));
+            if (grossAmountPaise <= 0)
+                continue;
+            const discountAmountPaise = Math.min(grossAmountPaise, Math.max(0, Math.round(Number(input.deliveryQuote.deliveryDiscountPaise || 0))));
+            lines.push({
+                id: addon.id || null,
+                addonType,
+                scope: String(addon.scopeLabel || addon.scopeType || addon.scope || "all"),
+                scopeType: String(addon.scopeType || "all"),
+                stateId: addon.stateId || null,
+                cityId: addon.cityId || null,
+                zoneId: addon.zoneId || null,
+                clusterId: addon.clusterId || null,
+                microMarketId: addon.microMarketId || null,
+                nanoMarketId: addon.nanoMarketId || null,
+                title: String(addon.title || "Delivery"),
+                label: String(addon.label || addon.title || "Delivery"),
+                applicableOn: String(addon.applicableOn || "all_customer"),
+                costType: "distance_offer",
+                percentageBase: null,
+                baseAmountPaise: grossAmountPaise,
+                grossAmountPaise,
+                discountType: input.deliveryQuote.deliveryDiscountType || "none",
+                discountValue: Number(input.deliveryQuote.deliveryDiscountValue || 0),
+                discountAmountPaise,
+                netAmountPaise: Math.max(0, grossAmountPaise - discountAmountPaise),
+                metadata: {
+                    source: "delivery_distance_offer",
+                    maxDistanceKm: input.deliveryQuote.deliveryOfferMaxDistanceKm,
+                    scopeLabel: addon.scopeLabel || "All locations"
+                }
+            });
+            continue;
+        }
+        const costType = addon.costType === "percent" ? "percent" : "flat";
+        const baseAmount = portalAddOnBaseAmount(addon, input.baseAmount, input.sellingAmount);
+        const grossAmountPaise = costType === "percent"
+            ? Math.round(baseAmount * Math.max(0, Math.min(100, Number(addon.costValue || 0))) / 100 * 100)
+            : Math.round(Math.max(0, Number(addon.costValue || 0)) * 100);
+        const discount = portalAddOnDiscount(grossAmountPaise, addon.discountSlabs);
+        lines.push({
+            id: addon.id || null,
+            addonType,
+            scope: String(addon.scopeLabel || addon.scopeType || addon.scope || "all"),
+            scopeType: String(addon.scopeType || "all"),
+            stateId: addon.stateId || null,
+            cityId: addon.cityId || null,
+            zoneId: addon.zoneId || null,
+            clusterId: addon.clusterId || null,
+            microMarketId: addon.microMarketId || null,
+            nanoMarketId: addon.nanoMarketId || null,
+            title: String(addon.title || addon.label || "Add-on"),
+            label: String(addon.label || addon.title || "Add-on"),
+            applicableOn: String(addon.applicableOn || "all_customer"),
+            costType,
+            percentageBase: costType === "percent" ? String(addon.percentageBase || "selling_price") : null,
+            baseAmountPaise: Math.round(baseAmount * 100),
+            grossAmountPaise,
+            discountType: discount.type,
+            discountValue: discount.value,
+            discountAmountPaise: discount.amountPaise,
+            netAmountPaise: Math.max(0, grossAmountPaise - discount.amountPaise),
+            metadata: {
+                source: "addon_charge_master",
+                customerPrice: addon.customerPrice ?? null,
+                scopeLabel: addon.scopeLabel || "All locations"
+            }
+        });
+    }
+    return lines;
+}
+async function customerPortalBookingCount(customerId) {
+    const result = await pool.query("select count(*)::text as count from zigo.service_requests where customer_id = $1::uuid", [customerId]);
+    return Math.max(0, Number(result.rows[0]?.count || 0));
+}
+async function resolveCustomerPortalTaxPricing(baseAmount, sellingAmount, deliveryAmount = 0, addonLines = []) {
     const rules = (await listTaxMasterRules()).filter((rule) => rule.isActive);
-    const taxRows = rules.map((rule) => {
-        const applicablePrice = rule.taxApplicableOn === "base_price" ? baseAmount : sellingAmount;
+    const rawAddonLines = addonLines.map((line) => ({
+        ...line,
+        rawGrossAmountPaise: Math.max(0, Math.round(Number(line.rawGrossAmountPaise ?? line.grossAmountPaise ?? 0))),
+        rawNetAmountPaise: Math.max(0, Math.round(Number(line.rawNetAmountPaise ?? line.netAmountPaise ?? 0)))
+    }));
+    const addonTaxByIndex = new Map();
+    const addonExclusiveTaxByIndex = new Map();
+    const addonGrossTaxByIndex = new Map();
+    const taxAmountPaiseForRule = (taxableAmountPaise, rule) => {
+        const taxable = Math.max(0, Number(taxableAmountPaise || 0));
+        if (taxable <= 0)
+            return 0;
         const taxValue = Math.max(0, Number(rule.taxValue || 0));
-        let amount = 0;
-        if (rule.taxType === "flat") {
-            amount = taxValue;
+        if (rule.taxType === "flat")
+            return Math.max(0, Math.round(taxValue * 100));
+        if (rule.taxApplicability === "inclusive") {
+            return Math.max(0, Math.round((taxable / 100) * taxValue / (100 + taxValue || 1) * 100));
         }
-        else if (rule.taxApplicability === "inclusive") {
-            amount = applicablePrice * taxValue / (100 + taxValue || 1);
+        return Math.max(0, Math.round((taxable / 100) * taxValue / 100 * 100));
+    };
+    const taxRows = rules.map((rule) => {
+        const taxCategory = String(rule.taxCategory || "service").trim().toLowerCase();
+        const matchedLines = rawAddonLines
+            .map((line, index) => ({ line, index }))
+            .filter(({ line }) => taxCategory !== "task" && line.addonType === taxCategory);
+        const lineAddonTaxablePaise = matchedLines.reduce((sum, { line }) => sum + Number(line.rawNetAmountPaise || 0), 0);
+        const configuredDeliveryPaise = Math.max(0, Math.round(Number(deliveryAmount || 0) * 100));
+        const addonTaxablePaise = taxCategory === "delivery"
+            ? Math.max(configuredDeliveryPaise, lineAddonTaxablePaise)
+            : lineAddonTaxablePaise;
+        const itemTaxablePaise = ["task", "service"].includes(taxCategory)
+            ? Math.max(0, Math.round((rule.taxApplicableOn === "base_price" ? baseAmount : sellingAmount) * 100))
+            : 0;
+        const applicablePricePaise = itemTaxablePaise + addonTaxablePaise;
+        const taxValue = Math.max(0, Number(rule.taxValue || 0));
+        const amountPaise = taxAmountPaiseForRule(applicablePricePaise, rule);
+        const addonTaxAmountPaise = applicablePricePaise > 0
+            ? Math.min(addonTaxablePaise, Math.max(0, Math.round(amountPaise * addonTaxablePaise / applicablePricePaise)))
+            : 0;
+        if (rule.taxApplicability === "inclusive" && addonTaxablePaise > 0 && matchedLines.length) {
+            const grossLineAddonTaxablePaise = matchedLines.reduce((sum, { line }) => sum + Number(line.rawGrossAmountPaise || 0), 0);
+            const grossApplicablePricePaise = itemTaxablePaise + Math.max(grossLineAddonTaxablePaise, taxCategory === "delivery" ? configuredDeliveryPaise : 0);
+            const grossTaxAmountPaise = taxAmountPaiseForRule(grossApplicablePricePaise, rule);
+            const grossAddonTaxAmountPaise = grossApplicablePricePaise > 0
+                ? Math.min(grossLineAddonTaxablePaise, Math.max(0, Math.round(grossTaxAmountPaise * grossLineAddonTaxablePaise / grossApplicablePricePaise)))
+                : 0;
+            matchedLines.forEach(({ line, index }) => {
+                const rawNet = Number(line.rawNetAmountPaise || 0);
+                const rawGross = Number(line.rawGrossAmountPaise || 0);
+                addonTaxByIndex.set(index, Number(addonTaxByIndex.get(index) || 0) + (addonTaxablePaise > 0 ? addonTaxAmountPaise * rawNet / addonTaxablePaise : 0));
+                addonGrossTaxByIndex.set(index, Number(addonGrossTaxByIndex.get(index) || 0) + (grossLineAddonTaxablePaise > 0 ? grossAddonTaxAmountPaise * rawGross / grossLineAddonTaxablePaise : 0));
+            });
         }
-        else {
-            amount = applicablePrice * taxValue / 100;
+        if (rule.taxApplicability !== "inclusive" && addonTaxablePaise > 0 && matchedLines.length) {
+            matchedLines.forEach(({ line, index }) => {
+                const rawNet = Number(line.rawNetAmountPaise || 0);
+                addonExclusiveTaxByIndex.set(index, Number(addonExclusiveTaxByIndex.get(index) || 0)
+                    + (addonTaxablePaise > 0 ? amountPaise * rawNet / addonTaxablePaise : 0));
+            });
         }
-        const amountPaise = portalBookingMoneyPaise(amount);
         return {
             id: rule.id,
-            label: rule.taxLabel || "GST & Service Fees",
+            label: rule.taxLabel || "Services",
             note: rule.taxNote || "",
+            taxCategory,
             applicableOn: rule.taxApplicableOn === "base_price" ? "base_price" : "selling_price",
             applicability: rule.taxApplicability === "inclusive" ? "inclusive" : "exclusive",
             taxType: rule.taxType === "flat" ? "flat" : "percent",
             taxValue,
             formula: rule.formula || rule.metadata?.formula || "",
             amount: amountPaise / 100,
-            amountPaise
+            amountPaise,
+            addonTaxAmountPaise: Math.max(0, Math.round(addonTaxAmountPaise)),
+            addonInclusiveTaxAmountPaise: rule.taxApplicability === "inclusive" ? Math.max(0, Math.round(addonTaxAmountPaise)) : 0,
+            addonExclusiveTaxAmountPaise: rule.taxApplicability === "inclusive" ? 0 : Math.max(0, Math.round(addonTaxAmountPaise)),
+            itemTaxAmountPaise: Math.max(0, amountPaise - Math.round(addonTaxAmountPaise)),
+            taxableAmount: Math.max(0, Math.round(applicablePricePaise))
         };
     }).filter((row) => row.amountPaise > 0);
+    const resolvedAddonLines = rawAddonLines.map((line, index) => {
+        const rawNetAmountPaise = Math.max(0, Math.round(Number(line.rawNetAmountPaise || 0)));
+        const rawGrossAmountPaise = Math.max(0, Math.round(Number(line.rawGrossAmountPaise || 0)));
+        const inclusiveTaxAmountPaise = Math.min(rawNetAmountPaise, Math.max(0, Math.round(Number(addonTaxByIndex.get(index) || 0))));
+        const inclusiveGrossTaxAmountPaise = Math.min(rawGrossAmountPaise, Math.max(0, Math.round(Number(addonGrossTaxByIndex.get(index) || 0))));
+        const exclusiveTaxAmountPaise = Math.max(0, Math.round(Number(addonExclusiveTaxByIndex.get(index) || 0)));
+        return {
+            ...line,
+            rawGrossAmountPaise,
+            rawNetAmountPaise,
+            grossAmountPaise: Math.max(0, rawGrossAmountPaise - inclusiveGrossTaxAmountPaise),
+            netAmountPaise: Math.max(0, rawNetAmountPaise - inclusiveTaxAmountPaise),
+            inclusiveTaxAmountPaise,
+            exclusiveTaxAmountPaise,
+            taxAmountPaise: inclusiveTaxAmountPaise + exclusiveTaxAmountPaise,
+            taxableAfterDiscountPaise: rawNetAmountPaise,
+            amountAfterDiscountPaise: Math.max(0, rawNetAmountPaise - inclusiveTaxAmountPaise),
+            totalAmountPaise: Math.max(0, rawNetAmountPaise + exclusiveTaxAmountPaise),
+            roundingAdjustmentPaise: 0,
+            metadata: {
+                ...line.metadata,
+                rawGrossAmountPaise,
+                rawNetAmountPaise,
+                inclusiveTaxAmountPaise,
+                exclusiveTaxAmountPaise,
+                taxAmountPaise: inclusiveTaxAmountPaise + exclusiveTaxAmountPaise,
+                taxableAfterDiscountPaise: rawNetAmountPaise,
+                amountAfterDiscountPaise: Math.max(0, rawNetAmountPaise - inclusiveTaxAmountPaise),
+                totalAmountPaise: Math.max(0, rawNetAmountPaise + exclusiveTaxAmountPaise)
+            }
+        };
+    });
     const baseAmountPaise = portalBookingMoneyPaise(baseAmount);
     const sellingAmountPaise = portalBookingMoneyPaise(sellingAmount);
     const inclusiveTaxAmountPaise = taxRows
@@ -1686,15 +2047,42 @@ async function resolveCustomerPortalTaxPricing(baseAmount, sellingAmount) {
     const exclusiveTaxAmountPaise = taxRows
         .filter((row) => row.applicability === "exclusive")
         .reduce((sum, row) => sum + row.amountPaise, 0);
+    const inclusiveAddonTaxAmountPaise = taxRows
+        .filter((row) => row.applicability === "inclusive")
+        .reduce((sum, row) => sum + Number(row.addonTaxAmountPaise || 0), 0);
+    const inclusiveItemTaxAmountPaise = Math.max(0, inclusiveTaxAmountPaise - inclusiveAddonTaxAmountPaise);
+    const exclusiveAddonTaxAmountPaise = taxRows
+        .filter((row) => row.applicability !== "inclusive")
+        .reduce((sum, row) => sum + Number(row.addonTaxAmountPaise || 0), 0);
+    const exclusiveItemTaxAmountPaise = Math.max(0, exclusiveTaxAmountPaise - exclusiveAddonTaxAmountPaise);
+    const addonTotalPaise = resolvedAddonLines
+        .reduce((sum, line) => sum + line.netAmountPaise, 0);
+    const rawAddonTotalPaise = rawAddonLines
+        .reduce((sum, line) => sum + Number(line.rawNetAmountPaise || 0), 0);
     return {
         baseAmountPaise,
         sellingAmountPaise,
         discountAmountPaise: Math.max(0, baseAmountPaise - sellingAmountPaise),
-        itemTotalPaise: Math.max(0, sellingAmountPaise - inclusiveTaxAmountPaise),
+        addonLines: resolvedAddonLines,
+        addonTotalPaise,
+        addonDiscountPaise: resolvedAddonLines.reduce((sum, line) => sum + line.discountAmountPaise, 0),
+        addonTaxableAfterDiscountPaise: resolvedAddonLines.reduce((sum, line) => sum + Number(line.taxableAfterDiscountPaise || 0), 0),
+        addonInclusiveTaxAmountPaise: resolvedAddonLines.reduce((sum, line) => sum + Number(line.inclusiveTaxAmountPaise || 0), 0),
+        addonExclusiveTaxAmountPaise: resolvedAddonLines.reduce((sum, line) => sum + Number(line.exclusiveTaxAmountPaise || 0), 0),
+        rawAddonTotalPaise,
+        itemTotalPaise: Math.max(0, sellingAmountPaise - inclusiveItemTaxAmountPaise),
+        itemTaxableAfterDiscountPaise: sellingAmountPaise,
+        itemTaxInclusivePaise: inclusiveItemTaxAmountPaise,
+        itemTaxExclusivePaise: exclusiveItemTaxAmountPaise,
         taxAmountPaise: inclusiveTaxAmountPaise + exclusiveTaxAmountPaise,
         inclusiveTaxAmountPaise,
         exclusiveTaxAmountPaise,
-        totalAmountPaise: sellingAmountPaise + exclusiveTaxAmountPaise,
+        inclusiveAddonTaxAmountPaise,
+        inclusiveItemTaxAmountPaise,
+        taxDisplayMode: "pre_tax_addons_v1",
+        // Inclusive tax is already part of the raw service/add-on prices; only
+        // exclusive tax is added on top of the amount payable by the customer.
+        totalAmountPaise: sellingAmountPaise + rawAddonTotalPaise + exclusiveTaxAmountPaise,
         taxRows
     };
 }
@@ -1943,6 +2331,7 @@ export async function listCustomerPortalAssistants(userId) {
 export async function listCustomerPortalBookings(userId, input = {}) {
     await ensurePortalSchema();
     await ensureBookingEngineSchema();
+    await ensureAddOnChargeSchema();
     await completeExpiredFinishConfirmations(pool);
     const settings = await getBookingEngineSetting();
     const tab = String(input.tab || "all").toLowerCase();
@@ -2000,13 +2389,47 @@ export async function listCustomerPortalBookings(userId, input = {}) {
           coalesce(bbs.exclusive_tax_amount_paise,
             case when sr.metadata->'pricingBreakdown'->>'exclusiveTaxAmountPaise' ~ '^\d+$' then (sr.metadata->'pricingBreakdown'->>'exclusiveTaxAmountPaise')::bigint end,
             0) as "exclusiveTaxAmountPaise",
+          coalesce(bbs.item_base_price_paise, bbs.base_price_paise, 0) as "itemBasePricePaise",
+          coalesce(bbs.item_discount_paise, bbs.discount_paise, 0) as "itemDiscountPaise",
+          coalesce(bbs.item_selling_price_paise, bbs.selling_price_paise, 0) as "itemSellingPricePaise",
+          coalesce(bbs.item_taxable_after_discount_paise, bbs.selling_price_paise, 0) as "itemTaxableAfterDiscountPaise",
+          coalesce(bbs.item_tax_inclusive_paise, 0) as "itemTaxInclusivePaise",
+          coalesce(bbs.item_tax_exclusive_paise, 0) as "itemTaxExclusivePaise",
+          greatest(
+            coalesce(bbs.addon_total_paise, 0),
+            coalesce(billing_addon_totals.addon_total_paise, 0)
+          ) as "addonTotalPaise",
+          greatest(
+            coalesce(bbs.addon_discount_paise, 0),
+            coalesce(billing_addon_totals.addon_discount_paise, 0)
+          ) as "addonDiscountPaise",
+          coalesce(bbs.addon_taxable_after_discount_paise, 0) as "addonTaxableAfterDiscountPaise",
+          coalesce(bbs.addon_tax_inclusive_paise, 0) as "addonTaxInclusivePaise",
+          coalesce(bbs.addon_tax_exclusive_paise, 0) as "addonTaxExclusivePaise",
+          coalesce(bbs.original_delivery_charges_paise, 0) as "originalDeliveryChargesPaise",
+          coalesce(bbs.delivery_discount_paise, 0) as "deliveryDiscountPaise",
+          coalesce(bbs.delivery_charges_paise, 0) as "deliveryChargesPaise",
+          coalesce(bbs.total_discount_paise, bbs.discount_paise, 0) as "totalDiscountPaise",
+          coalesce(bbs.subtotal_after_discount_paise, 0) as "subtotalAfterDiscountPaise",
+          coalesce(bbs.pre_round_total_paise, 0) as "preRoundTotalPaise",
+          coalesce(bbs.rounding_adjustment_paise, 0) as "roundingAdjustmentPaise",
+          coalesce(bbs.amount_to_pay_paise, bbs.grand_total_paise, 0) as "amountToPayPaise",
           coalesce(bbs.tip_amount_paise,
             case when sr.metadata->'pricingBreakdown'->>'tipAmountPaise' ~ '^\d+$' then (sr.metadata->'pricingBreakdown'->>'tipAmountPaise')::bigint end,
             case when sr.metadata->>'tipAmountPaise' ~ '^\d+$' then (sr.metadata->>'tipAmountPaise')::bigint end,
             0) as "tipAmountPaise",
           coalesce(bbs.grand_total_paise, sr.booking_amount_paise, sr.estimated_amount_paise, 0) as "grandTotalPaise",
+          bbs.pg_transaction_charge_master_id as "pgTransactionChargeMasterId",
+          coalesce(bbs.pg_transaction_payment_mode, sr.payment_type, 'cash') as "pgTransactionPaymentMode",
+          coalesce(bbs.pg_transaction_charge_type, 'percent') as "pgTransactionChargeType",
+          coalesce(bbs.pg_transaction_charge_value, 0) as "pgTransactionChargeValue",
+          coalesce(bbs.pg_transaction_charge_base_paise, 0) as "pgTransactionChargeBasePaise",
+          coalesce(bbs.pg_transaction_charge_paise, 0) as "pgTransactionChargePaise",
           coalesce(bbs.tax_details, sr.metadata->'pricingBreakdown'->'taxRows', sr.payment_details->'taxRows', '[]'::jsonb) as "taxDetails",
           coalesce(bbs.pricing_details, sr.metadata->'pricingBreakdown', '{}'::jsonb) as "billingSnapshot",
+          coalesce(billing_addon_lines.data, '[]'::jsonb) as "billingAddonLines",
+          coalesce(billing_item_lines.data, '[]'::jsonb) as "billingItemLines",
+          coalesce(add_on_payments.data, '[]'::jsonb) as "addOnPayments",
           sr.estimated_amount_paise as "estimatedAmountPaise",
           sr.payment_type as "paymentType",
           sr.payment_status as "paymentStatus",
@@ -2052,6 +2475,70 @@ export async function listCustomerPortalBookings(userId, input = {}) {
         left join zigo.assistants aa on aa.id = ta.assistant_id
         left join zigo.users au on au.id = aa.user_id
         left join lateral (
+          select coalesce(jsonb_agg(jsonb_build_object(
+            'id', bal.id,
+            'addonType', bal.addon_type,
+            'scope', bal.scope,
+            'scopeType', bal.scope_type,
+            'title', bal.title,
+            'label', bal.label,
+            'applicableOn', bal.customer_applicability,
+            'costType', bal.cost_type,
+            'percentageBase', bal.percentage_base,
+            'baseAmountPaise', bal.base_amount_paise,
+            'grossAmountPaise', bal.gross_amount_paise,
+            'discountType', bal.discount_type,
+            'discountValue', bal.discount_value,
+            'discountAmountPaise', bal.discount_amount_paise,
+            'netAmountPaise', bal.net_amount_paise,
+            'rawGrossAmountPaise', bal.raw_gross_amount_paise,
+            'rawNetAmountPaise', bal.raw_net_amount_paise,
+            'taxableAfterDiscountPaise', bal.taxable_after_discount_paise,
+            'amountAfterDiscountPaise', bal.amount_after_discount_paise,
+            'inclusiveTaxAmountPaise', bal.inclusive_tax_amount_paise,
+            'exclusiveTaxAmountPaise', bal.exclusive_tax_amount_paise,
+            'taxAmountPaise', bal.tax_amount_paise,
+            'totalAmountPaise', bal.total_amount_paise,
+            'roundingAdjustmentPaise', bal.rounding_adjustment_paise,
+            'metadata', bal.metadata
+          ) order by bal.created_at asc, bal.id asc), '[]'::jsonb) as data
+          from zigo.booking_addon_charge_lines bal
+          where bal.service_request_id = sr.id
+        ) billing_addon_lines on true
+        left join lateral (
+          select
+            coalesce(sum(coalesce(nullif(bal.amount_after_discount_paise, 0), bal.net_amount_paise)), 0) as addon_total_paise,
+            coalesce(sum(bal.discount_amount_paise), 0) as addon_discount_paise
+          from zigo.booking_addon_charge_lines bal
+          where bal.service_request_id = sr.id
+        ) billing_addon_totals on true
+        left join lateral (
+          select coalesce(jsonb_agg(jsonb_build_object(
+            'id', bil.id,
+            'lineSequence', bil.line_sequence,
+            'itemType', bil.item_type,
+            'serviceId', bil.service_id,
+            'categoryId', bil.category_id,
+            'serviceName', bil.service_name,
+            'categoryName', bil.category_name,
+            'basePricePaise', bil.base_price_paise,
+            'discountType', bil.discount_type,
+            'discountValue', bil.discount_value,
+            'discountAmountPaise', bil.discount_amount_paise,
+            'sellingPricePaise', bil.selling_price_paise,
+            'taxableAfterDiscountPaise', bil.taxable_after_discount_paise,
+            'itemTotalPaise', bil.item_total_paise,
+            'taxInclusivePaise', bil.tax_inclusive_paise,
+            'taxExclusivePaise', bil.tax_exclusive_paise,
+            'taxAmountPaise', bil.tax_amount_paise,
+            'totalAmountPaise', bil.total_amount_paise,
+            'roundingAdjustmentPaise', bil.rounding_adjustment_paise,
+            'metadata', bil.metadata
+          ) order by bil.line_sequence asc, bil.id asc), '[]'::jsonb) as data
+          from zigo.booking_item_charge_lines bil
+          where bil.service_request_id = sr.id
+        ) billing_item_lines on true
+        left join lateral (
           select f.object_key as preview_url
           from zigo.assistant_documents ad
           left join zigo.document_types dt on dt.id = ad.document_type_id
@@ -2083,13 +2570,40 @@ export async function listCustomerPortalBookings(userId, input = {}) {
             and br.customer_user_id = cu.user_id
           limit 1
         ) review on true
+        left join lateral (
+          select coalesce(jsonb_agg(jsonb_build_object(
+            'id', ap.id,
+            'kind', ap.kind,
+            'durationMinutes', ap.duration_minutes,
+            'baseAmountPaise', ap.base_amount_paise,
+            'discountAmountPaise', ap.discount_amount_paise,
+            'sellingAmountPaise', ap.selling_amount_paise,
+            'taxAmountPaise', ap.tax_amount_paise,
+            'totalAmountPaise', ap.total_amount_paise,
+             'rawGrossAmountPaise', ap.raw_gross_amount_paise,
+             'rawNetAmountPaise', ap.raw_net_amount_paise,
+             'taxableAfterDiscountPaise', ap.taxable_after_discount_paise,
+             'amountAfterDiscountPaise', ap.amount_after_discount_paise,
+             'inclusiveTaxAmountPaise', ap.inclusive_tax_amount_paise,
+             'exclusiveTaxAmountPaise', ap.exclusive_tax_amount_paise,
+             'roundingAdjustmentPaise', ap.rounding_adjustment_paise,
+            'statusCode', ap.status_code,
+            'pricing', ap.pricing,
+            'metadata', ap.metadata,
+            'paidAt', ap.paid_at,
+            'createdAt', ap.created_at
+          ) order by ap.created_at asc), '[]'::jsonb) as data
+          from zigo.booking_add_on_payments ap
+          where ap.service_request_id = sr.id
+            and ap.customer_user_id = cu.user_id
+        ) add_on_payments on true
         left join zigo.services s on s.id = sr.service_id
         left join zigo.clusters c on c.id = sr.cluster_id
         left join zigo.request_locations rl on rl.service_request_id = sr.id
         where cu.user_id = $1
         and ($4::uuid is null or sr.id = $4::uuid)
         ${tabClause}
-        group by sr.id, bbs.id, ta.status_code, ta.actual_started_at, ta.assistant_id, au.display_name, au.phone, au.metadata, profile_doc.preview_url, assistant_rating_stats."ratingAvg", assistant_rating_stats."ratingCount", review.data, s.name, c.name, sr.scheduled_at, sr.created_at
+        group by sr.id, bbs.id, billing_addon_lines.data, billing_addon_totals.addon_total_paise, billing_addon_totals.addon_discount_paise, billing_item_lines.data, add_on_payments.data, ta.status_code, ta.actual_started_at, ta.assistant_id, au.display_name, au.phone, au.metadata, profile_doc.preview_url, assistant_rating_stats."ratingAvg", assistant_rating_stats."ratingCount", review.data, s.name, c.name, sr.scheduled_at, sr.created_at
       )
       select *, count(*) over()::int as "totalRecords"
       from bookings
@@ -2227,11 +2741,21 @@ export async function updateCustomerPortalBookingTip(userId, input) {
         const inclusiveTaxAmountPaise = numberValue(booking.snapshotInclusiveTaxAmountPaise, existingPricing.inclusiveTaxAmountPaise);
         const exclusiveTaxAmountPaise = numberValue(booking.snapshotExclusiveTaxAmountPaise, existingPricing.exclusiveTaxAmountPaise);
         const taxAmountPaise = numberValue(booking.snapshotTaxAmountPaise, existingPricing.taxAmountPaise, inclusiveTaxAmountPaise + exclusiveTaxAmountPaise);
-        const itemTotalPaise = numberValue(booking.snapshotItemTotalPaise, existingPricing.itemTotalPaise, sellingPricePaise - inclusiveTaxAmountPaise);
+        const itemTotalPaise = numberValue(booking.snapshotItemTotalPaise, existingPricing.itemTotalPaise, sellingPricePaise);
+        const pgTransactionCharge = portalBookingRecord(existingPricing.pgTransactionCharge) || {};
+        const pgTransactionChargeMasterId = String(existingPricing.pgTransactionChargeMasterId || pgTransactionCharge.masterId || "").trim();
+        const pgTransactionPaymentMode = String(existingPricing.pgTransactionPaymentMode || pgTransactionCharge.paymentMode || "cash").trim() || "cash";
+        const pgTransactionChargeType = String(existingPricing.pgTransactionChargeType || pgTransactionCharge.chargeType || "percent").trim() || "percent";
+        const pgTransactionChargeValue = Math.max(0, Number(existingPricing.pgTransactionChargeValue ?? pgTransactionCharge.chargeValue ?? 0));
+        const pgTransactionChargeBasePaise = numberValue(existingPricing.pgTransactionChargeBasePaise, pgTransactionCharge.baseAmountPaise);
+        const pgTransactionChargePaise = numberValue(existingPricing.pgTransactionChargePaise, pgTransactionCharge.chargeAmountPaise);
         const waitingChargesPaise = numberValue(booking.snapshotWaitingChargesPaise, booking.waitingChargesPaise, existingPricing.waitingChargesPaise);
         const previousTipAmountPaise = numberValue(booking.snapshotTipAmountPaise, existingPricing.tipAmountPaise, metadata.tipAmountPaise);
         const currentGrandTotalPaise = numberValue(booking.snapshotGrandTotalPaise, booking.bookingAmountPaise, existingPricing.grandTotalPaise, existingPricing.totalAmountPaise);
-        const grandTotalPaise = Math.max(0, currentGrandTotalPaise - previousTipAmountPaise + amountPaise);
+        const previousPreRoundTotalPaise = numberValue(existingPricing.preRoundTotalPaise, Math.max(0, currentGrandTotalPaise - previousTipAmountPaise));
+        const preRoundTotalPaise = Math.max(0, previousPreRoundTotalPaise - previousTipAmountPaise + amountPaise);
+        const grandTotalPaise = roundPaiseToRupee(preRoundTotalPaise);
+        const roundingAdjustmentPaise = grandTotalPaise - preRoundTotalPaise;
         const taxRows = Array.isArray(booking.snapshotTaxDetails)
             ? booking.snapshotTaxDetails
             : Array.isArray(existingPricing.taxRows) ? existingPricing.taxRows : [];
@@ -2251,15 +2775,28 @@ export async function updateCustomerPortalBookingTip(userId, input) {
             tipDetails: { amountPaise, source: "customer_track_booking" },
             waitingChargesPaise,
             grandTotalPaise,
+            amountToPayPaise: grandTotalPaise,
             totalAmountPaise: grandTotalPaise,
-            taxRows
+            preRoundTotalPaise,
+            roundingAdjustmentPaise,
+            taxRows,
+            pgTransactionCharge,
+            pgTransactionChargeMasterId: pgTransactionChargeMasterId || null,
+            pgTransactionPaymentMode,
+            pgTransactionChargeType,
+            pgTransactionChargeValue,
+            pgTransactionChargeBasePaise,
+            pgTransactionChargePaise
         };
         await client.query(`insert into zigo.booking_billing_snapshots
         (service_request_id, base_price_paise, discount_paise, selling_price_paise,
          item_total_paise, tax_amount_paise, inclusive_tax_amount_paise,
          exclusive_tax_amount_paise, tip_amount_paise, waiting_charges_paise,
-         grand_total_paise, currency, tax_details, pricing_details)
-       values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'INR', $12::jsonb, $13::jsonb)
+         grand_total_paise, currency, tax_details, pricing_details,
+         pg_transaction_charge_master_id, pg_transaction_payment_mode, pg_transaction_charge_type,
+         pg_transaction_charge_value, pg_transaction_charge_base_paise, pg_transaction_charge_paise)
+       values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'INR', $12::jsonb, $13::jsonb,
+         nullif($14, '')::uuid, $15, $16, $17::numeric, $18, $19)
        on conflict (service_request_id) do update set
          base_price_paise = excluded.base_price_paise,
          discount_paise = excluded.discount_paise,
@@ -2273,9 +2810,24 @@ export async function updateCustomerPortalBookingTip(userId, input) {
          grand_total_paise = excluded.grand_total_paise,
          tax_details = excluded.tax_details,
          pricing_details = excluded.pricing_details,
+         pg_transaction_charge_master_id = excluded.pg_transaction_charge_master_id,
+         pg_transaction_payment_mode = excluded.pg_transaction_payment_mode,
+         pg_transaction_charge_type = excluded.pg_transaction_charge_type,
+         pg_transaction_charge_value = excluded.pg_transaction_charge_value,
+         pg_transaction_charge_base_paise = excluded.pg_transaction_charge_base_paise,
+         pg_transaction_charge_paise = excluded.pg_transaction_charge_paise,
          updated_at = now()`, [booking.id, basePricePaise, discountPaise, sellingPricePaise, itemTotalPaise,
             taxAmountPaise, inclusiveTaxAmountPaise, exclusiveTaxAmountPaise, amountPaise,
-            waitingChargesPaise, grandTotalPaise, JSON.stringify(taxRows), JSON.stringify(pricingBreakdown)]);
+            waitingChargesPaise, grandTotalPaise, JSON.stringify(taxRows), JSON.stringify(pricingBreakdown),
+            pgTransactionChargeMasterId, pgTransactionPaymentMode, pgTransactionChargeType,
+            pgTransactionChargeValue, pgTransactionChargeBasePaise, pgTransactionChargePaise]);
+        await client.query(`update zigo.booking_billing_snapshots
+          set pre_round_total_paise = $2,
+              rounding_adjustment_paise = $3,
+              amount_to_pay_paise = $4,
+              grand_total_paise = $4,
+              updated_at = now()
+        where service_request_id = $1::uuid`, [booking.id, preRoundTotalPaise, roundingAdjustmentPaise, grandTotalPaise]);
         await client.query(`update zigo.service_requests
           set booking_amount_paise = $2,
               metadata = $3::jsonb,
@@ -3278,6 +3830,7 @@ export async function createCustomerPortalBooking(userId, input) {
       limit 1
     `, [selectedCategoryId]) : { rows: [] };
     const category = categoryResult.rows[0] || null;
+    const customerBookingCount = await customerPortalBookingCount(customerId);
     const requestedDurationMinutes = Math.max(1, Math.min(1440, Math.round(portalBookingNumber(selectedCartItem, "durationMinutes", Number(input.durationMinutes || metadata.durationMinutes || 30)))));
     const selectedCategoryPriceRuleId = portalBookingText(selectedCartItem, "categoryPriceRuleId")
         || portalBookingText(metadata, "categoryPriceRuleId")
@@ -3294,10 +3847,37 @@ export async function createCustomerPortalBooking(userId, input) {
     const durationMinutes = resolvedCategoryPrice.durationMinutes;
     const selectedPrice = resolvedCategoryPrice.sellingPrice;
     const selectedBasePrice = resolvedCategoryPrice.basePrice;
-    const resolvedTaxPricing = await resolveCustomerPortalTaxPricing(selectedBasePrice, selectedPrice);
+    const bookingLocationMetadata = portalBookingRecord(metadata.bookingLocations);
+    const deliveryQuoteStops = Array.isArray(bookingLocationMetadata?.stops)
+        ? bookingLocationMetadata.stops
+        : [{ latitude: input.latitude, longitude: input.longitude, address: input.address, label: "Start point" }];
+    const firstDeliveryStop = deliveryQuoteStops[0] || {};
+    const locationScope = await resolvePortalLocationScope({
+        clusterId: input.clusterId || firstDeliveryStop.clusterId,
+        latitude: firstDeliveryStop.latitude ?? input.latitude,
+        longitude: firstDeliveryStop.longitude ?? input.longitude
+    });
+    const deliveryQuote = await resolveCustomerPortalDeliveryQuote(deliveryQuoteStops, customerBookingCount, locationScope);
+    const addonCharges = await listActiveAddOnChargeMasters();
+    const addonLines = resolvePortalAddOnLines({
+        addons: addonCharges,
+        baseAmount: selectedBasePrice,
+        sellingAmount: selectedPrice,
+        deliveryQuote,
+        customerBookingCount,
+        locationScope
+    });
+    const resolvedTaxPricing = await resolveCustomerPortalTaxPricing(selectedBasePrice, selectedPrice, deliveryQuote.deliveryChargesPaise / 100, addonLines);
     const requestedTipAmountPaise = Math.max(0, Math.min(100_000, Math.round(Number(metadata.tipAmountPaise
         || portalBookingRecord(metadata.pricingBreakdown)?.tipAmountPaise
         || 0))));
+    const addonDiscountPaise = Math.max(0, Number(resolvedTaxPricing.addonDiscountPaise || 0));
+    const totalDiscountPaise = Math.max(0, Number(resolvedTaxPricing.discountAmountPaise || 0) + addonDiscountPaise + Number(deliveryQuote.deliveryDiscountPaise || 0));
+    const subtotalAfterDiscountPaise = Math.max(0, Number(resolvedTaxPricing.itemTotalPaise || 0)
+        + Number(resolvedTaxPricing.addonTotalPaise || 0));
+    const preRoundTotalPaise = Math.max(0, Number(resolvedTaxPricing.totalAmountPaise || 0)
+        + requestedTipAmountPaise);
+    const amountToPayPaise = roundPaiseToRupee(preRoundTotalPaise);
     const pricingBreakdown = {
         ...resolvedTaxPricing,
         categoryPriceRuleId: resolvedCategoryPrice.id,
@@ -3313,11 +3893,46 @@ export async function createCustomerPortalBooking(userId, input) {
             amountPaise: requestedTipAmountPaise,
             source: "booking_confirmation"
         },
+        deliveryChargesPaise: deliveryQuote.deliveryChargesPaise,
+        originalDeliveryChargesPaise: deliveryQuote.originalDeliveryChargesPaise,
+        deliveryDiscountPaise: deliveryQuote.deliveryDiscountPaise,
+        deliveryDiscountType: deliveryQuote.deliveryDiscountType,
+        deliveryDiscountValue: deliveryQuote.deliveryDiscountValue,
+        deliveryOfferMaxDistanceKm: deliveryQuote.deliveryOfferMaxDistanceKm,
+        deliveryDistanceMeters: deliveryQuote.distanceMeters,
+        deliveryDistanceKm: deliveryQuote.distanceKm,
+        deliveryRouteSource: deliveryQuote.routeSource,
+        deliveryLegs: deliveryQuote.legs,
+        deliverySlabLines: deliveryQuote.slabLines,
+        addonLines: resolvedTaxPricing.addonLines,
+        addonTotalPaise: resolvedTaxPricing.addonTotalPaise,
+        addonDiscountPaise,
+        addonTaxableAfterDiscountPaise: resolvedTaxPricing.addonTaxableAfterDiscountPaise,
+        addonTaxInclusivePaise: resolvedTaxPricing.addonInclusiveTaxAmountPaise,
+        addonTaxExclusivePaise: resolvedTaxPricing.addonExclusiveTaxAmountPaise,
+        itemTaxableAfterDiscountPaise: resolvedTaxPricing.itemTaxableAfterDiscountPaise,
+        itemTaxInclusivePaise: resolvedTaxPricing.itemTaxInclusivePaise,
+        itemTaxExclusivePaise: resolvedTaxPricing.itemTaxExclusivePaise,
+        totalDiscountPaise,
+        subtotalAfterDiscountPaise,
+        preRoundTotalPaise,
+        roundingAdjustmentPaise: amountToPayPaise - preRoundTotalPaise,
         waitingChargesPaise: 0,
-        grandTotalPaise: resolvedTaxPricing.totalAmountPaise + requestedTipAmountPaise,
-        totalAmountPaise: resolvedTaxPricing.totalAmountPaise + requestedTipAmountPaise
+        grandTotalPaise: amountToPayPaise,
+        amountToPayPaise,
+        totalAmountPaise: amountToPayPaise
     };
     const paymentAmountPaise = pricingBreakdown.grandTotalPaise;
+    if (input.dryRun) {
+        return {
+            quoteOnly: true,
+            paymentAmountPaise,
+            durationMinutes,
+            categoryPriceRuleId: resolvedCategoryPrice.id,
+            deliveryQuote,
+            pricingBreakdown
+        };
+    }
     let requestedRazorpayPayment = metadata.razorpayPayment && typeof metadata.razorpayPayment === "object"
         ? metadata.razorpayPayment
         : null;
@@ -3413,6 +4028,14 @@ export async function createCustomerPortalBooking(userId, input) {
             durationMinutes,
             bookingAmountPaise: paymentAmountPaise,
             paymentAmountPaise,
+            deliveryChargesPaise: deliveryQuote.deliveryChargesPaise,
+            originalDeliveryChargesPaise: deliveryQuote.originalDeliveryChargesPaise,
+            deliveryDiscountPaise: deliveryQuote.deliveryDiscountPaise,
+            deliveryDiscountType: deliveryQuote.deliveryDiscountType,
+            deliveryDiscountValue: deliveryQuote.deliveryDiscountValue,
+            deliveryOfferMaxDistanceKm: deliveryQuote.deliveryOfferMaxDistanceKm,
+            deliveryDistanceMeters: deliveryQuote.distanceMeters,
+            deliveryDistanceKm: deliveryQuote.distanceKm,
             pricingBreakdown,
             createdFrom: "customer_portal",
             cancelWindowMinutes: bookingType === "schedule" ? settings.customerCancelScheduleMinutes : settings.customerCancelInstantMinutes
@@ -3443,6 +4066,9 @@ export async function createCustomerPortalBooking(userId, input) {
         ? await getCustomerPortalBooking(userId, booking.id)
         : booking;
     return { ...persistedBooking, invoiceEmail };
+}
+export async function quoteCustomerPortalBooking(userId, input) {
+    return createCustomerPortalBooking(userId, { ...input, dryRun: true });
 }
 export async function getCustomerPortalBookingAvailability(userId, input) {
     try {
@@ -3555,6 +4181,11 @@ export async function cancelCustomerPortalBooking(userId, input) {
                 assignmentId: row.assignmentId,
                 assistantId: row.assistantId,
                 status: "cancelled",
+                cancelledBy: String(row.metadata?.cancelledBy || "") || null,
+                cancellationSource: String(row.metadata?.cancellationSource || "") || null,
+                cancellationType: String(row.metadata?.cancellationType || "") || null,
+                autoCancelled: Boolean(row.metadata?.autoCancelled),
+                reason: String(row.metadata?.cancellationReason || "") || null,
                 reasonCode: String(row.metadata?.cancellationReasonCode || "already_cancelled"),
                 delayMinutes: Number(row.metadata?.delayMinutes || 0),
                 alreadyCancelled: true
@@ -3583,6 +4214,9 @@ export async function cancelCustomerPortalBooking(userId, input) {
             row.bookingId,
             JSON.stringify({
                 cancelledBy: "customer",
+                cancellationSource: "customer_portal",
+                cancellationType: "customer_cancelled",
+                autoCancelled: false,
                 cancelledAt: cancelledAt.toISOString(),
                 cancellationReason: reason,
                 customerCancellationNote: customerReason,
@@ -3607,6 +4241,9 @@ export async function cancelCustomerPortalBooking(userId, input) {
             row.bookingId,
             JSON.stringify({
                 cancelledBy: "customer",
+                cancellationSource: "customer_portal",
+                cancellationType: "customer_cancelled",
+                autoCancelled: false,
                 cancellationReason: reason,
                 customerCancellationNote: customerReason,
                 cancellationReasonCode: eligibility.reasonCode,
@@ -3632,6 +4269,9 @@ export async function cancelCustomerPortalBooking(userId, input) {
             row.bookingId,
             JSON.stringify({
                 cancelledBy: "customer",
+                cancellationSource: "customer_portal",
+                cancellationType: "customer_cancelled",
+                autoCancelled: false,
                 cancellationReason: reason,
                 cancellationReasonCode: eligibility.reasonCode,
                 delayMinutes: eligibility.delayMinutes,
@@ -3650,6 +4290,10 @@ export async function cancelCustomerPortalBooking(userId, input) {
             JSON.stringify({
                 status: "cancelled",
                 reason,
+                cancelledBy: "customer",
+                cancellationSource: "customer_portal",
+                cancellationType: "customer_cancelled",
+                autoCancelled: false,
                 customerCancellationNote: customerReason,
                 reasonCode: eligibility.reasonCode,
                 assistantId: row.assistantId,
@@ -3665,7 +4309,21 @@ export async function cancelCustomerPortalBooking(userId, input) {
         await recalculateAssistantAvailability({ bookingId: row.bookingId }).catch((error) => {
             console.error("Unable to refresh assistant availability after customer cancellation.", error);
         });
-        return { bookingId: row.bookingId, assignmentId: row.assignmentId, assistantId: row.assistantId, status: "cancelled", reasonCode: eligibility.reasonCode, delayMinutes: eligibility.delayMinutes, alreadyCancelled: false };
+        return {
+            bookingId: row.bookingId,
+            assignmentId: row.assignmentId,
+            assistantId: row.assistantId,
+            status: "cancelled",
+            cancelledBy: "customer",
+            cancellationSource: "customer_portal",
+            cancellationType: "customer_cancelled",
+            autoCancelled: false,
+            reason,
+            reasonCode: eligibility.reasonCode,
+            delayMinutes: eligibility.delayMinutes,
+            cancelledAt: cancelledAt.toISOString(),
+            alreadyCancelled: false
+        };
     }
     catch (error) {
         await client.query("rollback");
@@ -4133,6 +4791,121 @@ async function fetchPortalOlaRoute(origin, destination, waypoints = [], mode = '
         clearTimeout(timeout);
     }
 }
+function customerDeliveryQuoteStops(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value.map((entry) => {
+        const source = portalBookingRecord(entry);
+        const point = portalLiveRouteCoordinate(source);
+        if (!point)
+            return null;
+        return {
+            ...point,
+            address: portalBookingText(source, "address") || portalBookingText(source, "addressText"),
+            label: portalBookingText(source, "label")
+        };
+    }).filter((stop) => Boolean(stop));
+}
+async function resolveCustomerPortalDeliveryQuote(stops, customerBookingCount = 0, locationScope = {}) {
+    const routeStops = customerDeliveryQuoteStops(stops);
+    const assistantMasterSettings = await getAssistantMasterSetting();
+    const addonCharges = await listActiveAddOnChargeMasters();
+    const configuredDeliveryAddons = addonCharges.filter((addon) => String(addon.addonType || "").toLowerCase() === "delivery" && portalAddOnAppliesToCustomer(addon, customerBookingCount));
+    const deliveryAddon = configuredDeliveryAddons.find((addon) => portalAddOnScopeMatches(addon, locationScope));
+    if (routeStops.length < 2) {
+        return {
+            distanceMeters: 0,
+            distanceKm: 0,
+            deliveryChargesPaise: 0,
+            originalDeliveryChargesPaise: 0,
+            deliveryDiscountPaise: 0,
+            deliveryDiscountType: null,
+            deliveryDiscountValue: 0,
+            deliveryOfferMaxDistanceKm: null,
+            deliveryOfferAddonId: deliveryAddon?.id || null,
+            routeSource: "none",
+            legs: [],
+            slabLines: [],
+            basePaise: assistantMasterSettings.travelCostBasePaise
+        };
+    }
+    const legs = [];
+    let distanceMeters = 0;
+    let routeApiLegs = 0;
+    for (let index = 0; index < routeStops.length - 1; index += 1) {
+        const origin = routeStops[index];
+        const destination = routeStops[index + 1];
+        const route = await cachedTrackingRoute(origin, destination, [], "bike");
+        const routeDistanceMeters = Number(route?.distanceMeters);
+        const fallbackDistanceMeters = portalDistanceMeters(origin, destination);
+        const legDistanceMeters = Number.isFinite(routeDistanceMeters) && routeDistanceMeters > 0
+            ? routeDistanceMeters
+            : fallbackDistanceMeters;
+        if (Number.isFinite(routeDistanceMeters) && routeDistanceMeters > 0)
+            routeApiLegs += 1;
+        distanceMeters += legDistanceMeters;
+        legs.push({
+            sequence: index + 1,
+            from: { label: origin.label, address: origin.address, latitude: origin.latitude, longitude: origin.longitude },
+            to: { label: destination.label, address: destination.address, latitude: destination.latitude, longitude: destination.longitude },
+            distanceMeters: Math.round(legDistanceMeters),
+            distanceKm: Math.round((legDistanceMeters / 1000) * 1000) / 1000,
+            etaMinutes: Number.isFinite(Number(route?.etaMinutes)) && Number(route?.etaMinutes) > 0
+                ? Math.max(1, Math.ceil(Number(route?.etaMinutes)))
+                : null,
+            routeAvailable: Number.isFinite(routeDistanceMeters) && routeDistanceMeters > 0
+        });
+    }
+    const distanceKm = distanceMeters / 1000;
+    const slabCalculation = calculateAssistantDistanceSlabs(assistantMasterSettings.travelCostSlabs, distanceKm, assistantMasterSettings.travelCostBasePaise);
+    const originalDeliveryChargesPaise = slabCalculation.totalPaise;
+    const deliveryOfferSlabs = Array.isArray(deliveryAddon?.deliveryDistanceSlabs) && deliveryAddon.deliveryDistanceSlabs.length
+        ? deliveryAddon.deliveryDistanceSlabs
+        : configuredDeliveryAddons.length ? [] : assistantMasterSettings.deliveryOfferSlabs;
+    const deliveryOffer = deliveryOfferSlabs.find((slab) => distanceKm <= Number(slab.maxDistanceKm || 0) + 0.0001) || null;
+    const requestedDiscountValue = Math.max(0, Number(deliveryOffer?.discountValue || 0));
+    const requestedDiscountPaise = deliveryOffer?.discountType === "flat"
+        ? Math.round(requestedDiscountValue * 100)
+        : Math.round(originalDeliveryChargesPaise * Math.min(100, requestedDiscountValue) / 100);
+    const deliveryDiscountPaise = deliveryOffer
+        ? Math.min(originalDeliveryChargesPaise, Math.max(0, requestedDiscountPaise))
+        : 0;
+    return {
+        distanceMeters: Math.round(distanceMeters),
+        distanceKm: Math.round(distanceKm * 1000) / 1000,
+        deliveryChargesPaise: Math.max(0, originalDeliveryChargesPaise - deliveryDiscountPaise),
+        originalDeliveryChargesPaise,
+        deliveryDiscountPaise,
+        deliveryDiscountType: deliveryOffer?.discountType || null,
+        deliveryDiscountValue: deliveryOffer?.discountType === "flat"
+            ? requestedDiscountValue
+            : Math.min(100, requestedDiscountValue),
+        deliveryOfferMaxDistanceKm: deliveryOffer?.maxDistanceKm ?? null,
+        deliveryOfferAddonId: deliveryAddon?.id || null,
+        deliveryOfferAddonTitle: deliveryAddon?.title || null,
+        routeSource: routeApiLegs === legs.length ? "ola_maps_bike" : routeApiLegs > 0 ? "ola_maps_bike_with_estimate" : "straight_line_estimate",
+        legs,
+        slabLines: slabCalculation.lines.map((line) => ({
+            fromKm: line.fromKm,
+            toKm: line.toKm,
+            rateType: line.rateType,
+            ratePaise: line.ratePaise,
+            billableKm: line.billableKm,
+            amountPaise: line.amountPaise
+        })),
+        basePaise: slabCalculation.basePaise
+    };
+}
+export async function getCustomerPortalDeliveryQuote(userId, input) {
+    const customerId = await requireCustomerPortalCustomerId(userId);
+    const firstStop = input.locations[0] || {};
+    const locationScope = await resolvePortalLocationScope({
+        clusterId: input.clusterId || firstStop.clusterId,
+        latitude: firstStop.latitude,
+        longitude: firstStop.longitude
+    });
+    return resolveCustomerPortalDeliveryQuote(input.locations, await customerPortalBookingCount(customerId), locationScope);
+}
 async function attachCustomerLiveRoutes(rows) {
     await ensureAssistantLocationTrackingSchema();
     const assignedStatuses = new Set(["assigned", "accepted", "processing", "on_the_way", "working", "in_progress", "approval_pending"]);
@@ -4456,6 +5229,14 @@ export async function startAssistantPortalJob(userId, assignmentId) {
     if (!settings.assistantPortal.isEnabled || !settings.assistantPortal.allowTaskExecution) {
         throw new HttpError(403, "Assistant task execution is disabled.");
     }
+    // Start Job is also the first production request after an app has been
+    // deployed or restarted. Ensure the operational tables exist before the
+    // transaction reads the assignment and writes the travel update.
+    await Promise.all([
+        ensurePortalSchema(),
+        ensureBookingEngineSchema(),
+        ensureAssistantLocationTrackingSchema()
+    ]);
     const client = await pool.connect();
     try {
         await client.query("begin");
@@ -5620,6 +6401,7 @@ export async function createCustomerPortalBookingAddOnOrder(userId, input) {
     if (!rule.rows[0]?.available)
         throw new HttpError(409, "This duration cannot be used to extend the service.");
     pricing = { ...(await resolveCustomerPortalTaxPricing(quote.basePrice, quote.sellingPrice)), durationMinutes: minutes, categoryPriceRuleId: quote.id, label: quote.label || "Service extension" };
+    const billing = customerPortalAddOnBillingValues(pricing);
     const currentEndAt = validDateFromUnknown(row.bookingEndAt) ?? new Date();
     const currentAvailableAt = validDateFromUnknown(row.bookingAvailableAt) ?? currentEndAt;
     const bufferMinutes = Math.max(0, Math.ceil((currentAvailableAt.getTime() - currentEndAt.getTime()) / 60_000));
@@ -5633,9 +6415,232 @@ export async function createCustomerPortalBookingAddOnOrder(userId, input) {
     // Keep the booking ID in Razorpay notes while giving each extension order its own receipt.
     const receipt = `${bookingReference.slice(0, 24)}-EXT-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 40);
     const order = await createRazorpayPaymentOrder({ amountPaise: pricing.totalAmountPaise, customerUserId: userId, bookingId: row.bookingId, bookingReference, receipt, metadata: { addOnKind: kind, durationMinutes: minutes } });
-    const saved = await pool.query(`insert into zigo.booking_add_on_payments (service_request_id, customer_user_id, kind, duration_minutes, base_amount_paise, discount_amount_paise, selling_amount_paise, tax_amount_paise, total_amount_paise, provider_order_id, pricing, metadata)
-    values ($1::uuid,$2::uuid,'extension',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,jsonb_build_object('source','customer_portal')) returning id`, [row.bookingId, userId, minutes, pricing.baseAmountPaise, pricing.discountAmountPaise, pricing.sellingAmountPaise, pricing.taxAmountPaise, pricing.totalAmountPaise, order.orderId, JSON.stringify(pricing)]);
+    const saved = await pool.query(`insert into zigo.booking_add_on_payments
+    (service_request_id, customer_user_id, kind, duration_minutes, base_amount_paise, discount_amount_paise,
+     selling_amount_paise, tax_amount_paise, total_amount_paise, raw_gross_amount_paise, raw_net_amount_paise,
+     taxable_after_discount_paise, amount_after_discount_paise, inclusive_tax_amount_paise, exclusive_tax_amount_paise,
+     rounding_adjustment_paise, provider_order_id, pricing, metadata)
+    values ($1::uuid,$2::uuid,'extension',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,jsonb_build_object('source','customer_portal')) returning id`, [row.bookingId, userId, minutes, pricing.baseAmountPaise, pricing.discountAmountPaise, pricing.sellingAmountPaise, pricing.taxAmountPaise,
+        pricing.totalAmountPaise, billing.rawGrossAmountPaise, billing.rawNetAmountPaise, billing.taxableAfterDiscountPaise,
+        billing.amountAfterDiscountPaise, billing.inclusiveTaxAmountPaise, billing.exclusiveTaxAmountPaise, billing.roundingAdjustmentPaise,
+        order.orderId, JSON.stringify(pricing)]);
     return { ...order, addOnId: saved.rows[0].id, kind, pricing };
+}
+function normalizeCustomerPortalLiveStop(input) {
+    const address = String(input.address || "").trim();
+    const latitude = Number(input.latitude);
+    const longitude = Number(input.longitude);
+    if (!address || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        throw new HttpError(400, "A valid stop address and map location are required.");
+    }
+    return {
+        address,
+        label: String(input.label || "Stop").trim() || "Stop",
+        latitude,
+        longitude,
+        addressId: String(input.addressId || "").trim() || null,
+        clusterId: String(input.clusterId || "").trim() || null,
+        source: String(input.source || "track_booking").trim() || "track_booking"
+    };
+}
+async function customerPortalLiveBookingContext(userId, bookingId) {
+    const booking = await pool.query(`
+    select sr.id as "bookingId", sr.customer_id as "customerId", sr.category_id as "categoryId",
+      sr.service_id as "serviceId", sr.cluster_id as "clusterId", sr.status_code as "bookingStatus",
+      sr.request_number as "requestNumber", sr.accepted_assignment_id as "assignmentId",
+      sr.duration_minutes as "bookingDurationMinutes", sr.booking_start_at as "bookingStartAt",
+      sr.booking_end_at as "bookingEndAt", sr.booking_available_at as "bookingAvailableAt",
+      sr.metadata, coalesce(nullif(sr.metadata->'bookingLocations'->>'maxLocations', '')::int,
+        nullif(sr.metadata->'bookingLocations'->>'maxLocationsLimit', '')::int,
+        nullif(c.config->'categorySettings'->>'maxLocationsLimit', '')::int,
+        nullif(s.metadata->'bookingLocation'->>'maxLocationsLimit', '')::int, 1) as "maxLocations"
+    from zigo.service_requests sr
+    join zigo.customers cu on cu.id = sr.customer_id
+    left join zigo.categories c on c.id = sr.category_id
+    left join zigo.services s on s.id = sr.service_id
+    where sr.id = $1::uuid and cu.user_id = $2::uuid
+    limit 1
+  `, [bookingId, userId]);
+    const row = booking.rows[0];
+    if (!row)
+        throw new HttpError(404, "Booking not found.");
+    const status = String(row.bookingStatus || "").toLowerCase();
+    if (!isCustomerLiveStopBookingStatus(status)) {
+        throw new HttpError(409, "A new stop can be added only while the assistant is processing this booking.");
+    }
+    const locations = await pool.query(`
+    select id, sequence, location_type as "locationType", name as label, address, latitude, longitude,
+      cluster_id as "clusterId", metadata
+    from zigo.request_locations
+    where service_request_id = $1::uuid
+    order by sequence asc
+  `, [bookingId]);
+    const metadataStops = Array.isArray(row.metadata?.bookingLocations?.stops) ? row.metadata.bookingLocations.stops : [];
+    const stops = (locations.rows.length ? locations.rows : metadataStops).map((stop, index) => ({
+        id: stop.id || null,
+        sequence: Math.max(1, Number(stop.sequence || index + 1)),
+        locationType: String(stop.locationType || (index === 0 ? "start_point" : "stop_point")),
+        label: String(stop.label || stop.name || (index === 0 ? "Start point" : `Stop ${index}`)),
+        address: String(stop.address || stop.addressText || "").trim(),
+        latitude: Number.isFinite(Number(stop.latitude)) ? Number(stop.latitude) : null,
+        longitude: Number.isFinite(Number(stop.longitude)) ? Number(stop.longitude) : null,
+        clusterId: String(stop.clusterId || stop.metadata?.clusterId || "").trim() || null,
+        metadata: stop.metadata && typeof stop.metadata === "object" ? stop.metadata : {}
+    })).filter((stop) => stop.address);
+    if (!stops.length)
+        throw new HttpError(409, "The booking has no valid route locations.");
+    const scope = await resolvePortalLocationScope({ clusterId: row.clusterId, latitude: stops[0].latitude, longitude: stops[0].longitude });
+    const extensionRules = row.categoryId ? await pool.query(`
+    select cpr.id, coalesce(nullif(cpr.slab->>'label', ''), nullif(cpr.metadata->>'label', ''),
+      concat(cpr.time_duration_minutes, ' mins')) as label,
+      cpr.time_duration_minutes as "durationMinutes", cpr.base_price as "basePrice",
+      cpr.selling_price as "sellingPrice"
+    from zigo.category_price_rules cpr
+    where cpr.category_id = $1::uuid
+      and cpr.available_for_extend = true and cpr.is_active = true
+      and coalesce(cpr.is_enabled, true) = true and coalesce(cpr.is_deleted, false) = false
+      and (cpr.scope_type = 'all'
+        or (cpr.scope_type = 'state' and cpr.state_id = $2::uuid)
+        or (cpr.scope_type = 'city' and cpr.city_id = $3::uuid)
+        or (cpr.scope_type = 'zone' and cpr.zone_id = $4::uuid)
+        or (cpr.scope_type = 'cluster' and cpr.cluster_id = $5::uuid))
+    order by cpr.time_duration_minutes asc, cpr.updated_at desc
+  `, [row.categoryId, scope.stateId || null, scope.cityId || null, scope.zoneId || null, scope.clusterId || row.clusterId]) : { rows: [] };
+    const extensionOptions = row.assignmentId ? extensionRules.rows : [];
+    return { row, stops, maxLocations: Math.max(1, Number(row.maxLocations || 1)), extensionOptions, extensionAvailable: extensionOptions.length > 0 };
+}
+async function resolveCustomerPortalLiveStopQuote(userId, input) {
+    const context = await customerPortalLiveBookingContext(userId, input.bookingId);
+    if (context.stops.length >= context.maxLocations)
+        throw new HttpError(409, `Maximum ${context.maxLocations} locations are allowed for this booking.`);
+    const stop = normalizeCustomerPortalLiveStop(input.stop);
+    const customerId = String(context.row.customerId);
+    const coverage = await validateBookingLocation({
+        customerId,
+        address: stop.address,
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        addressId: stop.addressId,
+        source: stop.source,
+        preferredClusterId: stop.clusterId
+    });
+    if (!coverage.isServiceable || !coverage.cluster)
+        throw new HttpError(400, "This stop is outside the active service zone.");
+    const nextStop = {
+        ...stop,
+        clusterId: coverage.cluster.clusterId,
+        clusterName: coverage.cluster.name,
+        cityName: coverage.cluster.cityName,
+        zoneName: coverage.cluster.zoneName
+    };
+    const clusterIds = [...context.stops.map((item) => item.clusterId || context.row.clusterId), coverage.cluster.clusterId].filter(Boolean);
+    if (!await locationClustersCanInterserve(clusterIds))
+        throw new HttpError(400, "The new stop must be in the same enabled city service region.");
+    const sameAsLast = context.stops.at(-1);
+    if (sameAsLast && Number.isFinite(sameAsLast.latitude) && Number.isFinite(sameAsLast.longitude)
+        && portalDistanceMeters(sameAsLast, nextStop) < 2) {
+        throw new HttpError(409, "The new stop must be different from the previous stop.");
+    }
+    const customerBookingCountValue = await customerPortalBookingCount(customerId);
+    const locationScope = await resolvePortalLocationScope({
+        clusterId: context.row.clusterId,
+        latitude: context.stops[0].latitude,
+        longitude: context.stops[0].longitude
+    });
+    const currentQuote = await resolveCustomerPortalDeliveryQuote(context.stops, customerBookingCountValue, locationScope);
+    const nextQuote = await resolveCustomerPortalDeliveryQuote([...context.stops, nextStop], customerBookingCountValue, locationScope);
+    const additionalDeliveryChargesPaise = Math.max(0, Number(nextQuote.deliveryChargesPaise || 0) - Number(currentQuote.deliveryChargesPaise || 0));
+    const extensionMinutes = Math.max(0, Math.min(240, Math.round(Number(input.extensionMinutes || 0))));
+    if (extensionMinutes > 0) {
+        const extensionPolicy = await getBookingEngineSetting();
+        assertCustomerExtensionCutoff(context.row, extensionPolicy);
+        if (!context.extensionAvailable)
+            throw new HttpError(409, "Booking extension is not enabled for this service.");
+    }
+    let extensionPricing = {};
+    if (extensionMinutes > 0) {
+        const extensionQuote = await resolveCustomerPortalCategoryPrice({ clusterId: context.row.clusterId, categoryId: context.row.categoryId, durationMinutes: extensionMinutes });
+        const rule = await pool.query(`select coalesce(available_for_extend, false) as available from zigo.category_price_rules where id = $1::uuid`, [extensionQuote.id]);
+        if (!rule.rows[0]?.available)
+            throw new HttpError(409, "This extension duration cannot be used for the booking.");
+        extensionPricing = extensionQuote;
+    }
+    const taxPricing = await resolveCustomerPortalTaxPricing(Number(extensionPricing.basePrice || 0), Number(extensionPricing.sellingPrice || 0), additionalDeliveryChargesPaise / 100);
+    const lastLeg = nextQuote.legs?.at(-1) || {};
+    const fallbackDistanceMeters = context.stops.at(-1) && nextStop
+        ? portalDistanceMeters(context.stops.at(-1), nextStop)
+        : 0;
+    const distanceMeters = Math.max(0, Math.round(Number(lastLeg.distanceMeters || fallbackDistanceMeters)));
+    const remainingMinutes = Math.max(0, Math.ceil(((validDateFromUnknown(context.row.bookingEndAt)?.getTime() || Date.now()) - Date.now()) / 60000));
+    const estimatedTravelMinutes = Number(lastLeg.etaMinutes) > 0
+        ? Math.max(1, Math.ceil(Number(lastLeg.etaMinutes)))
+        : distanceMeters > 0 ? Math.max(1, Math.ceil((distanceMeters / 1000) / 18 * 60)) : 0;
+    const effectiveRemainingMinutes = remainingMinutes + extensionMinutes;
+    const pricing = {
+        ...taxPricing,
+        baseAmountPaise: Math.max(0, taxPricing.baseAmountPaise + additionalDeliveryChargesPaise),
+        sellingAmountPaise: Math.max(0, taxPricing.sellingAmountPaise + additionalDeliveryChargesPaise),
+        discountAmountPaise: Math.max(0, taxPricing.discountAmountPaise),
+        deliveryChargesPaise: additionalDeliveryChargesPaise,
+        extensionMinutes,
+        extensionBaseAmountPaise: Number(extensionPricing.basePrice || 0) * 100,
+        extensionSellingAmountPaise: Number(extensionPricing.sellingPrice || 0) * 100,
+        extensionLabel: extensionPricing.label || "Service extension",
+        routeDistanceMeters: distanceMeters,
+        routeDistanceKm: Math.round((distanceMeters / 1000) * 1000) / 1000,
+        totalAmountPaise: Math.max(0, taxPricing.totalAmountPaise + additionalDeliveryChargesPaise)
+    };
+    return {
+        bookingId: input.bookingId,
+        stop: nextStop,
+        existingStops: context.stops,
+        maxLocations: context.maxLocations,
+        extensionAvailable: context.extensionAvailable,
+        extensionOptions: context.extensionOptions,
+        remainingMinutes: Math.floor(remainingMinutes),
+        effectiveRemainingMinutes: Math.floor(effectiveRemainingMinutes),
+        estimatedTravelMinutes,
+        canReachWithinRemainingTime: estimatedTravelMinutes <= effectiveRemainingMinutes,
+        distanceMeters,
+        distanceText: portalDistanceText(distanceMeters),
+        routeDistanceKm: pricing.routeDistanceKm,
+        additionalDeliveryChargesPaise,
+        pricing
+    };
+}
+export async function quoteCustomerPortalBookingStop(userId, input) {
+    return resolveCustomerPortalLiveStopQuote(userId, input);
+}
+export async function createCustomerPortalBookingStopOrder(userId, input) {
+    await ensurePortalSchema();
+    const quote = await resolveCustomerPortalLiveStopQuote(userId, input);
+    const pricing = quote.pricing;
+    const billing = customerPortalAddOnBillingValues(pricing);
+    if (pricing.totalAmountPaise < 100)
+        throw new HttpError(400, "No additional payment is required for this stop.");
+    const bookingReference = String((await pool.query(`select request_number as "requestNumber" from zigo.service_requests where id = $1::uuid`, [input.bookingId])).rows[0]?.requestNumber || input.bookingId).trim();
+    const order = await createRazorpayPaymentOrder({
+        amountPaise: pricing.totalAmountPaise,
+        customerUserId: userId,
+        bookingId: input.bookingId,
+        bookingReference,
+        receipt: `${bookingReference.slice(0, 24)}-STOP-${Date.now().toString(36)}`.slice(0, 40),
+        metadata: { addOnKind: "stop", extensionMinutes: quote.pricing.extensionMinutes, stop: quote.stop }
+    });
+    const saved = await pool.query(`
+    insert into zigo.booking_add_on_payments
+      (service_request_id, customer_user_id, kind, duration_minutes, base_amount_paise, discount_amount_paise,
+       selling_amount_paise, tax_amount_paise, total_amount_paise, raw_gross_amount_paise, raw_net_amount_paise,
+       taxable_after_discount_paise, amount_after_discount_paise, inclusive_tax_amount_paise, exclusive_tax_amount_paise,
+       rounding_adjustment_paise, provider_order_id, pricing, metadata)
+    values ($1::uuid, $2::uuid, 'stop', $3::int, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb)
+    returning id
+  `, [input.bookingId, userId, quote.pricing.extensionMinutes || null, pricing.baseAmountPaise, pricing.discountAmountPaise,
+        pricing.sellingAmountPaise, pricing.taxAmountPaise, pricing.totalAmountPaise, billing.rawGrossAmountPaise, billing.rawNetAmountPaise,
+        billing.taxableAfterDiscountPaise, billing.amountAfterDiscountPaise, billing.inclusiveTaxAmountPaise, billing.exclusiveTaxAmountPaise,
+        billing.roundingAdjustmentPaise, order.orderId, JSON.stringify(pricing),
+        JSON.stringify({ source: "customer_track_booking", stop: quote.stop, extensionMinutes: quote.pricing.extensionMinutes })]);
+    return { ...order, addOnId: saved.rows[0].id, kind: "stop", pricing, stop: quote.stop, extensionMinutes: quote.pricing.extensionMinutes };
 }
 export async function createCustomerPortalTipOrder(userId, input) {
     await ensurePortalSchema();
@@ -5650,7 +6655,11 @@ export async function createCustomerPortalTipOrder(userId, input) {
     if (paid.rows.length)
         throw new HttpError(409, "A tip has already been paid for this booking.");
     const order = await createRazorpayPaymentOrder({ amountPaise, customerUserId: userId, bookingId: row.bookingId, bookingReference: `${String(row.requestNumber || row.bookingId).slice(0, 28)}-TIP`, metadata: { addOnKind: 'tip' } });
-    const saved = await pool.query(`insert into zigo.booking_add_on_payments (service_request_id,customer_user_id,kind,selling_amount_paise,total_amount_paise,provider_order_id,pricing,metadata) values ($1::uuid,$2::uuid,'tip',$3,$3,$4,jsonb_build_object('taxAmountPaise',0),jsonb_build_object('source','customer_portal','taxApplicable',false)) returning id`, [row.bookingId, userId, amountPaise, order.orderId]);
+    const saved = await pool.query(`insert into zigo.booking_add_on_payments
+    (service_request_id,customer_user_id,kind,selling_amount_paise,total_amount_paise,
+     raw_gross_amount_paise,raw_net_amount_paise,taxable_after_discount_paise,amount_after_discount_paise,
+     inclusive_tax_amount_paise,exclusive_tax_amount_paise,rounding_adjustment_paise,provider_order_id,pricing,metadata)
+    values ($1::uuid,$2::uuid,'tip',$3,$3,$3,$3,$3,$3,0,0,0,$4,jsonb_build_object('taxAmountPaise',0),jsonb_build_object('source','customer_portal','taxApplicable',false)) returning id`, [row.bookingId, userId, amountPaise, order.orderId]);
     return { ...order, addOnId: saved.rows[0].id, kind: 'tip', pricing: { sellingAmountPaise: amountPaise, taxAmountPaise: 0, totalAmountPaise: amountPaise } };
 }
 async function assertAssistantCanAbsorbExtension(client, input) {
@@ -5696,6 +6705,136 @@ async function assertAssistantCanAbsorbExtension(client, input) {
   `, [input.assignmentId, input.bookingId, input.extendedAvailableAt.toISOString(), input.currentAvailableAt.toISOString()]);
     if (calendarConflict.rows[0])
         throw new HttpError(409, "Assistant is booked for the next booking. Create a new booking.");
+}
+function customerPortalAddOnBillingValues(pricing) {
+    const amount = (...values) => {
+        for (const value of values) {
+            const number = Number(value);
+            if (Number.isFinite(number))
+                return Math.max(0, Math.round(number));
+        }
+        return 0;
+    };
+    return {
+        rawGrossAmountPaise: amount(pricing.rawGrossAmountPaise, pricing.baseAmountPaise),
+        rawNetAmountPaise: amount(pricing.rawNetAmountPaise, pricing.sellingAmountPaise),
+        taxableAfterDiscountPaise: amount(pricing.taxableAfterDiscountPaise, pricing.addonTaxableAfterDiscountPaise, pricing.itemTaxableAfterDiscountPaise, pricing.sellingAmountPaise),
+        amountAfterDiscountPaise: amount(pricing.amountAfterDiscountPaise, pricing.sellingAmountPaise),
+        inclusiveTaxAmountPaise: amount(pricing.inclusiveTaxAmountPaise, pricing.addonTaxInclusivePaise, pricing.itemTaxInclusivePaise),
+        exclusiveTaxAmountPaise: amount(pricing.exclusiveTaxAmountPaise, pricing.addonTaxExclusivePaise, pricing.itemTaxExclusivePaise),
+        roundingAdjustmentPaise: Math.round(Number(pricing.roundingAdjustmentPaise || 0))
+    };
+}
+async function appendCustomerPortalAddOnToBillingSnapshot(client, input) {
+    const current = await client.query(`
+    select addon_total_paise as "addonTotalPaise",
+      addon_discount_paise as "addonDiscountPaise",
+      addon_taxable_after_discount_paise as "addonTaxableAfterDiscountPaise",
+      addon_tax_inclusive_paise as "addonTaxInclusivePaise",
+      addon_tax_exclusive_paise as "addonTaxExclusivePaise",
+      tax_amount_paise as "taxAmountPaise",
+      inclusive_tax_amount_paise as "inclusiveTaxAmountPaise",
+      exclusive_tax_amount_paise as "exclusiveTaxAmountPaise",
+      total_discount_paise as "totalDiscountPaise",
+      subtotal_after_discount_paise as "subtotalAfterDiscountPaise",
+      pre_round_total_paise as "preRoundTotalPaise",
+      tax_details as "taxDetails",
+      pricing_details as "pricingDetails"
+    from zigo.booking_billing_snapshots
+    where service_request_id = $1::uuid
+    for update
+  `, [input.bookingId]);
+    const row = current.rows[0];
+    if (!row)
+        return null;
+    const record = input.record;
+    const pricing = record.pricing && typeof record.pricing === "object" ? record.pricing : {};
+    const addonAmountPaise = Math.max(0, Math.round(Number(record.sellingAmountPaise || pricing.sellingAmountPaise || 0)));
+    const addonDiscountPaise = Math.max(0, Math.round(Number(record.discountAmountPaise || pricing.discountAmountPaise || 0)));
+    const taxAmountPaise = Math.max(0, Math.round(Number(record.taxAmountPaise || pricing.taxAmountPaise || 0)));
+    const inclusiveTaxAmountPaise = Math.max(0, Math.round(Number(pricing.inclusiveTaxAmountPaise || pricing.itemTaxInclusivePaise || 0)));
+    const exclusiveTaxAmountPaise = Math.max(0, Math.round(Number(pricing.exclusiveTaxAmountPaise || pricing.itemTaxExclusivePaise || Math.max(0, taxAmountPaise - inclusiveTaxAmountPaise))));
+    const currentPreRoundTotalPaise = Math.max(0, Math.round(Number(row.preRoundTotalPaise || 0) || Number(pricing.grandTotalPaise || 0)));
+    const addonTotalAmountPaise = Math.max(0, Math.round(Number(record.totalAmountPaise || pricing.totalAmountPaise || addonAmountPaise + taxAmountPaise)));
+    const preRoundTotalPaise = currentPreRoundTotalPaise + addonTotalAmountPaise;
+    const amountToPayPaise = roundPaiseToRupee(preRoundTotalPaise);
+    const currentPricing = row.pricingDetails && typeof row.pricingDetails === "object" ? row.pricingDetails : {};
+    const dynamicAddOns = Array.isArray(currentPricing.dynamicAddOns) ? currentPricing.dynamicAddOns : [];
+    const currentTaxRows = Array.isArray(row.taxDetails) ? row.taxDetails : (Array.isArray(currentPricing.taxRows) ? currentPricing.taxRows : []);
+    const addOnTaxRows = Array.isArray(pricing.taxRows)
+        ? pricing.taxRows.map((taxRow) => ({
+            ...taxRow,
+            label: `${String(record.kind || "Add-on")} - ${String(taxRow.label || taxRow.taxLabel || "GST")}`
+        }))
+        : [];
+    const nextPricing = {
+        ...currentPricing,
+        addonTotalPaise: Math.max(0, Number(row.addonTotalPaise || 0) + addonAmountPaise),
+        addonDiscountPaise: Math.max(0, Number(row.addonDiscountPaise || 0) + addonDiscountPaise),
+        addonTaxableAfterDiscountPaise: Math.max(0, Number(row.addonTaxableAfterDiscountPaise || 0) + addonAmountPaise),
+        addonTaxInclusivePaise: Math.max(0, Number(row.addonTaxInclusivePaise || 0) + inclusiveTaxAmountPaise),
+        addonTaxExclusivePaise: Math.max(0, Number(row.addonTaxExclusivePaise || 0) + exclusiveTaxAmountPaise),
+        taxAmountPaise: Math.max(0, Number(row.taxAmountPaise || 0) + taxAmountPaise),
+        inclusiveTaxAmountPaise: Math.max(0, Number(row.inclusiveTaxAmountPaise || 0) + inclusiveTaxAmountPaise),
+        exclusiveTaxAmountPaise: Math.max(0, Number(row.exclusiveTaxAmountPaise || 0) + exclusiveTaxAmountPaise),
+        totalDiscountPaise: Math.max(0, Number(row.totalDiscountPaise || 0) + addonDiscountPaise),
+        subtotalAfterDiscountPaise: Math.max(0, Number(row.subtotalAfterDiscountPaise || 0) + addonAmountPaise),
+        preRoundTotalPaise,
+        roundingAdjustmentPaise: amountToPayPaise - preRoundTotalPaise,
+        amountToPayPaise,
+        grandTotalPaise: amountToPayPaise,
+        totalAmountPaise: amountToPayPaise,
+        taxRows: [...currentTaxRows, ...addOnTaxRows],
+        dynamicAddOns: [...dynamicAddOns, record]
+    };
+    await client.query(`
+    update zigo.booking_billing_snapshots
+    set addon_total_paise = $2,
+        addon_discount_paise = $3,
+        addon_taxable_after_discount_paise = $4,
+        addon_tax_inclusive_paise = $5,
+        addon_tax_exclusive_paise = $6,
+        tax_amount_paise = $7,
+        inclusive_tax_amount_paise = $8,
+        exclusive_tax_amount_paise = $9,
+        total_discount_paise = $10,
+        subtotal_after_discount_paise = $11,
+        pre_round_total_paise = $12,
+        rounding_adjustment_paise = $13,
+        amount_to_pay_paise = $14,
+        grand_total_paise = $14,
+        tax_details = $15::jsonb,
+        pricing_details = $16::jsonb,
+        updated_at = now()
+    where service_request_id = $1::uuid
+  `, [input.bookingId,
+        nextPricing.addonTotalPaise,
+        nextPricing.addonDiscountPaise,
+        nextPricing.addonTaxableAfterDiscountPaise,
+        nextPricing.addonTaxInclusivePaise,
+        nextPricing.addonTaxExclusivePaise,
+        nextPricing.taxAmountPaise,
+        nextPricing.inclusiveTaxAmountPaise,
+        nextPricing.exclusiveTaxAmountPaise,
+        nextPricing.totalDiscountPaise,
+        nextPricing.subtotalAfterDiscountPaise,
+        nextPricing.preRoundTotalPaise,
+        nextPricing.roundingAdjustmentPaise,
+        nextPricing.amountToPayPaise,
+        JSON.stringify(nextPricing.taxRows || []),
+        JSON.stringify(nextPricing)]);
+    await client.query(`
+    update zigo.service_requests
+    set booking_amount_paise = $2,
+        metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+          'bookingAmountPaise', $2::bigint,
+          'paymentAmountPaise', $2::bigint,
+          'pricingBreakdown', $3::jsonb
+        ),
+        updated_at = now()
+    where id = $1::uuid
+  `, [input.bookingId, amountToPayPaise, JSON.stringify(nextPricing)]);
+    return nextPricing;
 }
 async function applyCustomerPortalExtension(client, input) {
     const durationMinutes = Math.max(1, Math.min(240, Math.round(Number(input.durationMinutes || 0))));
@@ -5781,7 +6920,203 @@ async function applyCustomerPortalExtension(client, input) {
       and status_code = 'active'
       and ($6::uuid is null or assistant_id = (select assistant_id from zigo.task_assignments where id = $6::uuid))
   `, [input.bookingId, bookingAvailableAt.toISOString(), bookingEndAt.toISOString(), persistedTotalDurationMinutes, durationMinutes, input.assignmentId || null]);
+    const sequence = await client.query(`
+    select coalesce(max(sequence_no), 0) + 1 as "sequenceNo"
+    from zigo.booking_extension_slots
+    where service_request_id = $1::uuid
+  `, [input.bookingId]);
+    await client.query(`
+    insert into zigo.booking_extension_slots
+      (service_request_id, customer_user_id, sequence_no, previous_duration_minutes, added_duration_minutes,
+       total_duration_minutes, previous_end_at, extended_end_at, previous_available_at, extended_available_at,
+       amount_paise, metadata)
+    values ($1::uuid, $2::uuid, $3::int, $4::int, $5::int, $6::int, $7::timestamptz, $8::timestamptz,
+            $9::timestamptz, $10::timestamptz, $11::int, $12::jsonb)
+  `, [
+        input.bookingId,
+        input.customerUserId || null,
+        sequence.rows[0]?.sequenceNo || 1,
+        previousDurationMinutes,
+        durationMinutes,
+        persistedTotalDurationMinutes,
+        previousEndAt.toISOString(),
+        bookingEndAt.toISOString(),
+        previousAvailableAt.toISOString(),
+        bookingAvailableAt.toISOString(),
+        totalAmountPaise,
+        JSON.stringify(history)
+    ]);
+    await appendCustomerPortalAddOnToBillingSnapshot(client, { bookingId: input.bookingId, record });
     return { record, bookingEndAt, bookingAvailableAt, durationMinutes: persistedTotalDurationMinutes };
+}
+async function applyCustomerPortalStopAddition(client, input) {
+    const stop = normalizeCustomerPortalLiveStop(input.stop);
+    const current = await client.query(`
+    select sr.customer_id as "customerId", sr.category_id as "categoryId", sr.cluster_id as "clusterId",
+      sr.status_code as "bookingStatus", sr.duration_minutes as "bookingDurationMinutes",
+      sr.booking_start_at as "bookingStartAt", sr.booking_end_at as "bookingEndAt",
+       sr.booking_available_at as "bookingAvailableAt", sr.accepted_assignment_id as "assignmentId", sr.metadata,
+       coalesce(nullif(sr.metadata->'bookingLocations'->>'maxLocations', '')::int,
+         nullif(sr.metadata->'bookingLocations'->>'maxLocationsLimit', '')::int,
+         nullif(c.config->'categorySettings'->>'maxLocationsLimit', '')::int,
+         nullif(s.metadata->'bookingLocation'->>'maxLocationsLimit', '')::int, 1) as "maxLocations"
+    from zigo.service_requests sr
+    left join zigo.categories c on c.id = sr.category_id
+    left join zigo.services s on s.id = sr.service_id
+    where sr.id = $1::uuid
+    for update
+  `, [input.bookingId]);
+    const row = current.rows[0];
+    if (!row)
+        throw new HttpError(404, "Booking not found.");
+    if (!isCustomerLiveStopBookingStatus(row.bookingStatus)) {
+        throw new HttpError(409, "A new stop can be added only while the assistant is processing this booking.");
+    }
+    const existing = await client.query(`
+    select id, sequence, location_type as "locationType", name as label, address, latitude, longitude,
+      cluster_id as "clusterId", metadata
+    from zigo.request_locations
+    where service_request_id = $1::uuid
+    order by sequence asc
+  `, [input.bookingId]);
+    if (!existing.rows.length)
+        throw new HttpError(409, "The booking has no valid route locations.");
+    const configuredMaxLocations = Math.max(1, Number(row.maxLocations || 1));
+    if (existing.rows.length >= configuredMaxLocations) {
+        throw new HttpError(409, `Maximum ${configuredMaxLocations} locations are allowed for this booking.`);
+    }
+    const previous = existing.rows.at(-1);
+    if (previous && Number.isFinite(Number(previous.latitude)) && Number.isFinite(Number(previous.longitude))
+        && portalDistanceMeters(previous, stop) < 2)
+        throw new HttpError(409, "The new stop must be different from the previous stop.");
+    const nextSequence = existing.rows.length + 1;
+    const inserted = await client.query(`
+    insert into zigo.request_locations
+      (service_request_id, sequence, location_type, name, address, latitude, longitude, cluster_id, metadata)
+    values ($1::uuid, $2::int, 'stop_point', $3, $4, $5, $6, $7::uuid, $8::jsonb)
+    returning id
+  `, [input.bookingId, nextSequence, stop.label, stop.address, stop.latitude, stop.longitude, stop.clusterId, JSON.stringify({ source: stop.source, addressId: stop.addressId })]);
+    const nextStops = existing.rows.map((item, index) => ({
+        addressId: item.metadata?.addressId || null,
+        label: String(item.label || (index === 0 ? "Start point" : `Stop ${index}`)),
+        address: String(item.address || ""),
+        latitude: Number.isFinite(Number(item.latitude)) ? Number(item.latitude) : null,
+        longitude: Number.isFinite(Number(item.longitude)) ? Number(item.longitude) : null,
+        clusterId: item.clusterId || row.clusterId || null,
+        clusterName: item.metadata?.clusterName || "",
+        cityName: item.metadata?.cityName || "",
+        zoneName: item.metadata?.zoneName || "",
+        source: item.metadata?.source || "customer_portal",
+        sequence: index + 1,
+        isPrimary: index === 0,
+        locationType: index === 0 ? "start_point" : "stop_point"
+    }));
+    nextStops.push({
+        addressId: stop.addressId,
+        label: stop.label,
+        address: stop.address,
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        clusterId: stop.clusterId,
+        clusterName: input.stop.clusterName || "",
+        cityName: input.stop.cityName || "",
+        zoneName: input.stop.zoneName || "",
+        source: stop.source,
+        sequence: nextSequence,
+        isPrimary: false,
+        locationType: "stop_point"
+    });
+    const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
+    const nextBookingLocations = customerBookingLocationsMetadata(metadata, nextStops);
+    const sourcePricing = portalBookingRecord(input.record.pricing) || {};
+    const extensionBaseAmountPaise = input.extensionMinutes > 0
+        ? Math.max(0, Number(sourcePricing.extensionBaseAmountPaise || 0))
+        : 0;
+    const extensionSellingAmountPaise = input.extensionMinutes > 0
+        ? Math.max(0, Number(sourcePricing.extensionSellingAmountPaise || 0))
+        : 0;
+    const extensionTaxAmountPaise = input.extensionMinutes > 0
+        ? Math.max(0, Number(sourcePricing.extensionTaxAmountPaise || input.record.taxAmountPaise || 0))
+        : 0;
+    const extensionTotalAmountPaise = Math.max(0, extensionSellingAmountPaise + extensionTaxAmountPaise);
+    const chargedTotalAmountPaise = Math.max(0, Number(input.record.totalAmountPaise || 0));
+    const stopOnlyAmountPaise = Math.max(0, chargedTotalAmountPaise - extensionTotalAmountPaise);
+    const extensionRecord = {
+        ...input.record,
+        kind: "extension",
+        baseAmountPaise: extensionBaseAmountPaise,
+        sellingAmountPaise: extensionSellingAmountPaise,
+        discountAmountPaise: Math.max(0, extensionBaseAmountPaise - extensionSellingAmountPaise),
+        taxAmountPaise: extensionTaxAmountPaise,
+        totalAmountPaise: extensionTotalAmountPaise,
+        pricing: {
+            ...sourcePricing,
+            baseAmountPaise: extensionBaseAmountPaise,
+            sellingAmountPaise: extensionSellingAmountPaise,
+            discountAmountPaise: Math.max(0, extensionBaseAmountPaise - extensionSellingAmountPaise),
+            itemTotalPaise: Math.max(0, extensionSellingAmountPaise),
+            taxAmountPaise: extensionTaxAmountPaise,
+            totalAmountPaise: extensionTotalAmountPaise
+        },
+        stop,
+        extensionMinutes: input.extensionMinutes
+    };
+    const stopRecord = {
+        ...input.record,
+        kind: "stop",
+        baseAmountPaise: stopOnlyAmountPaise,
+        sellingAmountPaise: stopOnlyAmountPaise,
+        discountAmountPaise: 0,
+        taxAmountPaise: 0,
+        totalAmountPaise: stopOnlyAmountPaise,
+        pricing: {
+            ...sourcePricing,
+            baseAmountPaise: stopOnlyAmountPaise,
+            sellingAmountPaise: stopOnlyAmountPaise,
+            discountAmountPaise: 0,
+            itemTotalPaise: stopOnlyAmountPaise,
+            taxAmountPaise: 0,
+            taxRows: [],
+            totalAmountPaise: stopOnlyAmountPaise
+        },
+        stop,
+        sequence: nextSequence,
+        extensionMinutes: input.extensionMinutes,
+        addedAt: new Date().toISOString()
+    };
+    const timing = input.extensionMinutes > 0 ? await applyCustomerPortalExtension(client, {
+        bookingId: input.bookingId,
+        customerUserId: input.customerUserId,
+        assignmentId: row.assignmentId,
+        durationMinutes: input.extensionMinutes,
+        bookingDurationMinutes: row.bookingDurationMinutes,
+        bookingStartAt: row.bookingStartAt,
+        bookingEndAt: row.bookingEndAt,
+        bookingAvailableAt: row.bookingAvailableAt,
+        record: extensionRecord
+    }) : null;
+    await client.query(`
+    update zigo.service_requests
+    set location_details = $2::jsonb,
+        metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+         'bookingLocations', $3::jsonb,
+           'paidAddOns', coalesce(metadata->'paidAddOns', '[]'::jsonb) || $5::jsonb,
+          'routeStopAdditions', coalesce(metadata->'routeStopAdditions', '[]'::jsonb) || $4::jsonb,
+          'lastAddedStopAt', now()
+        ),
+        updated_at = now()
+    where id = $1::uuid
+  `, [input.bookingId, JSON.stringify(nextStops), JSON.stringify(nextBookingLocations), JSON.stringify([stopRecord]), JSON.stringify([stopRecord])]);
+    await client.query(`
+    insert into zigo.booking_stop_additions
+      (service_request_id, customer_user_id, request_location_id, sequence_no, address, latitude, longitude,
+       distance_meters, delivery_amount_paise, extension_minutes, total_amount_paise, metadata)
+    values ($1::uuid, $2::uuid, $3::uuid, $4::int, $5, $6, $7, $8::int, $9::int, $10::int, $11::int, $12::jsonb)
+  `, [input.bookingId, input.customerUserId, inserted.rows[0]?.id || null, nextSequence, stop.address, stop.latitude, stop.longitude,
+        Number(input.record.routeDistanceMeters || 0), Number(input.record.deliveryAmountPaise || 0), input.extensionMinutes,
+        Number(input.record.totalAmountPaise || 0), JSON.stringify(stopRecord)]);
+    await appendCustomerPortalAddOnToBillingSnapshot(client, { bookingId: input.bookingId, record: stopRecord });
+    return { record: stopRecord, timing, stop, sequence: nextSequence };
 }
 export async function completeCustomerPortalBookingAddOn(userId, input) {
     await ensurePortalSchema();
@@ -5802,14 +7137,24 @@ export async function completeCustomerPortalBookingAddOn(userId, input) {
             throw new HttpError(409, 'Payment has not been verified yet.');
         const paidAt = new Date();
         const record = { id: addOn.id, kind: addOn.kind, durationMinutes: addOn.duration_minutes, baseAmountPaise: addOn.base_amount_paise, discountAmountPaise: addOn.discount_amount_paise, sellingAmountPaise: addOn.selling_amount_paise, taxAmountPaise: addOn.tax_amount_paise, totalAmountPaise: addOn.total_amount_paise, pricing: addOn.pricing, paymentMode: 'online', paidAt: paidAt.toISOString() };
-        const timing = addOn.kind === 'extension' ? await applyCustomerPortalExtension(client, { bookingId: input.bookingId, assignmentId: addOn.assignmentId, durationMinutes: Number(addOn.duration_minutes || 0), bookingDurationMinutes: addOn.bookingDurationMinutes, bookingStartAt: addOn.bookingStartAt, bookingEndAt: addOn.bookingEndAt, bookingAvailableAt: addOn.bookingAvailableAt, record }) : null;
+        const timing = addOn.kind === 'extension' ? await applyCustomerPortalExtension(client, { bookingId: input.bookingId, customerUserId: addOn.customer_user_id, assignmentId: addOn.assignmentId, durationMinutes: Number(addOn.duration_minutes || 0), bookingDurationMinutes: addOn.bookingDurationMinutes, bookingStartAt: addOn.bookingStartAt, bookingEndAt: addOn.bookingEndAt, bookingAvailableAt: addOn.bookingAvailableAt, record })
+            : addOn.kind === 'stop' ? await applyCustomerPortalStopAddition(client, { bookingId: input.bookingId, customerUserId: addOn.customer_user_id, assignmentId: addOn.assignmentId, stop: addOn.metadata?.stop, extensionMinutes: Number(addOn.metadata?.extensionMinutes || addOn.duration_minutes || 0), record: { ...record, routeDistanceMeters: Number(addOn.pricing?.routeDistanceMeters || 0), deliveryAmountPaise: Number(addOn.pricing?.deliveryChargesPaise || 0) } })
+                : null;
         if (!timing)
             await client.query(`update zigo.service_requests set metadata=coalesce(metadata,'{}'::jsonb)||jsonb_build_object('paidAddOns',coalesce(metadata->'paidAddOns','[]'::jsonb)||$2::jsonb),updated_at=now() where id=$1::uuid`, [input.bookingId, JSON.stringify([record])]);
         await client.query(`update zigo.booking_add_on_payments set status_code='paid',provider_payment_id=$2,paid_at=now(),updated_at=now() where id=$1::uuid`, [addOn.id, addOn.providerPaymentId]);
         await client.query('commit');
         if (timing)
             await recalculateAssistantAvailability({ bookingId: input.bookingId }).catch((error) => console.error('Unable to refresh assistant availability after service extension.', error));
-        return timing ? { ...record, durationMinutes: timing.durationMinutes, bookingEndAt: timing.bookingEndAt.toISOString(), bookingAvailableAt: timing.bookingAvailableAt.toISOString() } : record;
+        const appliedTiming = addOn.kind === 'stop' ? timing?.timing : timing;
+        return {
+            ...record,
+            kind: addOn.kind,
+            durationMinutes: appliedTiming?.durationMinutes || null,
+            bookingEndAt: appliedTiming?.bookingEndAt?.toISOString?.() || null,
+            bookingAvailableAt: appliedTiming?.bookingAvailableAt?.toISOString?.() || null,
+            stop: timing?.stop || undefined
+        };
     }
     catch (error) {
         await client.query('rollback');
@@ -5827,7 +7172,7 @@ export async function finalizePaidCustomerPortalBookingAddOnByProviderOrder(prov
     select service_request_id as "bookingId", customer_user_id as "customerUserId"
     from zigo.booking_add_on_payments
     where provider_order_id = $1
-      and kind = 'extension'
+    and kind in ('extension', 'stop')
       and coalesce(status_code, 'created') <> 'paid'
     order by created_at desc
     limit 1
@@ -5873,15 +7218,81 @@ export async function createCustomerPortalCashExtension(userId, input) {
         if (!rule.rows[0]?.available)
             throw new HttpError(409, 'This duration cannot be used to extend the service.');
         const pricing = { ...(await resolveCustomerPortalTaxPricing(quote.basePrice, quote.sellingPrice)), durationMinutes: minutes, categoryPriceRuleId: quote.id, label: quote.label || 'Service extension' };
-        const saved = await client.query(`insert into zigo.booking_add_on_payments(service_request_id,customer_user_id,kind,duration_minutes,base_amount_paise,discount_amount_paise,selling_amount_paise,tax_amount_paise,total_amount_paise,status_code,pricing,metadata) values($1::uuid,$2::uuid,'extension',$3,$4,$5,$6,$7,$8,'due',$9::jsonb,$10::jsonb) returning id`, [input.bookingId, userId, minutes, pricing.baseAmountPaise, pricing.discountAmountPaise, pricing.sellingAmountPaise, pricing.taxAmountPaise, pricing.totalAmountPaise, JSON.stringify(pricing), JSON.stringify({ source: 'customer_portal', paymentMode: 'cash', status: 'due' })]);
+        const billing = customerPortalAddOnBillingValues(pricing);
+        const saved = await client.query(`insert into zigo.booking_add_on_payments(service_request_id,customer_user_id,kind,duration_minutes,base_amount_paise,discount_amount_paise,selling_amount_paise,tax_amount_paise,total_amount_paise,raw_gross_amount_paise,raw_net_amount_paise,taxable_after_discount_paise,amount_after_discount_paise,inclusive_tax_amount_paise,exclusive_tax_amount_paise,rounding_adjustment_paise,status_code,pricing,metadata) values($1::uuid,$2::uuid,'extension',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'due',$16::jsonb,$17::jsonb) returning id`, [input.bookingId, userId, minutes, pricing.baseAmountPaise, pricing.discountAmountPaise, pricing.sellingAmountPaise, pricing.taxAmountPaise, pricing.totalAmountPaise, billing.rawGrossAmountPaise, billing.rawNetAmountPaise, billing.taxableAfterDiscountPaise, billing.amountAfterDiscountPaise, billing.inclusiveTaxAmountPaise, billing.exclusiveTaxAmountPaise, billing.roundingAdjustmentPaise, JSON.stringify(pricing), JSON.stringify({ source: 'customer_portal', paymentMode: 'cash', status: 'due' })]);
         const record = { id: saved.rows[0].id, kind: 'extension', durationMinutes: minutes, baseAmountPaise: pricing.baseAmountPaise, discountAmountPaise: pricing.discountAmountPaise, sellingAmountPaise: pricing.sellingAmountPaise, taxAmountPaise: pricing.taxAmountPaise, totalAmountPaise: pricing.totalAmountPaise, pricing, paymentMode: 'cash', paymentStatus: 'due', appliedAt: new Date().toISOString() };
-        const timing = await applyCustomerPortalExtension(client, { bookingId: input.bookingId, assignmentId: row.assignmentId, durationMinutes: minutes, bookingDurationMinutes: row.bookingDurationMinutes, bookingStartAt: row.bookingStartAt, bookingEndAt: row.bookingEndAt, bookingAvailableAt: row.bookingAvailableAt, record });
+        const timing = await applyCustomerPortalExtension(client, { bookingId: input.bookingId, customerUserId: userId, assignmentId: row.assignmentId, durationMinutes: minutes, bookingDurationMinutes: row.bookingDurationMinutes, bookingStartAt: row.bookingStartAt, bookingEndAt: row.bookingEndAt, bookingAvailableAt: row.bookingAvailableAt, record });
         await client.query('commit');
         await recalculateAssistantAvailability({ bookingId: input.bookingId }).catch((error) => console.error('Unable to refresh assistant availability after cash service extension.', error));
         return { ...record, durationMinutes: timing.durationMinutes, bookingEndAt: timing.bookingEndAt.toISOString(), bookingAvailableAt: timing.bookingAvailableAt.toISOString() };
     }
     catch (error) {
         await client.query('rollback');
+        throw error;
+    }
+    finally {
+        client.release();
+    }
+}
+export async function createCustomerPortalCashStopAddition(userId, input) {
+    await ensurePortalSchema();
+    const quote = await resolveCustomerPortalLiveStopQuote(userId, input);
+    const billing = customerPortalAddOnBillingValues(quote.pricing);
+    const client = await pool.connect();
+    try {
+        await client.query("begin");
+        const saved = await client.query(`
+      insert into zigo.booking_add_on_payments
+        (service_request_id, customer_user_id, kind, duration_minutes, base_amount_paise, discount_amount_paise,
+         selling_amount_paise, tax_amount_paise, total_amount_paise, raw_gross_amount_paise, raw_net_amount_paise,
+         taxable_after_discount_paise, amount_after_discount_paise, inclusive_tax_amount_paise, exclusive_tax_amount_paise,
+         rounding_adjustment_paise, status_code, pricing, metadata)
+      values ($1::uuid, $2::uuid, 'stop', $3::int, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'due', $16::jsonb, $17::jsonb)
+      returning id
+    `, [input.bookingId, userId, quote.pricing.extensionMinutes || null, quote.pricing.baseAmountPaise, quote.pricing.discountAmountPaise,
+            quote.pricing.sellingAmountPaise, quote.pricing.taxAmountPaise, quote.pricing.totalAmountPaise, billing.rawGrossAmountPaise, billing.rawNetAmountPaise,
+            billing.taxableAfterDiscountPaise, billing.amountAfterDiscountPaise, billing.inclusiveTaxAmountPaise, billing.exclusiveTaxAmountPaise,
+            billing.roundingAdjustmentPaise, JSON.stringify(quote.pricing),
+            JSON.stringify({ source: "customer_track_booking", paymentMode: "cash", status: "due", stop: quote.stop, extensionMinutes: quote.pricing.extensionMinutes })]);
+        const record = {
+            id: saved.rows[0].id,
+            kind: "stop",
+            stop: quote.stop,
+            sequence: quote.existingStops.length + 1,
+            extensionMinutes: quote.pricing.extensionMinutes,
+            baseAmountPaise: quote.pricing.baseAmountPaise,
+            discountAmountPaise: quote.pricing.discountAmountPaise,
+            sellingAmountPaise: quote.pricing.sellingAmountPaise,
+            taxAmountPaise: quote.pricing.taxAmountPaise,
+            totalAmountPaise: quote.pricing.totalAmountPaise,
+            routeDistanceMeters: quote.distanceMeters,
+            deliveryAmountPaise: quote.additionalDeliveryChargesPaise,
+            pricing: quote.pricing,
+            paymentMode: "cash",
+            paymentStatus: "due",
+            appliedAt: new Date().toISOString()
+        };
+        const applied = await applyCustomerPortalStopAddition(client, {
+            bookingId: input.bookingId,
+            customerUserId: userId,
+            assignmentId: quote.existingStops.length ? (await client.query(`select accepted_assignment_id as "assignmentId" from zigo.service_requests where id = $1::uuid`, [input.bookingId])).rows[0]?.assignmentId || null : null,
+            stop: quote.stop,
+            extensionMinutes: quote.pricing.extensionMinutes,
+            record
+        });
+        await client.query("commit");
+        await recalculateAssistantAvailability({ bookingId: input.bookingId }).catch((error) => console.error("Unable to refresh assistant availability after cash stop addition.", error));
+        const timing = applied.timing;
+        return {
+            ...record,
+            stop: applied.stop,
+            durationMinutes: timing?.durationMinutes || null,
+            bookingEndAt: timing?.bookingEndAt?.toISOString?.() || null,
+            bookingAvailableAt: timing?.bookingAvailableAt?.toISOString?.() || null
+        };
+    }
+    catch (error) {
+        await client.query("rollback");
         throw error;
     }
     finally {

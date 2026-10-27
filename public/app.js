@@ -57,12 +57,16 @@ const cache = {
   states: [],
   cities: [],
   zones: [],
+  microMarkets: [],
+  nanoMarkets: [],
   services: [],
   categoryServices: [],
   categories: [],
   categoryPrices: [],
   taxMasterRules: [],
+  addonCharges: [],
   paymentModes: [],
+  pgTransactionCharges: [],
   offerCustomers: [],
   offers: [],
   offersPagination: null,
@@ -103,7 +107,9 @@ let editingCategoryMasterId = null;
 let editingCategoryPriceId = null;
 let categoryPriceDeletedDurationIds = [];
 let editingTaxMasterRuleId = null;
+let editingAddOnChargeId = null;
 let editingPaymentModeId = null;
+let editingPgTransactionChargeId = null;
 let editingOfferId = null;
 let editingBookingEngineRuleId = null;
 let editingBookingEngineQuickReplyId = null;
@@ -481,10 +487,21 @@ function table(headers, rows) {
   return `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${headers.length}" class="text-secondary">No records</td></tr>`}</tbody></table></div>`;
 }
 
-function status(value) {
-  const normalized = String(value || "unknown").replace(/_/g, " ");
-  const danger = ["failed", "cancelled", "rejected", "inactive", "deactive", "offline", "disabled", "hidden", "blocked"].includes(String(value));
+function status(value, label = null) {
+  const rawValue = String(value || "unknown");
+  const normalized = String(label ?? rawValue).replace(/_/g, " ");
+  const danger = ["failed", "cancelled", "canceled", "rejected", "inactive", "deactive", "offline", "disabled", "hidden", "blocked"].includes(rawValue.toLowerCase());
   return `<span class="status-pill ${danger ? "danger" : ""}">${escapeHtml(normalized)}</span>`;
+}
+
+function bookingStatus(booking = {}) {
+  const value = String(booking.statusCode || booking.status || booking.reportTab || "unknown");
+  const metadata = booking.metadata || {};
+  const cancelledBy = String(metadata.cancelledBy || "").toLowerCase();
+  const cancellationSource = String(metadata.cancellationSource || "").toLowerCase();
+  const isCustomerCancelled = ["cancelled", "canceled"].includes(value.toLowerCase())
+    && (cancelledBy === "customer" || cancellationSource === "customer_portal");
+  return status(value, isCustomerCancelled ? "Customer Cancelled" : null);
 }
 
 function paymentStatusCapsule(value) {
@@ -975,6 +992,70 @@ async function uploadDocumentFile(file, fieldName, uploadBox = null) {
     if (preview) preview.innerHTML = filePreviewCell(documentPayload);
   }
   return documentPayload;
+}
+
+function parseServiceCategoryMedia(value = []) {
+  let parsed = value;
+  if (typeof value === "string") {
+    try { parsed = JSON.parse(value || "[]"); } catch { parsed = []; }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter((item) => item && item.url)
+    .map((item) => ({
+      url: String(item.url),
+      type: item.type === "video" ? "video" : "image",
+      originalName: String(item.originalName || ""),
+      mimeType: String(item.mimeType || "")
+    }))
+    .filter((item, index, list) => list.findIndex((candidate) => candidate.url === item.url) === index);
+}
+
+function serviceCategoryMediaGallery(items = []) {
+  const media = parseServiceCategoryMedia(items);
+  if (!media.length) return `<span class="helper-text">No files uploaded</span>`;
+  return media.map((item, index) => {
+    const title = item.originalName || `Media ${index + 1}`;
+    const url = assetUrl(item.url);
+    const preview = item.type === "image"
+      ? `<button class="booking-master-attachment-thumb image" data-action="view-image" data-url="${escapeHtml(url)}" data-title="${escapeHtml(title)}" type="button" title="Preview ${escapeHtml(title)}"><img src="${escapeHtml(url)}" alt="${escapeHtml(title)}"></button>`
+      : `<button class="booking-master-attachment-thumb video" data-action="preview-booking-upload" data-url="${escapeHtml(url)}" data-title="${escapeHtml(title)}" data-type="video" data-mime-type="${escapeHtml(item.mimeType)}" type="button" title="Preview ${escapeHtml(title)}"><span>VID</span></button>`;
+    return `<article class="booking-master-attachment-card" data-service-category-media-index="${index}">
+      ${preview}
+      <div class="booking-master-attachment-meta"><b>${escapeHtml(title)}</b><small>${escapeHtml(item.type.toUpperCase())}</small></div>
+      <button class="booking-attachment-remove" data-action="remove-service-category-media" data-index="${index}" type="button" aria-label="Remove ${escapeHtml(title)}">x</button>
+    </article>`;
+  }).join("");
+}
+
+async function uploadServiceCategoryMediaFile(file) {
+  const dataBase64 = await fileToDataUrl(file);
+  const mimeType = mimeTypeForFile(file);
+  const isVideo = mimeType.startsWith("video/");
+  const payload = await api(isVideo ? "/settings/media-documents" : "/settings/media-images", {
+    method: "POST",
+    body: JSON.stringify({ originalName: file.name, mimeType, dataBase64 })
+  });
+  return {
+    url: isVideo ? payload.data.previewUrl : payload.data.imageUrl,
+    type: isVideo ? "video" : "image",
+    originalName: file.name,
+    mimeType
+  };
+}
+
+async function uploadServiceCategoryMediaFiles(files) {
+  const hidden = $("#serviceCategoryMediaUrls");
+  const preview = $("#serviceCategoryMediaPreview");
+  if (!hidden) return [];
+  const media = parseServiceCategoryMedia(hidden.value);
+  for (const file of files) {
+    const uploaded = await uploadServiceCategoryMediaFile(file);
+    if (uploaded.url && !media.some((item) => item.url === uploaded.url)) media.push(uploaded);
+  }
+  hidden.value = JSON.stringify(media);
+  if (preview) preview.innerHTML = serviceCategoryMediaGallery(media);
+  return media;
 }
 
 function bookingAttachmentType(mimeType = "", url = "") {
@@ -4329,6 +4410,13 @@ function taxMasterLabel(value = "") {
   const labels = {
     base_price: "Base Price",
     selling_price: "Selling Price",
+    task: "Task",
+    delivery: "Delivery",
+    packaging: "Packaging",
+    platform: "Platform",
+    weather: "Weather",
+    service: "Service",
+    handling: "Handling",
     inclusive: "Inclusive",
     exclusive: "Exclusive",
     percent: "%",
@@ -4387,6 +4475,7 @@ function resetTaxMasterForm() {
   if (!form) return;
   form.reset();
   form.elements.id.value = "";
+  form.elements.taxCategory.value = "service";
   form.elements.taxApplicableOn.value = "selling_price";
   form.elements.taxApplicability.value = "exclusive";
   form.elements.taxType.value = "percent";
@@ -4406,6 +4495,7 @@ function resetTaxMasterForm() {
 function taxMasterRows(items = []) {
   return (items || []).map((item) => `<tr>
     <td><b>${escapeHtml(item.taxLabel || "-")}</b>${item.taxNote ? `<div class="row-note">${escapeHtml(item.taxNote)}</div>` : ""}</td>
+    <td>${escapeHtml(taxMasterLabel(item.taxCategory || "service"))}</td>
     <td>${escapeHtml(taxMasterLabel(item.taxApplicableOn))}</td>
     <td>${escapeHtml(taxMasterLabel(item.taxApplicability))}</td>
     <td><b>${escapeHtml(taxMasterLabel(item.taxType))}</b> ${escapeHtml(priceMasterNumberText(item.taxValue || 0))}</td>
@@ -4416,6 +4506,230 @@ function taxMasterRows(items = []) {
       <button class="btn btn-sm btn-outline-danger" data-action="delete-record" data-endpoint="/masters/tax-master" data-id="${escapeHtml(item.id)}" type="button">Delete</button>
     </td>
   </tr>`).join("");
+}
+
+const ADDON_CHARGE_LABELS = {
+  delivery: "Delivery",
+  packaging: "Packaging",
+  service: "Service",
+  platform: "Platform",
+  weather: "Weather",
+  handling: "Handling"
+};
+
+function addOnChargeLabel(value = "") {
+  return ADDON_CHARGE_LABELS[String(value || "").toLowerCase()] || value || "-";
+}
+
+function addOnDiscountSlabRow(slab = {}, index = 0) {
+  return `<tr data-addon-discount-row>
+    <td><input class="form-control" data-addon-discount-field="maxAmount" type="number" min="0.01" step="0.01" value="${escapeHtml(slab.maxAmount ?? "")}" placeholder="Amount"></td>
+    <td><select class="form-select" data-addon-discount-field="discountType"><option value="percent" ${slab.discountType !== "flat" ? "selected" : ""}>%</option><option value="flat" ${slab.discountType === "flat" ? "selected" : ""}>Flat</option></select></td>
+    <td><input class="form-control" data-addon-discount-field="discountValue" type="number" min="0" step="0.01" value="${escapeHtml(slab.discountValue ?? 0)}" placeholder="Discount"></td>
+    <td class="text-end"><button class="btn btn-sm btn-outline-danger" data-action="remove-addon-discount-slab" data-index="${index}" type="button" aria-label="Remove discount slab">Remove</button></td>
+  </tr>`;
+}
+
+function addOnDeliverySlabRow(slab = {}, index = 0) {
+  return `<tr data-addon-delivery-row>
+    <td><input class="form-control" data-addon-delivery-field="maxDistanceKm" type="number" min="0.01" step="0.01" value="${escapeHtml(slab.maxDistanceKm ?? "")}" placeholder="Distance"></td>
+    <td><select class="form-select" data-addon-delivery-field="discountType"><option value="percent" ${slab.discountType !== "flat" ? "selected" : ""}>%</option><option value="flat" ${slab.discountType === "flat" ? "selected" : ""}>Flat</option></select></td>
+    <td><input class="form-control" data-addon-delivery-field="discountValue" type="number" min="0" step="0.01" value="${escapeHtml(slab.discountValue ?? 0)}" placeholder="Discount"></td>
+    <td class="text-end"><button class="btn btn-sm btn-outline-danger" data-action="remove-addon-delivery-slab" data-index="${index}" type="button" aria-label="Remove delivery offer slab">Remove</button></td>
+  </tr>`;
+}
+
+function collectAddOnSlabs(form, kind = "discount") {
+  const rowSelector = kind === "delivery" ? "[data-addon-delivery-row]" : "[data-addon-discount-row]";
+  const fieldPrefix = kind === "delivery" ? "data-addon-delivery-field" : "data-addon-discount-field";
+  return [...form.querySelectorAll(rowSelector)].map((row) => {
+    const value = (field) => row.querySelector(`[${fieldPrefix}="${field}"]`)?.value || "";
+    if (kind === "delivery") {
+      return { maxDistanceKm: Number(value("maxDistanceKm")), discountType: value("discountType") === "flat" ? "flat" : "percent", discountValue: Number(value("discountValue") || 0) };
+    }
+    return { maxAmount: Number(value("maxAmount")), discountType: value("discountType") === "flat" ? "flat" : "percent", discountValue: Number(value("discountValue") || 0) };
+  }).filter((slab) => Number(kind === "delivery" ? slab.maxDistanceKm : slab.maxAmount) > 0);
+}
+
+function validateAddOnSlabs(slabs = [], kind = "discount") {
+  let previous = 0;
+  for (const slab of slabs) {
+    const boundary = Number(kind === "delivery" ? slab.maxDistanceKm : slab.maxAmount);
+    const value = Number(slab.discountValue || 0);
+    if (!Number.isFinite(boundary) || boundary <= previous) throw new Error(`${kind === "delivery" ? "Delivery offer" : "Discount"} slabs must use increasing limits.`);
+    if (!Number.isFinite(value) || value < 0 || (slab.discountType === "percent" && value > 100)) throw new Error("Discount values must be valid, and percentage discounts cannot exceed 100%.");
+    previous = boundary;
+  }
+}
+
+function syncAddOnChargeTypeControls(form = document.querySelector('[data-form="addon-charge"]')) {
+  if (!form) return;
+  const isDelivery = form.elements.addonType?.value === "delivery";
+  const isPercent = form.elements.costType?.value === "percent";
+  form.querySelector("[data-addon-pricing-section]")?.classList.toggle("d-none", isDelivery);
+  form.querySelector("[data-addon-delivery-section]")?.classList.toggle("d-none", !isDelivery);
+  form.querySelector("[data-addon-percent-base]")?.classList.toggle("d-none", !isPercent);
+  form.querySelector("[data-addon-customer-price]")?.classList.toggle("d-none", !isPercent || form.elements.percentageBase?.value !== "customer_price");
+}
+
+const ADDON_SCOPE_LABELS = {
+  all: "All locations",
+  state: "State",
+  city: "City",
+  zone: "Zone",
+  cluster: "Cluster",
+  micro_market: "Micro Market",
+  nano_market: "Nano Market"
+};
+
+const ADDON_SCOPE_LEVELS = {
+  all: [],
+  state: ["state"],
+  city: ["state", "city"],
+  zone: ["state", "city", "zone"],
+  cluster: ["state", "city", "zone", "cluster"],
+  micro_market: ["state", "city", "zone", "cluster", "micro_market"],
+  nano_market: ["state", "city", "zone", "cluster", "micro_market", "nano_market"]
+};
+
+function addOnScopeSelectedText(form, fieldName, fallback) {
+  const option = form.elements[fieldName]?.selectedOptions?.[0];
+  return option?.value ? option.textContent.trim() : fallback;
+}
+
+function syncAddOnScopeControls(form = document.querySelector('[data-form="addon-charge"]')) {
+  if (!form) return;
+  const scopeType = ADDON_SCOPE_LEVELS[form.elements.scopeType?.value] ? form.elements.scopeType.value : "all";
+  const levels = new Set(ADDON_SCOPE_LEVELS[scopeType]);
+  const stateId = form.elements.stateId?.value || "";
+  const cityId = form.elements.cityId?.value || "";
+  const zoneId = form.elements.zoneId?.value || "";
+  const clusterId = form.elements.clusterId?.value || "";
+  const microMarketId = form.elements.microMarketId?.value || "";
+  const cityOptions = filterCitiesByState(stateId);
+  const zoneOptions = filterZonesByCity(cityId);
+  const clusterOptions = filterClustersByLocation({ stateId, cityId, zoneId });
+  const microOptions = activeItems(cache.microMarkets || []).filter((item) => !clusterId || String(item.parentId || "") === String(clusterId));
+  const nanoOptions = activeItems(cache.nanoMarkets || []).filter((item) => !microMarketId || String(item.parentId || "") === String(microMarketId));
+  setSelectOptions(form.elements.stateId, "Select State", activeItems(cache.states || []), levels.has("state") ? stateId : "");
+  setSelectOptions(form.elements.cityId, "Select City", levels.has("city") && stateId ? cityOptions : [], levels.has("city") ? cityId : "");
+  setSelectOptions(form.elements.zoneId, "Select Zone", levels.has("zone") && cityId ? zoneOptions : [], levels.has("zone") ? zoneId : "");
+  setSelectOptions(form.elements.clusterId, "Select Cluster", levels.has("cluster") && zoneId ? clusterOptions : [], levels.has("cluster") ? clusterId : "");
+  setSelectOptions(form.elements.microMarketId, "Select Micro Market", levels.has("micro_market") && clusterId ? microOptions : [], levels.has("micro_market") ? microMarketId : "");
+  setSelectOptions(form.elements.nanoMarketId, "Select Nano Market", levels.has("nano_market") && microMarketId ? nanoOptions : [], levels.has("nano_market") ? form.elements.nanoMarketId?.value || "" : "");
+  form.querySelectorAll("[data-addon-scope-field]").forEach((field) => {
+    const level = field.dataset.addonScopeField || "";
+    const enabled = levels.has(level);
+    field.classList.toggle("d-none", !enabled);
+    field.querySelector("select")?.toggleAttribute("disabled", !enabled);
+  });
+}
+
+function addOnScopeLabel(item = {}) {
+  if (item.scopeLabel) return item.scopeLabel;
+  const scopeType = item.scopeType || "all";
+  if (scopeType === "all") return "All locations";
+  return item[`${scopeType === "micro_market" ? "microMarket" : scopeType === "nano_market" ? "nanoMarket" : scopeType}Name`] || ADDON_SCOPE_LABELS[scopeType] || scopeType;
+}
+
+function resetAddOnChargeForm() {
+  editingAddOnChargeId = null;
+  const form = document.querySelector('[data-form="addon-charge"]');
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.addonType.value = "service";
+  form.elements.scopeType.value = "all";
+  form.elements.stateId.value = "";
+  form.elements.cityId.value = "";
+  form.elements.zoneId.value = "";
+  form.elements.clusterId.value = "";
+  form.elements.microMarketId.value = "";
+  form.elements.nanoMarketId.value = "";
+  form.elements.applicableOn.value = "all_customer";
+  form.elements.costType.value = "flat";
+  form.elements.percentageBase.value = "selling_price";
+  form.elements.costValue.value = "0";
+  form.elements.customerPrice.value = "";
+  form.elements.isActive.checked = true;
+  form.querySelector("[data-addon-discount-list]").innerHTML = `<tr class="addon-charge-empty"><td colspan="4">No discount slabs configured.</td></tr>`;
+  form.querySelector("[data-addon-delivery-list]").innerHTML = `<tr class="addon-charge-empty"><td colspan="4">No delivery offer slabs configured.</td></tr>`;
+  syncAddOnScopeControls(form);
+  syncAddOnChargeTypeControls(form);
+  $("#addonChargeSubmitButton").textContent = "Create Add-on Charge";
+  $("#cancelAddOnChargeEditButton")?.classList.add("d-none");
+}
+
+function addOnChargeRows(items = []) {
+  return (items || []).map((item) => `<tr>
+    <td><b>${escapeHtml(addOnChargeLabel(item.addonType))}</b><div class="row-note">${escapeHtml(addOnScopeLabel(item))}</div></td>
+    <td><b>${escapeHtml(item.title || "-")}</b>${item.label ? `<div class="row-note">${escapeHtml(item.label)}</div>` : ""}${item.description ? `<div class="row-note">${escapeHtml(item.description)}</div>` : ""}</td>
+    <td>${escapeHtml(item.applicableOn === "new_customer" ? "New customer" : item.applicableOn === "old_customer" ? "Old customer (>1 booking)" : "All customers")}</td>
+    <td>${item.addonType === "delivery" ? `${(item.deliveryDistanceSlabs || []).length} distance offers` : `${escapeHtml(item.costType === "percent" ? `${item.costValue || 0}%` : priceMasterMoneyText(item.costValue || 0))}${item.costType === "percent" ? `<div class="row-note">${escapeHtml(item.percentageBase || "selling_price")}</div>` : ""}`}<div class="row-note">${(item.discountSlabs || []).length} discount slabs</div></td>
+    <td>${status(item.isActive === false ? "inactive" : "active")}</td>
+    <td class="text-end"><button class="btn btn-sm btn-outline-primary" data-action="edit-addon-charge" data-id="${escapeHtml(item.id)}" type="button">Edit</button> <button class="btn btn-sm btn-outline-danger" data-action="delete-record" data-endpoint="/masters/addon-charges" data-id="${escapeHtml(item.id)}" type="button">Delete</button></td>
+  </tr>`).join("");
+}
+
+async function loadAddOnCharges() {
+  const [result, states, cities, zones, clusters, microMarkets, nanoMarkets] = await Promise.all([
+    safeApi("/masters/addon-charges"),
+    safeApi("/masters/states"),
+    safeApi("/masters/cities"),
+    safeApi("/masters/zones"),
+    safeApi("/masters/clusters"),
+    safeApi("/masters/location-hierarchy/micro-markets"),
+    safeApi("/masters/location-hierarchy/nano-markets")
+  ]);
+  cache.addonCharges = result.data || [];
+  cache.states = states.data || cache.states || [];
+  cache.cities = cities.data || cache.cities || [];
+  cache.zones = zones.data || cache.zones || [];
+  cache.clusters = clusters.data || cache.clusters || [];
+  cache.microMarkets = microMarkets.data || [];
+  cache.nanoMarkets = nanoMarkets.data || [];
+  const formHtml = `<form class="master-form stack" data-form="addon-charge" id="addonChargeForm">
+    <input type="hidden" name="id">
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Add-on Type", `<select class="form-select" name="addonType" data-addon-type><option value="delivery">Delivery</option><option value="packaging">Packaging</option><option value="service" selected>Service</option><option value="platform">Platform</option><option value="weather">Weather</option><option value="handling">Handling</option></select>`)}
+      ${priceMasterFloatingField("Scope", `<select class="form-select" name="scopeType" data-addon-scope-type><option value="all">All locations</option><option value="state">State</option><option value="city">City</option><option value="zone">Zone</option><option value="cluster">Cluster</option><option value="micro_market">Micro Market</option><option value="nano_market">Nano Market</option></select>`)}
+      ${priceMasterFloatingField("Applicable On", `<select class="form-select" name="applicableOn"><option value="all_customer">All customers</option><option value="new_customer">New customer (first booking)</option><option value="old_customer">Old customer (more than 1 booking)</option></select>`)}
+    </div>
+    <div class="master-form compact mb-0" data-addon-scope-locations>
+      <div data-addon-scope-field="state">${priceMasterFloatingField("State", `<select class="form-select" name="stateId" data-addon-scope-state><option value="">Select State</option></select>`)}</div>
+      <div data-addon-scope-field="city">${priceMasterFloatingField("City", `<select class="form-select" name="cityId" data-addon-scope-city><option value="">Select City</option></select>`)}</div>
+      <div data-addon-scope-field="zone">${priceMasterFloatingField("Zone", `<select class="form-select" name="zoneId" data-addon-scope-zone><option value="">Select Zone</option></select>`)}</div>
+      <div data-addon-scope-field="cluster">${priceMasterFloatingField("Cluster", `<select class="form-select" name="clusterId" data-addon-scope-cluster><option value="">Select Cluster</option></select>`)}</div>
+      <div data-addon-scope-field="micro_market">${priceMasterFloatingField("Micro Market", `<select class="form-select" name="microMarketId" data-addon-scope-micro-market><option value="">Select Micro Market</option></select>`)}</div>
+      <div data-addon-scope-field="nano_market">${priceMasterFloatingField("Nano Market", `<select class="form-select" name="nanoMarketId" data-addon-scope-nano-market><option value="">Select Nano Market</option></select>`)}</div>
+    </div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Title", `<input class="form-control" name="title" maxlength="160" required placeholder="Weather handling charge">`)}
+      ${priceMasterFloatingField("Label", `<input class="form-control" name="label" maxlength="120" required placeholder="Weather fee">`)}
+    </div>
+    ${priceMasterFloatingField("Description", `<textarea class="form-control" name="description" rows="2" maxlength="1000" placeholder="Explain when this add-on applies"></textarea>`)}
+    <div class="addon-charge-config" data-addon-pricing-section>
+      <div class="control-title"><div><p>Pricing</p><h3>Add-on Cost</h3></div><span>Applied at booking</span></div>
+      <div class="master-form compact mb-0">
+        ${priceMasterFloatingField("Cost", `<select class="form-select" name="costType"><option value="flat">Flat</option><option value="percent">%</option></select>`)}
+        ${priceMasterFloatingField("Value", `<input class="form-control" name="costValue" type="number" min="0" step="0.01" value="0" required>`)}
+        <div data-addon-percent-base>${priceMasterFloatingField("Percentage based on", `<select class="form-select" name="percentageBase"><option value="task_base_price">Task Base Price</option><option value="selling_price" selected>Selling Price</option><option value="customer_price">Customer Price (Enter)</option></select>`)}</div>
+        <div data-addon-customer-price class="d-none">${priceMasterFloatingField("Customer Price", `<input class="form-control" name="customerPrice" type="number" min="0" step="0.01" value="0">`)}</div>
+      </div>
+      <div class="control-title"><div><p>Discount</p><h3>Add-on Discount Slabs</h3></div><button class="btn btn-soft btn-sm" data-action="add-addon-discount-slab" type="button">Add slab</button></div>
+      <div class="table-responsive"><table class="data-table addon-charge-slab-table"><thead><tr><th>Final amount up to</th><th>Type</th><th>Discount</th><th></th></tr></thead><tbody data-addon-discount-list><tr class="addon-charge-empty"><td colspan="4">No discount slabs configured.</td></tr></tbody></table></div>
+    </div>
+    <div class="addon-charge-config d-none" data-addon-delivery-section>
+      <div class="control-title"><div><p>Delivery Distance Offers</p><h3>Distance Discount Slabs</h3></div><button class="btn btn-soft btn-sm" data-action="add-addon-delivery-slab" type="button">Add slab</button></div>
+      <div class="table-responsive"><table class="data-table addon-charge-slab-table"><thead><tr><th>Distance up to (km)</th><th>Type</th><th>Discount</th><th></th></tr></thead><tbody data-addon-delivery-list><tr class="addon-charge-empty"><td colspan="4">No delivery offer slabs configured.</td></tr></tbody></table></div>
+      <p class="helper-text">Delivery distance charges continue to use the Assistant Master travel-cost slabs. These slabs discount the calculated delivery charge.</p>
+    </div>
+    <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+    <div class="form-actions"><button class="btn btn-primary" id="addonChargeSubmitButton">Create Add-on Charge</button><button class="btn btn-outline-secondary d-none" id="cancelAddOnChargeEditButton" type="button">Cancel</button></div>
+  </form>`;
+  $("#addonChargesSection").innerHTML = pageTitleBlock("Add-on Charges Master", "Configure delivery offers and auditable packaging, service, platform, weather, and handling charges") + `<div class="master-grid single-column">${panel("Create / Edit Add-on Charge", "Each active add-on is evaluated at booking and stored with its exact discount and tax amounts", formHtml)}${panel("Configured Add-ons", "Edit, activate, deactivate, or delete add-on rules", table(["Type / Scope", "Title / Label", "Applicable On", "Pricing / Offers", "Status", ""], addOnChargeRows(cache.addonCharges)))}</div>`;
+  syncAddOnScopeControls($("#addonChargeForm"));
+  syncAddOnChargeTypeControls($("#addonChargeForm"));
 }
 
 function paymentModeScopeText(rule = {}) {
@@ -7528,6 +7842,7 @@ function paymentDetailModalHtml(payment = {}) {
         ${paymentDetailField("Razorpay Payment ID", payment.razorpayPaymentId)}
         ${paymentDetailField("Amount", money(payment.amountPaise || 0))}
         ${paymentDetailField("Currency", payment.currency || "INR")}
+        ${paymentDetailField("Payment Mode / Type", adminPaidPaymentInfo(payment).label)}
         ${paymentDetailField("Method", payment.method)}
         ${paymentDetailField("Bank / Wallet / VPA", [payment.bank, payment.wallet, payment.vpa].filter(Boolean).join(" · "))}
         ${paymentDetailField("Email / Contact", [payment.email, payment.contact].filter(Boolean).join(" · "))}
@@ -7563,8 +7878,9 @@ function paymentRows(items = []) {
     return `<tr class="clickable-row payment-record-row" data-action="open-payment-detail" data-id="${escapeHtml(item.id)}" title="Open payment detail">
       <td><b>${escapeHtml(item.bookingNumber || item.receipt || "-")}</b><div class="row-note">${escapeHtml(item.bookingId || "Unlinked order")}</div></td>
       <td><b>${escapeHtml(item.customerName || "-")}</b><div class="row-note">${escapeHtml(item.customerPhone || "")}</div></td>
+      <td><b>${escapeHtml(adminPaidPaymentInfo(item).modeLabel)}</b><div class="row-note">${escapeHtml(adminPaidPaymentInfo(item).typeLabel)}</div></td>
       <td><b>${escapeHtml(item.razorpayOrderId || "-")}</b><div class="row-note">${escapeHtml(item.razorpayPaymentId || "Payment id pending")}</div></td>
-      <td><b>${escapeHtml(money(item.amountPaise || 0))}</b><div class="row-note">${escapeHtml(item.currency || "INR")} · ${escapeHtml(item.method || "-")}</div></td>
+      <td><b>${escapeHtml(money(item.amountPaise || 0))}</b><div class="row-note">${escapeHtml(item.currency || "INR")}</div></td>
       <td>${paymentStatusCapsule(statusText)}${item.errorDescription ? `<div class="row-note text-danger">${escapeHtml(item.errorDescription)}</div>` : ""}</td>
       <td><span>${escapeHtml(formatDate(item.createdAt))}</span><div class="row-note">Reconciled: ${escapeHtml(item.lastReconciledAt ? formatDate(item.lastReconciledAt) : "-")}</div></td>
       <td class="text-end"><button class="btn btn-soft btn-xs" data-action="reconcile-payment" data-id="${escapeHtml(item.id)}" type="button">Reconcile</button></td>
@@ -7580,7 +7896,7 @@ async function loadPayments() {
   $("#paymentsSection").innerHTML =
     pageTitleBlock("Payments", "Razorpay payment lifecycle, webhook status, and stuck-payment reconciliation") +
     `<div class="master-grid single-column">
-      ${panel("Razorpay Payments", "Monitor pending, processing, paid, failed, and stuck payment records", paymentFilterBar() + table(["Booking", "Customer", "Razorpay", "Amount", "Status", "Created", ""], paymentRows(cache.payments)) + paymentPaginationControls(cache.paymentsPagination))}
+      ${panel("Razorpay Payments", "Monitor pending, processing, paid, failed, and stuck payment records", paymentFilterBar() + table(["Booking", "Customer", "Payment Mode / Type", "Razorpay", "Amount", "Status", "Created", ""], paymentRows(cache.payments)) + paymentPaginationControls(cache.paymentsPagination))}
     </div>`;
 }
 
@@ -7943,7 +8259,55 @@ function reportDateTimeRange(startValue, endValue) {
 
 function reportBookingPaymentLabel(booking = {}) {
   const payment = bookingPaymentState(booking);
-  return `${paymentStatusCapsule(payment.label)}${reportCellNote(`Mode: ${booking.paymentType || booking.paymentDetails?.mode || "-"}`)}`;
+  const paymentInfo = adminPaidPaymentInfo(booking);
+  return `${paymentStatusCapsule(payment.label)}${reportCellNote(`Paid via: ${paymentInfo.label}`)}`;
+}
+
+function adminPaidPaymentInfo(source = {}) {
+  const details = source.paymentDetails && typeof source.paymentDetails === "object" ? source.paymentDetails : {};
+  const metadata = source.metadata && typeof source.metadata === "object" ? source.metadata : {};
+  const snapshot = source.billingSnapshot && typeof source.billingSnapshot === "object"
+    ? source.billingSnapshot
+    : (details.pricingBreakdown && typeof details.pricingBreakdown === "object" ? details.pricingBreakdown : (metadata.pricingBreakdown || {}));
+  const razorpayPayment = details.razorpayPayment && typeof details.razorpayPayment === "object" ? details.razorpayPayment : {};
+  const rawMethod = source.paymentMethod
+    || source.method
+    || details.paymentMethod
+    || details.method
+    || razorpayPayment.method
+    || snapshot.paymentMethod
+    || source.pgTransactionPaymentMode
+    || snapshot.pgTransactionPaymentMode
+    || source.paymentType
+    || "";
+  const rawCardType = source.paymentCardType
+    || source.cardType
+    || details.cardType
+    || razorpayPayment.cardType
+    || (razorpayPayment.card && typeof razorpayPayment.card === "object" ? razorpayPayment.card.type : "")
+    || "";
+  const normalizedMethod = String(rawMethod || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const cardType = String(rawCardType || "").trim().toLowerCase();
+  let method = normalizedMethod;
+  if (["razorpay", "online", "online_payment", "onlinepayment"].includes(method)) method = "online";
+  if (["card", "cards"].includes(method)) method = cardType === "debit" ? "debit_card" : cardType === "credit" ? "credit_card" : "card";
+  if (["netbanking", "internet_banking"].includes(method)) method = "net_banking";
+  if (["cod", "cash_on_delivery"].includes(method)) method = "cash";
+  const vpa = source.paymentVpa || source.vpa || details.vpa || razorpayPayment.vpa || "";
+  const paymentMode = method === "cash" || String(source.paymentType || "").toLowerCase() === "cash" ? "Cash" : "Online Payment";
+  const typeLabels = {
+    upi: vpa ? `UPI (${vpa})` : "UPI",
+    net_banking: "Net Banking",
+    debit_card: "Debit Card",
+    credit_card: "Credit Card",
+    card: "Card",
+    wallet: "Wallet",
+    cash: "Cash",
+    online: "Razorpay",
+    other: "Other"
+  };
+  const typeLabel = typeLabels[method] || (method ? method.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Not recorded");
+  return { modeLabel: paymentMode, typeLabel, label: `${paymentMode} > ${typeLabel}`, method, vpa };
 }
 
 function bookingReportAmountPaise(booking = {}) {
@@ -8052,7 +8416,7 @@ function bookingsReportRows(items = []) {
         </td>
         <td>${booking.assistantId ? `<b>${escapeHtml(booking.assistantName || "Assistant")}</b>${reportIdWithCopy(booking.assistantId, "assistant ID")}${reportCellNote(reportMobileNumber(booking.assistantPhone))}` : `<span class="text-secondary">Not assigned</span>`}</td>
         <td><div class="booking-report-amount-cell"><b>${escapeHtml(money(bookingReportAmountPaise(booking)))}</b><span class="mini-badge ${escapeHtml(payment.className)}">${escapeHtml(payment.label)}</span><small>Paid: ${escapeHtml(money(bookingReportPaidAmountPaise(booking)))}</small></div></td>
-        <td>${status(booking.statusCode || booking.status || booking.reportTab || "-")}</td>
+        <td>${bookingStatus(booking)}</td>
       </tr>`;
     })
     .join("");
@@ -8652,11 +9016,12 @@ function adminReportDefinition(reportKey) {
       rows: cache.bookingsReport || [],
       dateAccessor: bookingReportFilterDate,
       render: renderBookingsReport,
-      headers: ["Booking ID", "Created", "Customer", "Customer ID", "Customer Mobile", "Booking Type", "Assigned Time", "Worked Time", "Category", "Service", "Duration", "Assistant", "Assistant ID", "Assistant Mobile", "Base Price", "Discount", "Selling Price", "Item Total", "Tax", "Tip", "Waiting Charges", "Total Amount", "Total Paid", "Payment Status", "Booking Status"],
+      headers: ["Booking ID", "Created", "Customer", "Customer ID", "Customer Mobile", "Booking Type", "Assigned Time", "Worked Time", "Category", "Service", "Duration", "Assistant", "Assistant ID", "Assistant Mobile", "Base Price", "Discount", "Selling Price", "Item Total", "Tax", "Tip", "Waiting Charges", "Total Amount", "Total Paid", "Payment Mode", "Payment Type", "Payment Status", "Booking Status"],
       exportRow: (booking) => {
         const details = booking.paymentDetails || {};
         const snapshot = booking.billingSnapshot || details.pricingBreakdown || booking.metadata?.pricingBreakdown || {};
-        return [bookingReference(booking), formatDate(booking.createdAt), booking.customerName || booking.customerCode, booking.customerId, reportMobileNumber(booking.customerPhone), bookingTypeLabel(booking), bookingReportAssignedWindow(booking), bookingReportWorkedWindow(booking) || "NOT START", booking.categoryName, reportPlainText(booking.serviceMasterName), formatDurationMinutes(bookingTotalCompletionMinutes(booking)), booking.assistantName, booking.assistantId, reportMobileNumber(booking.assistantPhone), money(Number(booking.basePricePaise ?? details.basePricePaise ?? snapshot.basePricePaise ?? 0)), money(Number(booking.discountPaise ?? details.discountPaise ?? snapshot.discountPaise ?? 0)), money(Number(booking.sellingPricePaise ?? details.sellingPricePaise ?? snapshot.sellingPricePaise ?? 0)), money(Number(booking.itemTotalPaise ?? details.itemTotalPaise ?? snapshot.itemTotalPaise ?? 0)), money(Number(booking.taxAmountPaise ?? details.taxAmountPaise ?? snapshot.taxAmountPaise ?? 0)), money(Number(booking.tipAmountPaise ?? details.tipAmountPaise ?? snapshot.tipAmountPaise ?? 0)), money(Number(booking.waitingChargesPaise ?? details.waitingChargesPaise ?? snapshot.waitingChargesPaise ?? 0)), money(bookingReportAmountPaise(booking)), money(bookingReportPaidAmountPaise(booking)), booking.paymentStatus || booking.paymentDetails?.status, booking.statusCode || booking.status || booking.reportTab];
+        const paymentInfo = adminPaidPaymentInfo(booking);
+        return [bookingReference(booking), formatDate(booking.createdAt), booking.customerName || booking.customerCode, booking.customerId, reportMobileNumber(booking.customerPhone), bookingTypeLabel(booking), bookingReportAssignedWindow(booking), bookingReportWorkedWindow(booking) || "NOT START", booking.categoryName, reportPlainText(booking.serviceMasterName), formatDurationMinutes(bookingTotalCompletionMinutes(booking)), booking.assistantName, booking.assistantId, reportMobileNumber(booking.assistantPhone), money(Number(booking.basePricePaise ?? details.basePricePaise ?? snapshot.basePricePaise ?? 0)), money(Number(booking.discountPaise ?? details.discountPaise ?? snapshot.discountPaise ?? 0)), money(Number(booking.sellingPricePaise ?? details.sellingPricePaise ?? snapshot.sellingPricePaise ?? 0)), money(Number(booking.itemTotalPaise ?? details.itemTotalPaise ?? snapshot.itemTotalPaise ?? 0)), money(Number(booking.taxAmountPaise ?? details.taxAmountPaise ?? snapshot.taxAmountPaise ?? 0)), money(Number(booking.tipAmountPaise ?? details.tipAmountPaise ?? snapshot.tipAmountPaise ?? 0)), money(Number(booking.waitingChargesPaise ?? details.waitingChargesPaise ?? snapshot.waitingChargesPaise ?? 0)), money(bookingReportAmountPaise(booking)), money(bookingReportPaidAmountPaise(booking)), paymentInfo.modeLabel, paymentInfo.typeLabel, booking.paymentStatus || booking.paymentDetails?.status, booking.statusCode || booking.status || booking.reportTab];
       }
     };
   }
@@ -9443,7 +9808,7 @@ function legacyBookingQueueRow(booking, tab) {
   return `<article class="booking-queue-row ${showAssistant ? "" : "without-assistant"}">
     <div class="booking-queue-cell booking-reference-cell">
       <button class="text-link strong" data-action="open-booking-detail" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(reference)}</button>
-      <span>${status(booking.statusCode)}</span>
+      <span>${bookingStatus(booking)}</span>
       ${bookingRiskBadge(booking)}
     </div>
     <div class="booking-queue-cell">
@@ -9495,7 +9860,7 @@ function legacyBookingAssignedQueueRow(booking) {
   return `<article class="booking-queue-row assigned-row">
     <div class="booking-queue-cell booking-reference-cell">
       <button class="text-link strong" data-action="open-booking-detail" data-id="${escapeHtml(booking.id)}" type="button">${escapeHtml(reference)}</button>
-      <span>${status(booking.statusCode)}</span>
+      <span>${bookingStatus(booking)}</span>
       ${bookingRiskBadge(booking)}
     </div>
     <div class="booking-queue-cell">
@@ -9609,9 +9974,11 @@ function bookingReportUploadsNoteCell(booking = {}) {
 
 function bookingReportPaymentCell(booking = {}) {
   const payment = bookingPaymentState(booking);
+  const paymentInfo = adminPaidPaymentInfo(booking);
   return `<div class="booking-report-cell booking-payment-cell">
     <span class="mini-badge ${payment.className}">${escapeHtml(payment.label)}</span>
-    <small>Mode: ${escapeHtml(booking.paymentType || "-")}</small>
+    <small>Mode: ${escapeHtml(paymentInfo.modeLabel)}</small>
+    <small>Type: ${escapeHtml(paymentInfo.typeLabel)}</small>
     <b>${money(booking.estimatedAmountPaise)}</b>
     ${bookingNeedsAdminPaymentConfirmation(booking) ? `<button class="btn btn-primary btn-xs" data-action="open-booking-payment-confirmation" data-id="${escapeHtml(booking.id)}" type="button">Confirm Payment</button>` : ""}
   </div>`;
@@ -10070,7 +10437,7 @@ function legacyOpenBookingDetailModal(id) {
   const locations = bookingLocations(booking);
   const uploads = bookingUploads(booking);
   bookingInfoModal("Booking Detail", bookingReference(booking), `<div class="booking-info-grid">
-    ${bookingInfoItem("Status", status(booking.statusCode))}
+    ${bookingInfoItem("Status", bookingStatus(booking))}
     ${bookingInfoItem("Booking Type", bookingTypeLabel(booking))}
     ${bookingInfoItem("Start At", bookingStartAtText(booking))}
     ${bookingInfoItem("Customer", `${escapeHtml(booking.customerName || "-")}<br><small>${escapeHtml(booking.customerPhone || booking.customerEmail || "-")}</small>`)}
@@ -10130,7 +10497,7 @@ function openBookingDetailModal(id) {
     ${bookingInfoItem("Booking Type", bookingTypeLabel(booking))}
     ${bookingInfoItem("Booking Time / Slot", escapeHtml(bookingStartAtText(booking)))}
     ${bookingInfoItem("Total Completion Time", escapeHtml(formatDurationMinutes(bookingTotalCompletionMinutes(booking))))}
-    ${bookingInfoItem("Status", status(booking.statusCode))}
+    ${bookingInfoItem("Status", bookingStatus(booking))}
     ${bookingInfoItem("Customer", `${escapeHtml(booking.customerName || "-")}<br><small>${escapeHtml(booking.customerPhone || booking.customerEmail || "-")}</small>`)}
     ${bookingInfoItem("Services / Categories", bookingServiceInfoHtml(bookingServiceInfo(booking)))}
     ${bookingInfoItem("Locations", `${escapeHtml(bookingLocationTitleSummary(locations))}<br><button class="btn btn-soft btn-xs mt-1" data-action="open-booking-locations" data-id="${escapeHtml(booking.id)}" type="button">View locations</button>`)}
@@ -10203,6 +10570,7 @@ function bookingReportDetailExtensionsHtml(booking = {}, updates = []) {
 
 function bookingReportDetailPaymentsHtml(booking = {}, payments = []) {
   const payment = bookingPaymentState(booking);
+  const paymentInfo = adminPaidPaymentInfo(booking);
   const details = booking.paymentDetails || {};
   const metadata = booking.metadata || {};
   const snapshot = booking.billingSnapshot || details.pricingBreakdown || metadata.pricingBreakdown || {};
@@ -10233,13 +10601,14 @@ function bookingReportDetailPaymentsHtml(booking = {}, payments = []) {
     <div>${paymentStatusCapsule(item.status)}<b>${escapeHtml(money(item.amountPaise || 0))}</b></div>
     <small>Order: ${escapeHtml(item.razorpayOrderId || "-")}</small>
     <small>Payment: ${escapeHtml(item.razorpayPaymentId || "Pending")}</small>
-    <small>Method: ${escapeHtml(item.method || booking.paymentType || "-")}</small>
+    <small>Payment Mode / Type: ${escapeHtml(adminPaidPaymentInfo({ ...booking, ...item }).label)}</small>
     ${item.errorDescription ? `<small class="text-danger">${escapeHtml(item.errorDescription)}</small>` : ""}
     <small>${escapeHtml(formatDate(item.updatedAt || item.createdAt))}</small>
   </article>`).join("");
   return `<div class="booking-info-grid">
     ${bookingInfoItem("Payment Status", `<span class="mini-badge ${escapeHtml(payment.className)}">${escapeHtml(payment.label)}</span>`)}
-    ${bookingInfoItem("Payment Mode", escapeHtml(booking.paymentType || details.mode || "-"))}
+    ${bookingInfoItem("Payment Mode", escapeHtml(paymentInfo.modeLabel))}
+    ${bookingInfoItem("Payment Type", escapeHtml(paymentInfo.typeLabel))}
     ${bookingInfoItem("Base Price", money(basePrice))}
     ${bookingInfoItem("Discount", money(discount))}
     ${bookingInfoItem("Discount Rule", `${escapeHtml(String(discountDetails.type || snapshot.discountType || "none"))}${Number(discountDetails.value ?? snapshot.discountValue ?? 0) > 0 ? ` <small>${escapeHtml(String(discountDetails.value ?? snapshot.discountValue))}${String(discountDetails.type || snapshot.discountType) === "percent" ? "%" : ""}</small>` : ""}`)}
@@ -10271,7 +10640,7 @@ async function openBookingReportDetailModal(id) {
         <h3>Booking Detail</h3>
         <div class="booking-info-grid">
           ${bookingInfoItem("Booking ID", `<b>${escapeHtml(bookingReference(booking))}</b>`)}
-          ${bookingInfoItem("Status", status(booking.statusCode || booking.status || "-"))}
+          ${bookingInfoItem("Status", bookingStatus(booking))}
           ${bookingInfoItem("Booking Type", escapeHtml(bookingTypeLabel(booking)))}
           ${bookingInfoItem("Category", escapeHtml(booking.categoryName || "-"))}
           ${bookingInfoItem("Service Master", escapeHtml(reportPlainText(booking.serviceMasterName) || "-"))}
@@ -15446,6 +15815,675 @@ async function confirmCustomerAddressMapPin() {
   await applyCustomerAddressPinLocation(latitude, longitude);
 }
 
+async function loadPillarMaster() {
+  const endpoint = "/masters/service-pillars";
+  const result = await api(endpoint);
+  const records = (result.data || []).slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const root = $("#pillarMasterSection");
+  root.innerHTML = pageTitleBlock("Pillar Master", "") + `<div class="master-grid location-hierarchy-grid">
+    ${panel("Pillar", "", `<form class="master-form stack" id="pillarMasterForm">
+      <input type="hidden" name="id">
+      <label>Name<input class="form-control" name="name" minlength="2" maxlength="160" required></label>
+      <label>Code<input class="form-control text-uppercase" name="code" minlength="2" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" required></label>
+      <label>Description<textarea class="form-control" name="description" maxlength="5000" rows="4"></textarea></label>
+      <label>Display Order<input class="form-control" name="displayOrder" type="number" min="0" max="100000" value="0" required></label>
+      <label>Status<select class="form-select" name="status" required>
+        <option value="draft">Draft</option>
+        <option value="active">Active</option>
+        <option value="inactive">Inactive</option>
+        <option value="retired">Retired</option>
+      </select></label>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">Create Pillar</button><button class="btn btn-outline-secondary" type="reset">Cancel</button></div>
+    </form>`)}
+    ${panel("Pillar Records", "", `<input class="form-control mb-3" data-pillar-search type="search" autocomplete="off" placeholder="Search name, code or status">
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Order</th><th>Name</th><th>Code</th><th>Description</th><th>Services</th><th>Status</th><th></th></tr></thead><tbody data-pillar-rows></tbody></table></div>`)}
+  </div>`;
+
+  const form = root.querySelector("#pillarMasterForm");
+  const submit = form.querySelector('[type="submit"]');
+  const search = root.querySelector("[data-pillar-search]");
+  const rows = root.querySelector("[data-pillar-rows]");
+
+  const renderRows = () => {
+    const query = String(search.value || "").trim().toLowerCase();
+    const visible = query
+      ? records.filter(item => [item.name, item.code, item.description, item.status].some(value => String(value || "").toLowerCase().includes(query)))
+      : records;
+    rows.innerHTML = visible.length ? visible.map(item => {
+      const serviceCount = Number(item.serviceCount || 0);
+      const deleteTitle = serviceCount > 0 ? `Assigned to ${serviceCount} service${serviceCount === 1 ? "" : "s"}` : `Delete ${item.name}`;
+      return `<tr>
+        <td>${escapeHtml(item.displayOrder ?? 0)}</td>
+        <td><strong>${escapeHtml(item.name)}</strong></td>
+        <td>${escapeHtml(item.code)}</td>
+        <td>${escapeHtml(item.description || "-")}</td>
+        <td>${escapeHtml(serviceCount)}</td>
+        <td>${status(item.status || "draft")}</td>
+        <td class="text-end text-nowrap">
+          <button class="icon-action-btn" data-pillar-command="edit" data-id="${escapeHtml(item.id)}" type="button" title="Edit ${escapeHtml(item.name)}" aria-label="Edit ${escapeHtml(item.name)}">${iconSvg("edit")}</button>
+          <button class="icon-action-btn danger" data-pillar-command="delete" data-id="${escapeHtml(item.id)}" type="button" title="${escapeHtml(deleteTitle)}" aria-label="${escapeHtml(deleteTitle)}" ${serviceCount > 0 ? "disabled" : ""}>${iconSvg("trash")}</button>
+        </td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="7"><div class="empty-state">No pillars found.</div></td></tr>`;
+  };
+
+  const resetForm = () => {
+    form.elements.id.value = "";
+    form.elements.displayOrder.value = "0";
+    form.elements.status.value = "draft";
+    submit.textContent = "Create Pillar";
+  };
+
+  renderRows();
+  search.addEventListener("input", renderRows);
+  form.addEventListener("reset", () => setTimeout(resetForm, 0));
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    submit.disabled = true;
+    const id = form.elements.id.value;
+    const serviceIds = selectedServiceIds();
+    if (!serviceIds.length) {
+      submit.disabled = false;
+      serviceDetails.open = true;
+      showAlert("Map at least one Service Master record to the category.");
+      return;
+    }
+    try {
+      await api(id ? `${endpoint}/${id}` : endpoint, {
+        method: id ? "PUT" : "POST",
+        body: JSON.stringify({
+          name: form.elements.name.value.trim(),
+          code: form.elements.code.value.trim().toUpperCase(),
+          description: form.elements.description.value.trim(),
+          displayOrder: Number(form.elements.displayOrder.value || 0),
+          status: form.elements.status.value
+        })
+      });
+      await loadPillarMaster();
+      showAlert("Pillar saved.", "success");
+    } catch (error) {
+      showAlert(error.message);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  root.addEventListener("click", async event => {
+    const button = event.target.closest("[data-pillar-command]");
+    if (!button || button.disabled) return;
+    const item = records.find(record => record.id === button.dataset.id);
+    if (!item) return;
+    if (button.dataset.pillarCommand === "edit") {
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.description.value = item.description || "";
+      form.elements.displayOrder.value = String(item.displayOrder ?? 0);
+      form.elements.status.value = item.status || "draft";
+      submit.textContent = "Update Pillar";
+      form.elements.name.focus();
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    if (!confirm(`Delete ${item.name}?`)) return;
+    button.disabled = true;
+    try {
+      await api(`${endpoint}/${item.id}`, { method: "DELETE" });
+      await loadPillarMaster();
+      showAlert("Pillar deleted.", "success");
+    } catch (error) {
+      showAlert(error.message);
+      button.disabled = false;
+    }
+  });
+}
+
+async function loadServiceCategoryMasterLegacy() {
+  const endpoint = "/masters/personal-assistant-service-categories";
+  const [categoriesResult, pillarsResult, servicesResult] = await Promise.all([
+    api(endpoint),
+    api("/masters/service-pillars"),
+    api("/masters/personal-assistant-services")
+  ]);
+  const records = (categoriesResult.data || []).slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.pillarName || "").localeCompare(String(b.pillarName || ""))
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const pillars = (pillarsResult.data || []).filter(item => item.status !== "retired").slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const services = (servicesResult.data || []).filter(item => item.status !== "retired").slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const root = $("#serviceCategoryMasterSection");
+  root.innerHTML = pageTitleBlock("Service Category Master", "Group related Service Master records under a Pillar so large pillars remain easy to manage.") + `<div class="master-grid location-hierarchy-grid">
+    ${panel("Service Category", "Create a reusable group and map the related Service Master records from the selected Pillar.", `<form class="master-form stack" id="serviceCategoryMasterForm">
+      <input type="hidden" name="id">
+      <label>Pillar<select class="form-select" name="pillarId" required><option value="">Select Pillar</option>${pillars.map(pillar => `<option value="${escapeHtml(pillar.id)}">${escapeHtml(pillar.name)} (${escapeHtml(pillar.code)})</option>`).join("")}</select></label>
+      <label>Name<input class="form-control" name="name" minlength="2" maxlength="160" required></label>
+      <label>Code<input class="form-control text-uppercase" name="code" minlength="2" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" required></label>
+      <label>Description<textarea class="form-control" name="description" maxlength="5000" rows="4"></textarea></label>
+      <label>Services in Category</label>
+      <details class="nano-market-types service-category-master-services" data-service-category-services>
+        <summary class="form-select"><span data-service-category-service-summary>Select a Pillar first</span></summary>
+        <div class="nano-market-type-options" data-service-category-service-options><span class="helper-text">Select a Pillar first.</span></div>
+      </details>
+      <label>Display Order<input class="form-control" name="displayOrder" type="number" min="0" max="100000" value="0" required></label>
+      <label>Status<select class="form-select" name="status" required>
+        <option value="draft">Draft</option>
+        <option value="active">Active</option>
+        <option value="inactive">Inactive</option>
+        <option value="retired">Retired</option>
+      </select></label>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">Create Service Category</button><button class="btn btn-outline-secondary" type="reset">Cancel</button></div>
+    </form>`)}
+    ${panel("Service Category Records", "Each category groups services that belong to the same Pillar.", `<input class="form-control mb-3" data-service-category-master-search type="search" autocomplete="off" placeholder="Search category, code, pillar, service or status">
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Order</th><th>Category</th><th>Code</th><th>Pillar</th><th>Services</th><th>Status</th><th></th></tr></thead><tbody data-service-category-master-rows></tbody></table></div>`) }
+  </div>`;
+
+  const form = root.querySelector("#serviceCategoryMasterForm");
+  const submit = form.querySelector('[type="submit"]');
+  const search = root.querySelector("[data-service-category-master-search]");
+  const rows = root.querySelector("[data-service-category-master-rows]");
+  const serviceDetails = form.querySelector("[data-service-category-services]");
+  const serviceOptions = form.querySelector("[data-service-category-service-options]");
+  const serviceSummary = form.querySelector("[data-service-category-service-summary]");
+
+  const selectedServiceIds = () => [...form.querySelectorAll('input[name="serviceIds"]:checked')].map(input => input.value);
+  const updateServiceSummary = () => {
+    const names = [...form.querySelectorAll('input[name="serviceIds"]:checked')]
+      .map(input => services.find(service => service.id === input.value)?.name)
+      .filter(Boolean);
+    serviceSummary.textContent = names.length
+      ? `${names.length} service${names.length === 1 ? "" : "s"} selected`
+      : (form.elements.pillarId.value ? "Select Services" : "Select a Pillar first");
+  };
+  const renderServiceOptions = (selectedIds = selectedServiceIds()) => {
+    const pillarId = form.elements.pillarId.value;
+    const available = pillarId
+      ? services.filter(service => (service.pillarIds || []).map(String).includes(String(pillarId)))
+      : [];
+    serviceOptions.innerHTML = available.length
+      ? available.map(service => `<label class="nano-market-type-option"><input type="checkbox" name="serviceIds" value="${escapeHtml(service.id)}" ${selectedIds.includes(service.id) ? "checked" : ""}><span><b>${escapeHtml(service.name)}</b><small>${escapeHtml(service.code)}${service.description ? ` Â· ${escapeHtml(service.description)}` : ""}</small></span></label>`).join("")
+      : `<span class="helper-text">${pillarId ? "No Service Master records are mapped to this Pillar." : "Select a Pillar first."}</span>`;
+    updateServiceSummary();
+  };
+  const renderRows = () => {
+    const query = String(search.value || "").trim().toLowerCase();
+    const visible = query
+      ? records.filter(item => [item.name, item.code, item.description, item.pillarName, item.serviceNames, item.status].some(value => String(value || "").toLowerCase().includes(query)))
+      : records;
+    rows.innerHTML = visible.length ? visible.map(item => `<tr>
+      <td>${escapeHtml(item.displayOrder ?? 0)}</td>
+      <td><strong>${escapeHtml(item.name)}</strong>${item.description ? `<div class="row-note">${escapeHtml(item.description)}</div>` : ""}</td>
+      <td>${escapeHtml(item.code)}</td>
+      <td><strong>${escapeHtml(item.pillarName || "-")}</strong>${item.pillarCode ? `<div class="row-note">${escapeHtml(item.pillarCode)}</div>` : ""}</td>
+      <td><strong>${escapeHtml(item.serviceCount ?? 0)}</strong>${item.serviceNames ? `<div class="row-note">${escapeHtml(item.serviceNames)}</div>` : ""}</td>
+      <td>${status(item.status || "draft")}</td>
+      <td class="text-end text-nowrap"><button class="icon-action-btn" data-service-category-master-command="edit" data-id="${escapeHtml(item.id)}" type="button" title="Edit ${escapeHtml(item.name)}" aria-label="Edit ${escapeHtml(item.name)}">${iconSvg("edit")}</button><button class="icon-action-btn danger" data-service-category-master-command="delete" data-id="${escapeHtml(item.id)}" type="button" title="Delete ${escapeHtml(item.name)}" aria-label="Delete ${escapeHtml(item.name)}">${iconSvg("trash")}</button></td>
+    </tr>`).join("") : `<tr><td colspan="7"><div class="empty-state">No service categories found.</div></td></tr>`;
+  };
+  const resetForm = () => {
+    form.elements.id.value = "";
+    form.elements.pillarId.value = "";
+    form.elements.displayOrder.value = "0";
+    form.elements.status.value = "draft";
+    serviceDetails.open = false;
+    renderServiceOptions([]);
+    submit.textContent = "Create Service Category";
+  };
+
+  renderServiceOptions([]);
+  renderRows();
+  search.addEventListener("input", renderRows);
+  form.addEventListener("change", event => {
+    if (event.target.matches('[name="pillarId"]')) {
+      renderServiceOptions([]);
+      serviceDetails.open = true;
+    }
+    if (event.target.matches('input[name="serviceIds"]')) updateServiceSummary();
+  });
+  form.addEventListener("reset", () => setTimeout(resetForm, 0));
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    submit.disabled = true;
+    const id = form.elements.id.value;
+    try {
+      await api(id ? `${endpoint}/${id}` : endpoint, {
+        method: id ? "PUT" : "POST",
+        body: JSON.stringify({
+          pillarId: form.elements.pillarId.value,
+          name: form.elements.name.value.trim(),
+          code: form.elements.code.value.trim().toUpperCase(),
+          description: form.elements.description.value.trim(),
+          serviceIds,
+          displayOrder: Number(form.elements.displayOrder.value || 0),
+          status: form.elements.status.value
+        })
+      });
+      await loadServiceCategoryMaster();
+      showAlert("Service Category saved.", "success");
+    } catch (error) {
+      showAlert(error.message);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  root.onclick = async event => {
+    const button = event.target.closest("[data-service-category-master-command]");
+    if (!button || button.disabled) return;
+    const item = records.find(record => record.id === button.dataset.id);
+    if (!item) return;
+    if (button.dataset.serviceCategoryMasterCommand === "edit") {
+      form.elements.id.value = item.id;
+      form.elements.pillarId.value = item.pillarId || "";
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.description.value = item.description || "";
+      form.elements.displayOrder.value = String(item.displayOrder ?? 0);
+      form.elements.status.value = item.status || "draft";
+      renderServiceOptions((item.serviceIds || []).map(String));
+      serviceDetails.open = true;
+      submit.textContent = "Update Service Category";
+      form.elements.name.focus();
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    if (!confirm(`Delete ${item.name}? This will remove the service category grouping.`)) return;
+    button.disabled = true;
+    try {
+      await api(`${endpoint}/${item.id}`, { method: "DELETE" });
+      await loadServiceCategoryMaster();
+      showAlert("Service Category deleted.", "success");
+    } catch (error) {
+      showAlert(error.message);
+      button.disabled = false;
+    }
+  };
+}
+
+async function loadServiceCategoryMaster() {
+  const endpoint = "/masters/personal-assistant-service-categories";
+  const [categoriesResult, pillarsResult, servicesResult] = await Promise.all([
+    api(endpoint),
+    api("/masters/service-pillars"),
+    api("/masters/personal-assistant-services")
+  ]);
+  const records = (categoriesResult.data || []).slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const pillars = (pillarsResult.data || []).filter((item) => item.status !== "retired").slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const services = (servicesResult.data || []).filter((item) => item.status !== "retired").slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const root = $("#serviceCategoryMasterSection");
+  root.innerHTML = pageTitleBlock("Service Category Master", "Group related services under one or more Pillars so large catalogs remain easy to manage.") + `<div class="master-grid location-hierarchy-grid">
+    ${panel("Service Category", "Create a category with reusable Pillar and Service mappings.", `<form class="master-form stack" id="serviceCategoryMasterForm">
+      <input type="hidden" name="id">
+      <label>Code<input class="form-control text-uppercase" name="code" minlength="2" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" required></label>
+      <label>Name<input class="form-control" name="name" minlength="2" maxlength="160" required></label>
+      <label>Description<textarea class="form-control" name="description" maxlength="5000" rows="4"></textarea></label>
+      <label>Pillars</label>
+      <details class="nano-market-types service-category-master-pillars" data-service-category-pillars>
+        <summary class="form-select"><span data-service-category-pillar-summary>Select Pillars</span></summary>
+        <div class="nano-market-type-options" data-service-category-pillar-options><span class="helper-text">No Pillars available.</span></div>
+      </details>
+      <label>Images / Videos</label>
+      <div class="upload-box booking-master-attachments-upload" data-upload-box="serviceCategoryMedia" data-upload-kind="service-category-media">
+        <input id="serviceCategoryMediaUploadInput" class="visually-hidden" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime,.mov,.m4v" data-image-upload="serviceCategoryMedia">
+        <input id="serviceCategoryMediaUrls" type="hidden" name="mediaUrls" value="[]">
+        <div class="upload-icon">UP</div>
+        <div class="upload-title">Upload images or videos</div>
+        <button class="btn btn-primary btn-sm" type="button" data-action="browse-image" data-target="serviceCategoryMediaUploadInput">Browse</button>
+        <div id="serviceCategoryMediaPreview" class="booking-master-attachment-grid"><span class="helper-text">No files uploaded</span></div>
+      </div>
+      <label>Services in Category</label>
+      <details class="nano-market-types service-category-master-services" data-service-category-services>
+        <summary class="form-select"><span data-service-category-service-summary>Select Pillars first</span></summary>
+        <div class="nano-market-type-options" data-service-category-service-options><span class="helper-text">Select Pillars first.</span></div>
+      </details>
+      <label>Order<input class="form-control" name="displayOrder" type="number" min="0" max="100000" value="0" required></label>
+      <label class="checkbox-line"><input type="checkbox" name="isActive" checked><span>Is Active</span></label>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">Create Service Category</button><button class="btn btn-outline-secondary" type="reset">Cancel</button></div>
+    </form>`) }
+    ${panel("Service Category Records", "Each record can be shared across multiple Pillars and can contain multiple images or videos.", `<input class="form-control mb-3" data-service-category-master-search type="search" autocomplete="off" placeholder="Search ID, category, code, Pillar, service or status">
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>ID</th><th>Order</th><th>Category</th><th>Code</th><th>Pillars</th><th>Services</th><th>Media</th><th>Is Active</th><th></th></tr></thead><tbody data-service-category-master-rows></tbody></table></div>`) }
+  </div>`;
+
+  const form = root.querySelector("#serviceCategoryMasterForm");
+  const submit = form.querySelector('[type="submit"]');
+  const search = root.querySelector("[data-service-category-master-search]");
+  const rows = root.querySelector("[data-service-category-master-rows]");
+  const pillarDetails = form.querySelector("[data-service-category-pillars]");
+  const pillarOptions = form.querySelector("[data-service-category-pillar-options]");
+  const pillarSummary = form.querySelector("[data-service-category-pillar-summary]");
+  const serviceDetails = form.querySelector("[data-service-category-services]");
+  const serviceOptions = form.querySelector("[data-service-category-service-options]");
+  const serviceSummary = form.querySelector("[data-service-category-service-summary]");
+  const mediaPreview = form.querySelector("#serviceCategoryMediaPreview");
+
+  const selectedPillarIds = () => [...form.querySelectorAll('input[name="pillarIds"]:checked')].map((input) => input.value);
+  const selectedServiceIds = () => [...form.querySelectorAll('input[name="serviceIds"]:checked')].map((input) => input.value);
+  const updatePillarSummary = () => {
+    const names = [...form.querySelectorAll('input[name="pillarIds"]:checked')]
+      .map((input) => pillars.find((pillar) => String(pillar.id) === String(input.value))?.name)
+      .filter(Boolean);
+    pillarSummary.textContent = names.length ? `${names.length} Pillar${names.length === 1 ? "" : "s"} selected` : "Select Pillars";
+  };
+  const updateServiceSummary = () => {
+    const names = [...form.querySelectorAll('input[name="serviceIds"]:checked')]
+      .map((input) => services.find((service) => String(service.id) === String(input.value))?.name)
+      .filter(Boolean);
+    serviceSummary.textContent = names.length
+      ? `${names.length} service${names.length === 1 ? "" : "s"} selected`
+      : (selectedPillarIds().length ? "Select Services" : "Select Pillars first");
+  };
+  const renderPillarOptions = (selectedIds = selectedPillarIds()) => {
+    pillarOptions.innerHTML = pillars.length
+      ? pillars.map((pillar) => `<label class="nano-market-type-option"><input type="checkbox" name="pillarIds" value="${escapeHtml(pillar.id)}" ${selectedIds.includes(String(pillar.id)) ? "checked" : ""}><span><b>${escapeHtml(pillar.name)}</b><small>${escapeHtml(pillar.code)}${pillar.description ? ` · ${escapeHtml(pillar.description)}` : ""}</small></span></label>`).join("")
+      : `<span class="helper-text">Create an active Pillar Master record first.</span>`;
+    updatePillarSummary();
+  };
+  const renderServiceOptions = (selectedIds = selectedServiceIds()) => {
+    const pillarIdSet = new Set(selectedPillarIds().map(String));
+    const available = services.filter((service) => (service.pillarIds || []).some((pillarId) => pillarIdSet.has(String(pillarId))));
+    serviceOptions.innerHTML = available.length
+      ? available.map((service) => `<label class="nano-market-type-option"><input type="checkbox" name="serviceIds" value="${escapeHtml(service.id)}" ${selectedIds.includes(String(service.id)) ? "checked" : ""}><span><b>${escapeHtml(service.name)}</b><small>${escapeHtml(service.code)}${service.description ? ` · ${escapeHtml(service.description)}` : ""}</small></span></label>`).join("")
+      : `<span class="helper-text">${pillarIdSet.size ? "No Service Master records are mapped to the selected Pillars." : "Select Pillars first."}</span>`;
+    updateServiceSummary();
+  };
+  const renderRows = () => {
+    const query = String(search.value || "").trim().toLowerCase();
+    const visible = query
+      ? records.filter((item) => [item.id, item.name, item.code, item.description, item.pillarNames, item.pillarCodes, item.serviceNames, item.isActive ? "active" : "inactive"].some((value) => String(value || "").toLowerCase().includes(query)))
+      : records;
+    rows.innerHTML = visible.length ? visible.map((item) => `<tr>
+      <td><code title="${escapeHtml(item.id)}">${escapeHtml(String(item.id || "").slice(0, 8))}</code></td>
+      <td>${escapeHtml(item.displayOrder ?? 0)}</td>
+      <td><strong>${escapeHtml(item.name)}</strong>${item.description ? `<div class="row-note">${escapeHtml(item.description)}</div>` : ""}</td>
+      <td>${escapeHtml(item.code)}</td>
+      <td><strong>${escapeHtml(item.pillarNames || "-")}</strong>${item.pillarCodes ? `<div class="row-note">${escapeHtml(item.pillarCodes)}</div>` : ""}</td>
+      <td><strong>${escapeHtml(item.serviceCount ?? 0)}</strong>${item.serviceNames ? `<div class="row-note">${escapeHtml(item.serviceNames)}</div>` : ""}</td>
+      <td>${escapeHtml(item.mediaUrls?.length ?? 0)}</td>
+      <td>${status(item.isActive === false ? "inactive" : "active")}</td>
+      <td class="text-end text-nowrap"><button class="icon-action-btn" data-service-category-master-command="edit" data-id="${escapeHtml(item.id)}" type="button" title="Edit ${escapeHtml(item.name)}" aria-label="Edit ${escapeHtml(item.name)}">${iconSvg("edit")}</button><button class="icon-action-btn danger" data-service-category-master-command="delete" data-id="${escapeHtml(item.id)}" type="button" title="Delete ${escapeHtml(item.name)}" aria-label="Delete ${escapeHtml(item.name)}">${iconSvg("trash")}</button></td>
+    </tr>`).join("") : `<tr><td colspan="9"><div class="empty-state">No service categories found.</div></td></tr>`;
+  };
+  const resetForm = () => {
+    form.elements.id.value = "";
+    form.elements.code.value = "";
+    form.elements.name.value = "";
+    form.elements.description.value = "";
+    form.elements.displayOrder.value = "0";
+    form.elements.isActive.checked = true;
+    form.querySelectorAll('input[name="pillarIds"], input[name="serviceIds"]').forEach((input) => { input.checked = false; });
+    form.elements.mediaUrls.value = "[]";
+    mediaPreview.innerHTML = serviceCategoryMediaGallery([]);
+    pillarDetails.open = false;
+    serviceDetails.open = false;
+    updatePillarSummary();
+    renderServiceOptions([]);
+    submit.textContent = "Create Service Category";
+  };
+
+  renderPillarOptions([]);
+  renderServiceOptions([]);
+  renderRows();
+  search.addEventListener("input", renderRows);
+  form.addEventListener("change", (event) => {
+    if (event.target.matches('input[name="pillarIds"]')) {
+      const selectedIds = selectedServiceIds();
+      renderServiceOptions(selectedIds);
+      updatePillarSummary();
+      pillarDetails.open = true;
+      serviceDetails.open = true;
+    }
+    if (event.target.matches('input[name="serviceIds"]')) updateServiceSummary();
+  });
+  form.addEventListener("reset", () => setTimeout(resetForm, 0));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    const pillarIds = selectedPillarIds();
+    const serviceIds = selectedServiceIds();
+    if (!pillarIds.length) {
+      pillarDetails.open = true;
+      showAlert("Select at least one Pillar.");
+      return;
+    }
+    if (!serviceIds.length) {
+      serviceDetails.open = true;
+      showAlert("Map at least one Service Master record to the category.");
+      return;
+    }
+    submit.disabled = true;
+    const id = form.elements.id.value;
+    try {
+      await api(id ? `${endpoint}/${id}` : endpoint, {
+        method: id ? "PUT" : "POST",
+        body: JSON.stringify({
+          pillarIds,
+          name: form.elements.name.value.trim(),
+          code: form.elements.code.value.trim().toUpperCase(),
+          description: form.elements.description.value.trim(),
+          mediaUrls: parseServiceCategoryMedia(form.elements.mediaUrls.value),
+          serviceIds,
+          displayOrder: Number(form.elements.displayOrder.value || 0),
+          isActive: form.elements.isActive.checked
+        })
+      });
+      await loadServiceCategoryMaster();
+      showAlert("Service Category saved.", "success");
+    } catch (error) {
+      showAlert(error.message);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  root.onclick = async (event) => {
+    const button = event.target.closest("[data-service-category-master-command]");
+    if (!button || button.disabled) return;
+    const item = records.find((record) => record.id === button.dataset.id);
+    if (!item) return;
+    if (button.dataset.serviceCategoryMasterCommand === "edit") {
+      form.elements.id.value = item.id;
+      form.elements.code.value = item.code || "";
+      form.elements.name.value = item.name || "";
+      form.elements.description.value = item.description || "";
+      form.elements.displayOrder.value = String(item.displayOrder ?? 0);
+      form.elements.isActive.checked = item.isActive !== false;
+      renderPillarOptions((item.pillarIds || []).map(String));
+      renderServiceOptions((item.serviceIds || []).map(String));
+      form.elements.mediaUrls.value = JSON.stringify(parseServiceCategoryMedia(item.mediaUrls || []));
+      mediaPreview.innerHTML = serviceCategoryMediaGallery(item.mediaUrls || []);
+      pillarDetails.open = true;
+      serviceDetails.open = true;
+      submit.textContent = "Update Service Category";
+      form.elements.name.focus();
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    if (!confirm(`Delete ${item.name}? This will remove the service category grouping.`)) return;
+    button.disabled = true;
+    try {
+      await api(`${endpoint}/${item.id}`, { method: "DELETE" });
+      await loadServiceCategoryMaster();
+      showAlert("Service Category deleted.", "success");
+    } catch (error) {
+      showAlert(error.message);
+      button.disabled = false;
+    }
+  };
+}
+
+async function loadActionMaster() {
+  const endpoint = "/masters/personal-assistant-actions";
+  const result = await api(endpoint);
+  const records = (result.data || []).slice().sort((a, b) =>
+    String(a.name || "").localeCompare(String(b.name || "")) || String(a.code || "").localeCompare(String(b.code || ""))
+  );
+  const root = $("#actionMasterSection");
+  root.innerHTML = pageTitleBlock("Action Master", "Reusable atomic actions used to build executable tasks.") + `<div class="master-grid location-hierarchy-grid">
+    ${panel("Action", "Create one atomic action that can be reused by multiple tasks.", `<form class="master-form stack" id="personalAssistantActionForm">
+      <input type="hidden" name="id">
+      <label>Name<input class="form-control" name="name" minlength="2" maxlength="160" required></label>
+      <label>Code<input class="form-control text-uppercase" name="code" minlength="2" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" required></label>
+      <label>Description<textarea class="form-control" name="description" maxlength="5000" rows="4"></textarea></label>
+      <label>Status<select class="form-select" name="status" required>
+        <option value="draft">Draft</option><option value="active">Active</option><option value="inactive">Inactive</option><option value="retired">Retired</option>
+      </select></label>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">Create Action</button><button class="btn btn-outline-secondary" type="reset">Cancel</button></div>
+    </form>`) }
+    ${panel("Action Records", "Actions can be reused in multiple tasks.", `<input class="form-control mb-3" data-action-master-search type="search" autocomplete="off" placeholder="Search action, code, task or status">
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Name</th><th>Code</th><th>Description</th><th>Tasks</th><th>Status</th><th></th></tr></thead><tbody data-action-master-rows></tbody></table></div>`) }
+  </div>`;
+  const form = root.querySelector("#personalAssistantActionForm");
+  const submit = form.querySelector('[type="submit"]');
+  const search = root.querySelector("[data-action-master-search]");
+  const rows = root.querySelector("[data-action-master-rows]");
+  const renderRows = () => {
+    const query = String(search.value || "").trim().toLowerCase();
+    const visible = query
+      ? records.filter(item => [item.name, item.code, item.description, item.taskNames, item.status].some(value => String(value || "").toLowerCase().includes(query)))
+      : records;
+    rows.innerHTML = visible.length ? visible.map(item => `<tr>
+      <td><strong>${escapeHtml(item.name)}</strong><div class="row-note">v${escapeHtml(item.version ?? 1)}</div></td>
+      <td>${escapeHtml(item.code)}</td>
+      <td>${escapeHtml(item.description || "-")}</td>
+      <td><strong>${escapeHtml(item.taskCount ?? 0)}</strong>${item.taskNames ? `<div class="row-note">${escapeHtml(item.taskNames)}</div>` : ""}</td>
+      <td>${status(item.status || "draft")}</td>
+      <td class="text-end text-nowrap"><button class="icon-action-btn" data-action-master-command="edit" data-id="${escapeHtml(item.id)}" type="button" title="Edit ${escapeHtml(item.name)}" aria-label="Edit ${escapeHtml(item.name)}">${iconSvg("edit")}</button><button class="icon-action-btn danger" data-action-master-command="delete" data-id="${escapeHtml(item.id)}" type="button" title="Retire ${escapeHtml(item.name)}" aria-label="Retire ${escapeHtml(item.name)}">${iconSvg("trash")}</button></td>
+    </tr>`).join("") : `<tr><td colspan="6"><div class="empty-state">No actions found.</div></td></tr>`;
+  };
+  const resetForm = () => { form.elements.id.value = ""; form.elements.status.value = "draft"; submit.textContent = "Create Action"; };
+  renderRows();
+  search.addEventListener("input", renderRows);
+  form.addEventListener("reset", () => setTimeout(resetForm, 0));
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    submit.disabled = true;
+    const id = form.elements.id.value;
+    try {
+      await api(id ? `${endpoint}/${id}` : endpoint, { method: id ? "PUT" : "POST", body: JSON.stringify({
+        name: form.elements.name.value.trim(), code: form.elements.code.value.trim().toUpperCase(), description: form.elements.description.value.trim(), status: form.elements.status.value
+      }) });
+      await loadActionMaster();
+      showAlert("Action saved.", "success");
+    } catch (error) { showAlert(error.message); }
+    finally { submit.disabled = false; }
+  });
+  root.addEventListener("click", async event => {
+    const button = event.target.closest("[data-action-master-command]");
+    if (!button || button.disabled) return;
+    const item = records.find(record => record.id === button.dataset.id);
+    if (!item) return;
+    if (button.dataset.actionMasterCommand === "edit") {
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.description.value = item.description || "";
+      form.elements.status.value = item.status || "draft";
+      submit.textContent = "Update Action";
+      form.elements.name.focus();
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    if (!confirm(`Retire ${item.name}? Existing task mappings will be preserved.`)) return;
+    button.disabled = true;
+    try { await api(`${endpoint}/${item.id}`, { method: "DELETE" }); await loadActionMaster(); showAlert("Action retired.", "success"); }
+    catch (error) { showAlert(error.message); button.disabled = false; }
+  });
+}
+
+async function loadTaskMaster() {
+  const endpoint = "/masters/personal-assistant-tasks";
+  const [tasksResult, actionsResult] = await Promise.all([api(endpoint), api("/masters/personal-assistant-actions")]);
+  const records = (tasksResult.data || []).slice().sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")) || String(a.code || "").localeCompare(String(b.code || "")));
+  const actions = (actionsResult.data || []).filter(item => item.status !== "retired").slice().sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  const root = $("#taskMasterSection");
+  root.innerHTML = pageTitleBlock("Task Master", "A task is an executable customer request made from one or more actions.") + `<div class="master-grid location-hierarchy-grid">
+    ${panel("Task", "Map multiple reusable actions to define the task workflow.", `<form class="master-form stack" id="personalAssistantTaskForm">
+      <input type="hidden" name="id">
+      <label>Name<input class="form-control" name="name" minlength="2" maxlength="160" required></label>
+      <label>Code<input class="form-control text-uppercase" name="code" minlength="2" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" required></label>
+      <label>Description<textarea class="form-control" name="description" maxlength="5000" rows="4"></textarea></label>
+      <label>Risk Tier<select class="form-select" name="riskTier" required><option value="standard">Standard</option><option value="controlled">Controlled</option><option value="elevated">Elevated</option><option value="safeguarded">Safeguarded</option></select></label>
+      <label>Actions</label>
+      <details class="nano-market-types task-master-actions" data-task-actions>
+        <summary class="form-select"><span data-task-action-summary>Select Actions</span></summary>
+        <div class="nano-market-type-options" data-task-action-options>${actions.length ? actions.map(action => `<label class="nano-market-type-option"><input type="checkbox" name="actionIds" value="${escapeHtml(action.id)}"><span><b>${escapeHtml(action.name)}</b><small>${escapeHtml(action.code)}${action.description ? ` · ${escapeHtml(action.description)}` : ""}</small></span></label>`).join("") : `<span class="helper-text">Create an active Action Master record first.</span>`}</div>
+      </details>
+      <label>Status<select class="form-select" name="status" required><option value="draft">Draft</option><option value="active">Active</option><option value="inactive">Inactive</option><option value="retired">Retired</option></select></label>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">Create Task</button><button class="btn btn-outline-secondary" type="reset">Cancel</button></div>
+    </form>`) }
+    ${panel("Task Records", "Tasks are the selectable units shown in Service Master.", `<input class="form-control mb-3" data-task-master-search type="search" autocomplete="off" placeholder="Search task, code, risk, action or status">
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Name</th><th>Code</th><th>Risk</th><th>Actions</th><th>Status</th><th></th></tr></thead><tbody data-task-master-rows></tbody></table></div>`) }
+  </div>`;
+  const form = root.querySelector("#personalAssistantTaskForm");
+  const submit = form.querySelector('[type="submit"]');
+  const search = root.querySelector("[data-task-master-search]");
+  const rows = root.querySelector("[data-task-master-rows]");
+  const actionSummary = form.querySelector("[data-task-action-summary]");
+  const actionDetails = form.querySelector("[data-task-actions]");
+  const selectedActionIds = () => [...form.querySelectorAll('input[name="actionIds"]:checked')].map(input => input.value);
+  const updateActionSummary = () => {
+    const count = selectedActionIds().length;
+    actionSummary.textContent = count ? `${count} action${count === 1 ? "" : "s"} selected` : "Select Actions";
+  };
+  const renderRows = () => {
+    const query = String(search.value || "").trim().toLowerCase();
+    const visible = query ? records.filter(item => [item.name, item.code, item.riskTier, item.actionNames, ...(item.actionCodes || []), item.status].some(value => String(value || "").toLowerCase().includes(query))) : records;
+    rows.innerHTML = visible.length ? visible.map(item => `<tr>
+      <td><strong>${escapeHtml(item.name)}</strong><div class="row-note">${escapeHtml(item.description || "")}</div></td>
+      <td>${escapeHtml(item.code)}</td><td>${status(item.riskTier || "standard")}</td>
+      <td><strong>${escapeHtml(item.actionCount ?? 0)}</strong>${item.actionNames ? `<div class="row-note">${escapeHtml(item.actionNames)}</div>` : ""}${item.actionCodes?.length ? `<div class="row-note">${escapeHtml(item.actionCodes.join(", "))}</div>` : ""}</td><td>${status(item.status || "draft")}</td>
+      <td class="text-end text-nowrap"><button class="icon-action-btn" data-task-master-command="edit" data-id="${escapeHtml(item.id)}" type="button" title="Edit ${escapeHtml(item.name)}" aria-label="Edit ${escapeHtml(item.name)}">${iconSvg("edit")}</button><button class="icon-action-btn danger" data-task-master-command="delete" data-id="${escapeHtml(item.id)}" type="button" title="Retire ${escapeHtml(item.name)}" aria-label="Retire ${escapeHtml(item.name)}">${iconSvg("trash")}</button></td>
+    </tr>`).join("") : `<tr><td colspan="6"><div class="empty-state">No tasks found.</div></td></tr>`;
+  };
+  const resetForm = () => {
+    form.elements.id.value = ""; form.elements.riskTier.value = "standard"; form.elements.status.value = "draft";
+    form.querySelectorAll('input[name="actionIds"]').forEach(input => { input.checked = false; });
+    actionDetails.open = false; updateActionSummary(); submit.textContent = "Create Task";
+  };
+  renderRows(); search.addEventListener("input", renderRows); form.addEventListener("change", event => { if (event.target.matches('input[name="actionIds"]')) updateActionSummary(); }); form.addEventListener("reset", () => setTimeout(resetForm, 0));
+  form.addEventListener("submit", async event => {
+    event.preventDefault(); if (submit.disabled) return;
+    const actionIds = selectedActionIds(); if (!actionIds.length) { showAlert("Map at least one action to the task."); actionDetails.open = true; return; }
+    submit.disabled = true; const id = form.elements.id.value;
+    try {
+      await api(id ? `${endpoint}/${id}` : endpoint, { method: id ? "PUT" : "POST", body: JSON.stringify({ name: form.elements.name.value.trim(), code: form.elements.code.value.trim().toUpperCase(), description: form.elements.description.value.trim(), riskTier: form.elements.riskTier.value, actionIds, status: form.elements.status.value }) });
+      await loadTaskMaster(); showAlert("Task saved.", "success");
+    } catch (error) { showAlert(error.message); } finally { submit.disabled = false; }
+  });
+  root.addEventListener("click", async event => {
+    const button = event.target.closest("[data-task-master-command]"); if (!button || button.disabled) return;
+    const item = records.find(record => record.id === button.dataset.id); if (!item) return;
+    if (button.dataset.taskMasterCommand === "edit") {
+      form.elements.id.value = item.id; form.elements.name.value = item.name || ""; form.elements.code.value = item.code || ""; form.elements.description.value = item.description || ""; form.elements.riskTier.value = item.riskTier || "standard"; form.elements.status.value = item.status || "draft";
+      form.querySelectorAll('input[name="actionIds"]').forEach(input => { input.checked = (item.actionIds || []).includes(input.value); });
+      actionDetails.open = true; updateActionSummary(); submit.textContent = "Update Task"; form.elements.name.focus(); form.scrollIntoView({ behavior: "smooth", block: "start" }); return;
+    }
+    if (!confirm(`Retire ${item.name}? Existing service mappings will be preserved.`)) return;
+    button.disabled = true; try { await api(`${endpoint}/${item.id}`, { method: "DELETE" }); await loadTaskMaster(); showAlert("Task retired.", "success"); } catch (error) { showAlert(error.message); button.disabled = false; }
+  });
+}
+
 async function loadMarketTypes() {
   const endpoint = "/masters/market-types";
   const result = await api(endpoint);
@@ -15501,6 +16539,251 @@ async function loadMarketTypes() {
       catch (error) { showAlert(error.message); button.disabled = false; }
     }
   };
+}
+
+async function loadServiceMaster() {
+  const endpoint = "/masters/personal-assistant-services";
+  const [servicesResult, pillarsResult, tasksResult] = await Promise.all([
+    api(endpoint),
+    api("/masters/service-pillars"),
+    api("/masters/personal-assistant-tasks")
+  ]);
+  const records = (servicesResult.data || []).slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const pillars = (pillarsResult.data || []).slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const tasks = (tasksResult.data || []).filter(item => item.status !== "retired").slice().sort((a, b) =>
+    Number(a.displayOrder || 0) - Number(b.displayOrder || 0)
+      || String(a.name || "").localeCompare(String(b.name || ""))
+  );
+  const taskGroups = tasks.map(task => `<label class="nano-market-type-option"><input type="checkbox" name="taskIds" value="${escapeHtml(task.id)}"><span><b>${escapeHtml(task.name)}</b><small>${escapeHtml(task.code)}${task.description ? ` · ${escapeHtml(task.description)}` : ""}</small></span></label>`).join("");
+  const root = $("#serviceMasterSection");
+  root.innerHTML = pageTitleBlock("Service Master", "") + `<div class="master-grid location-hierarchy-grid">
+    ${panel("Service", "A service groups the tasks a customer can request. Booking mode is selected at booking time.", `<form class="master-form stack" id="personalAssistantServiceForm">
+      <input type="hidden" name="id">
+      <label>Pillar</label>
+      <details class="nano-market-types service-master-pillars" data-service-pillars>
+        <summary class="form-select"><span data-service-pillar-summary>Select Pillars</span></summary>
+        <div class="nano-market-type-options" data-service-pillar-options>${pillars.map(pillar => `<label class="nano-market-type-option"><input type="checkbox" name="pillarIds" value="${escapeHtml(pillar.id)}"><span>${escapeHtml(pillar.name)}</span></label>`).join("")}</div>
+      </details>
+      <label>Name<input class="form-control" name="name" minlength="2" maxlength="160" required></label>
+      <label>Code<input class="form-control text-uppercase" name="code" minlength="2" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" required></label>
+      <label>Description<textarea class="form-control" name="description" maxlength="5000" rows="4"></textarea></label>
+      <label>Available Tasks</label>
+      <details class="nano-market-types service-master-tasks" data-service-tasks>
+        <summary class="form-select"><span data-service-task-summary>Select Tasks</span></summary>
+        <div class="nano-market-type-options" data-service-task-options>${taskGroups || `<span class="helper-text">No tasks are available.</span>`}</div>
+      </details>
+      <label>Display Order<input class="form-control" name="displayOrder" type="number" min="0" max="100000" value="0" required></label>
+      <label>Status<select class="form-select" name="status" required>
+        <option value="draft">Draft</option>
+        <option value="active">Active</option>
+        <option value="inactive">Inactive</option>
+        <option value="retired">Retired</option>
+      </select></label>
+      <label class="form-check"><input class="form-check-input" name="isActive" type="checkbox"> Active in catalog</label>
+      <label class="form-check"><input class="form-check-input" name="isEnabled" type="checkbox"> Enabled for booking</label>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">Create Service</button><button class="btn btn-outline-secondary" type="reset">Cancel</button></div>
+    </form>`)}
+    ${panel("Service Records", "Service-to-task mappings used by customer bookings.", `<input class="form-control mb-3" data-service-master-search type="search" autocomplete="off" placeholder="Search name, code, pillar, task or status">
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Order</th><th>Name</th><th>Code</th><th>Pillar</th><th>Available Tasks</th><th>Status</th><th></th></tr></thead><tbody data-service-master-rows></tbody></table></div>`)}
+  </div>`;
+
+  const form = root.querySelector("#personalAssistantServiceForm");
+  const submit = form.querySelector('[type="submit"]');
+  const search = root.querySelector("[data-service-master-search]");
+  const rows = root.querySelector("[data-service-master-rows]");
+  const pillarSummary = form.querySelector("[data-service-pillar-summary]");
+  const pillarDetails = form.querySelector("[data-service-pillars]");
+  const taskSummary = form.querySelector("[data-service-task-summary]");
+  const taskDetails = form.querySelector("[data-service-tasks]");
+
+  const selectedPillarIds = () => [...form.querySelectorAll('input[name="pillarIds"]:checked')].map(input => input.value);
+  const updatePillarSummary = () => {
+    const names = [...form.querySelectorAll('input[name="pillarIds"]:checked')]
+      .map(input => pillars.find(pillar => pillar.id === input.value)?.name)
+      .filter(Boolean);
+    pillarSummary.textContent = names.length ? names.join(", ") : "Select Pillars";
+  };
+  const selectedTaskIds = () => [...form.querySelectorAll('input[name="taskIds"]:checked')].map(input => input.value);
+  const updateTaskSummary = () => {
+    const names = [...form.querySelectorAll('input[name="taskIds"]:checked')]
+      .map(input => tasks.find(task => task.id === input.value)?.name)
+      .filter(Boolean);
+    taskSummary.textContent = names.length
+      ? `${names.length} task${names.length === 1 ? "" : "s"} selected`
+      : "Select Tasks";
+  };
+  const renderRows = () => {
+    const query = String(search.value || "").trim().toLowerCase();
+    const visible = query
+      ? records.filter(item => [item.name, item.code, item.pillarNames, item.taskNames, item.status].some(value => String(value || "").toLowerCase().includes(query)))
+      : records;
+    rows.innerHTML = visible.length ? visible.map(item => `<tr>
+      <td>${escapeHtml(item.displayOrder ?? 0)}</td>
+      <td><strong>${escapeHtml(item.name)}</strong></td>
+      <td>${escapeHtml(item.code)}</td>
+      <td>${escapeHtml(item.pillarNames || "-")}</td>
+      <td><strong>${escapeHtml(item.taskCount ?? 0)}</strong>${item.taskNames ? `<div class="row-note">${escapeHtml(item.taskNames)}</div>` : ""}</td>
+      <td>${status(item.status || "draft")}</td>
+      <td class="text-end text-nowrap">
+        <button class="icon-action-btn" data-service-master-command="edit" data-id="${escapeHtml(item.id)}" type="button" title="Edit ${escapeHtml(item.name)}" aria-label="Edit ${escapeHtml(item.name)}">${iconSvg("edit")}</button>
+        <button class="icon-action-btn danger" data-service-master-command="delete" data-id="${escapeHtml(item.id)}" type="button" title="Delete ${escapeHtml(item.name)}" aria-label="Delete ${escapeHtml(item.name)}">${iconSvg("trash")}</button>
+      </td>
+    </tr>`).join("") : `<tr><td colspan="7"><div class="empty-state">No services found.</div></td></tr>`;
+  };
+  const resetForm = () => {
+    form.elements.id.value = "";
+    form.elements.displayOrder.value = "0";
+    form.elements.status.value = "draft";
+    form.elements.isActive.checked = false;
+    form.elements.isEnabled.checked = false;
+    form.querySelectorAll('input[name="pillarIds"]').forEach(input => { input.checked = false; });
+    form.querySelectorAll('input[name="taskIds"]').forEach(input => { input.checked = false; });
+    pillarDetails.open = false;
+    taskDetails.open = false;
+    updatePillarSummary();
+    updateTaskSummary();
+    submit.textContent = "Create Service";
+  };
+
+  renderRows();
+  search.addEventListener("input", renderRows);
+  form.addEventListener("change", event => {
+    if (event.target.matches('input[name="pillarIds"]')) updatePillarSummary();
+    if (event.target.matches('input[name="taskIds"]')) updateTaskSummary();
+  });
+  form.addEventListener("reset", () => setTimeout(resetForm, 0));
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    const pillarIds = selectedPillarIds();
+    const taskIds = selectedTaskIds();
+    if (!pillarIds.length) { showAlert("Select at least one pillar."); pillarDetails.open = true; return; }
+    if (!taskIds.length) { showAlert("Map at least one task to the service."); taskDetails.open = true; return; }
+    submit.disabled = true;
+    const id = form.elements.id.value;
+    try {
+      await api(id ? `${endpoint}/${id}` : endpoint, {
+        method: id ? "PUT" : "POST",
+        body: JSON.stringify({
+          name: form.elements.name.value.trim(),
+          code: form.elements.code.value.trim().toUpperCase(),
+          description: form.elements.description.value.trim(),
+          pillarIds,
+          taskIds,
+          displayOrder: Number(form.elements.displayOrder.value || 0),
+          status: form.elements.status.value,
+          isActive: form.elements.isActive.checked,
+          isEnabled: form.elements.isEnabled.checked
+        })
+      });
+      await loadServiceMaster();
+      showAlert("Service saved.", "success");
+    } catch (error) {
+      showAlert(error.message);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  root.addEventListener("click", async event => {
+    const button = event.target.closest("[data-service-master-command]");
+    if (!button || button.disabled) return;
+    const item = records.find(record => record.id === button.dataset.id);
+    if (!item) return;
+    if (button.dataset.serviceMasterCommand === "edit") {
+      form.elements.id.value = item.id;
+      form.elements.name.value = item.name || "";
+      form.elements.code.value = item.code || "";
+      form.elements.description.value = item.description || "";
+      form.elements.displayOrder.value = String(item.displayOrder ?? 0);
+      form.elements.status.value = item.status || "draft";
+      form.elements.isActive.checked = Boolean(item.isActive);
+      form.elements.isEnabled.checked = Boolean(item.isEnabled);
+      form.querySelectorAll('input[name="pillarIds"]').forEach(input => { input.checked = (item.pillarIds || []).includes(input.value); });
+      form.querySelectorAll('input[name="taskIds"]').forEach(input => { input.checked = (item.taskIds || []).includes(input.value); });
+      pillarDetails.open = true;
+      taskDetails.open = true;
+      updatePillarSummary();
+      updateTaskSummary();
+      submit.textContent = "Update Service";
+      form.elements.name.focus();
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    if (!confirm(`Delete ${item.name}? This will retire the service.`)) return;
+    button.disabled = true;
+    try {
+      await api(`${endpoint}/${item.id}`, { method: "DELETE" });
+      await loadServiceMaster();
+      showAlert("Service retired.", "success");
+    } catch (error) {
+      showAlert(error.message);
+      button.disabled = false;
+    }
+  });
+}
+
+function aiWorkResultHtml(result) {
+  const matches = Array.isArray(result?.matches) ? result.matches : [];
+  const meta = [result?.provider ? `Provider: ${result.provider}` : "", result?.model ? `Model: ${result.model}` : ""]
+    .filter(Boolean)
+    .join(" · ");
+  const providerWarning = result?.aiError
+    ? `<div class="ai-work-provider-warning"><b>OpenAI unavailable:</b> ${escapeHtml(result.aiError)} The catalogue fallback was used.</div>`
+    : "";
+  if (!matches.length) {
+    return `${providerWarning}<div class="ai-work-empty"><strong>No active catalogue match found.</strong><p>${escapeHtml(result?.clarificationQuestion || "Try adding the item, destination, or type of assistance needed.")}</p>${meta ? `<small>${escapeHtml(meta)}</small>` : ""}</div>`;
+  }
+  const matchCards = matches.map(match => {
+    const actionsByCode = new Map((match.actions || []).map(action => [String(action.code || "").toUpperCase(), action]));
+    const pillarChips = (match.pillars || []).map(pillar => `<span class="ai-work-chip"><b>${escapeHtml(pillar.code)}</b>${escapeHtml(pillar.name)}</span>`).join("");
+    const taskRows = (match.tasks || []).map(task => {
+      const actions = (task.actionCodes || []).map(code => actionsByCode.get(String(code).toUpperCase())).filter(Boolean);
+      return `<div class="ai-work-task"><div><b>${escapeHtml(task.name)}</b><code>${escapeHtml(task.code)}</code></div>${actions.length ? `<div class="ai-work-actions"><span class="ai-work-label">Actions</span>${actions.map(action => `<span class="ai-work-action"><b>${escapeHtml(action.code)}</b>${escapeHtml(action.name)}</span>`).join("")}</div>` : `<div class="ai-work-muted">No mapped action was returned for this task.</div>`}</div>`;
+    }).join("");
+    const ungroupedActions = (match.actions || []).filter(action => !(match.tasks || []).some(task => (task.actionCodes || []).map(code => String(code).toUpperCase()).includes(String(action.code || "").toUpperCase())));
+    return `<article class="ai-work-match"><div class="ai-work-service-head"><div><span class="ai-work-kicker">Service</span><h3>${escapeHtml(match.service?.name || "-")}</h3><code>${escapeHtml(match.service?.code || "-")}</code></div><span class="ai-work-confidence">${Math.round(Number(match.confidence || 0) * 100)}% match</span></div>${match.service?.description ? `<p class="ai-work-description">${escapeHtml(match.service.description)}</p>` : ""}<div class="ai-work-section"><span class="ai-work-label">Pillars</span><div class="ai-work-chips">${pillarChips || `<span class="ai-work-muted">No pillar mapping returned.</span>`}</div></div><div class="ai-work-section"><span class="ai-work-label">Tasks</span><div class="ai-work-tasks">${taskRows || `<span class="ai-work-muted">No task mapping returned.</span>`}</div></div>${ungroupedActions.length ? `<div class="ai-work-section"><span class="ai-work-label">Additional Actions</span><div class="ai-work-actions">${ungroupedActions.map(action => `<span class="ai-work-action"><b>${escapeHtml(action.code)}</b>${escapeHtml(action.name)}</span>`).join("")}</div></div>` : ""}<p class="ai-work-reason">${escapeHtml(match.reason || "Related active catalogue match.")}</p></article>`;
+  }).join("");
+  return `${providerWarning}<div class="ai-work-result"><div class="ai-work-result-summary"><div><span class="ai-work-kicker">Interpretation</span><p>${escapeHtml(result.interpretationSummary || "The request was mapped to the active catalogue.")}</p></div>${meta ? `<small>${escapeHtml(meta)}</small>` : ""}</div>${result.normalizedRequest ? `<p class="ai-work-normalized"><b>Understood as:</b> ${escapeHtml(result.normalizedRequest)}</p>` : ""}${result.needsClarification && result.clarificationQuestion ? `<div class="ai-work-clarification"><b>Clarification:</b> ${escapeHtml(result.clarificationQuestion)}</div>` : ""}${matchCards}</div>`;
+}
+
+async function loadAiWorkQuery() {
+  const root = $("#aiWorkQuerySection");
+  root.innerHTML = pageTitleBlock("AI Work Query", "Describe a customer problem in Hindi or English and map it to the active master catalogue.") + `<div class="master-grid ai-work-query-grid">
+    ${panel("Customer Request", "Enter the request in normal language.", `<form class="master-form stack" id="aiWorkQueryForm">
+      <label>Problem or request<textarea class="form-control" name="query" rows="6" maxlength="2000" placeholder="Example: I need someone to collect documents from my office and deliver them to my home" required></textarea></label>
+      <p class="helper-text">The result is limited to active records already configured in Pillar, Service, Task, and Action Masters.</p>
+      <div class="form-actions"><button class="btn btn-primary" type="submit" data-ai-work-submit>Identify required work</button><button class="btn btn-outline-secondary" type="reset">Clear</button></div>
+    </form>`)}
+    ${panel("Identification", "The required Pillars, Services, Tasks, and Actions.", `<div data-ai-work-result><div class="empty-state">Enter a request to see the required work.</div></div>`)}
+  </div>`;
+  const form = root.querySelector("#aiWorkQueryForm");
+  const result = root.querySelector("[data-ai-work-result]");
+  const submit = root.querySelector("[data-ai-work-submit]");
+  form.addEventListener("reset", () => {
+    setTimeout(() => { result.innerHTML = `<div class="empty-state">Enter a request to see the required work.</div>`; }, 0);
+  });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const query = String(form.elements.query.value || "").trim();
+    if (!query || submit.disabled) return;
+    submit.disabled = true;
+    result.innerHTML = `<div class="ai-work-loading"><span class="map-loading-spinner" aria-hidden="true"></span><span>Identifying required work...</span></div>`;
+    try {
+      const payload = await api("/masters/ai/identify-work", { method: "POST", body: JSON.stringify({ query }) });
+      result.innerHTML = aiWorkResultHtml(payload.data || {});
+    } catch (error) {
+      result.innerHTML = `<div class="ai-work-error">${escapeHtml(error.message || "Unable to identify the required work.")}</div>`;
+    } finally {
+      submit.disabled = false;
+    }
+  });
 }
 
 const locationHierarchyPages = {
@@ -16230,9 +17513,10 @@ async function loadTaxMaster() {
   const taxMasterFormHtml = `<form class="master-form stack" data-form="tax-master" id="taxMasterForm">
     <input type="hidden" name="id">
     <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Tax Type", `<select class="form-select" name="taxCategory"><option value="task">Task</option><option value="delivery">Delivery</option><option value="packaging">Packaging</option><option value="platform">Platform</option><option value="weather">Weather</option><option value="service" selected>Service</option><option value="handling">Handling</option></select>`)}
       ${priceMasterFloatingField("Tax applicable on", `<select class="form-select" name="taxApplicableOn"><option value="base_price">Base Price</option><option value="selling_price">Selling Price</option></select>`)}
       ${priceMasterFloatingField("Tax applicable", `<select class="form-select" name="taxApplicability"><option value="inclusive">Inclusive</option><option value="exclusive">Exclusive</option></select>`)}
-      ${priceMasterFloatingField("Tax Type", `<select class="form-select" name="taxType"><option value="percent">%</option><option value="flat">Flat</option></select>`)}
+      ${priceMasterFloatingField("Calculation Type", `<select class="form-select" name="taxType"><option value="percent">%</option><option value="flat">Flat</option></select>`)}
       ${priceMasterFloatingField("Tax Value", `<input class="form-control" name="taxValue" type="number" min="0" step="0.01" value="0">`)}
     </div>
     <div class="master-form compact mb-0">
@@ -16252,10 +17536,10 @@ async function loadTaxMaster() {
     <div class="form-actions"><button class="btn btn-primary" id="taxMasterSubmitButton">Create Tax Rule</button><button class="btn btn-outline-secondary d-none" id="cancelTaxMasterEditButton" type="button">Cancel</button></div>
   </form>`;
   $("#taxMasterSection").innerHTML =
-    pageTitleBlock("Tax Master", "Configure tax basis, tax mode, value, formula, label, and note") +
+    pageTitleBlock("Tax Master", "Configure tax type, tax basis, tax mode, value, formula, label, and note") +
     `<div class="master-grid single-column">
       ${panel("Tax Rule", "Create tax rules for base or selling price", taxMasterFormHtml)}
-      ${panel("Reports", "Edit, activate, deactivate, or delete tax rules", table(["Tax", "Applicable On", "Applicable", "Type / Value", "Formula", "Status", ""], taxMasterRows(cache.taxMasterRules)))}
+       ${panel("Reports", "Edit, activate, deactivate, or delete tax rules", table(["Tax", "Tax Type", "Applicable On", "Applicable", "Calculation / Value", "Formula", "Status", ""], taxMasterRows(cache.taxMasterRules)))}
     </div>`;
   taxMasterEvaluateFormula();
 }
@@ -16304,6 +17588,64 @@ async function loadPaymentModeMaster() {
       ${panel("Payment Method", "Configure title, subtitle, icon, handler, scope, and customer availability", formHtml)}
       ${panel("Payment Methods", "Edit, enable, disable, activate, deactivate, or delete payment methods", table(["Payment Method / UI", "Scope", "Description", "Sort", "Status", ""], paymentModeRows(cache.paymentModes)))}
     </div>`;
+}
+
+function resetPgTransactionChargeForm() {
+  editingPgTransactionChargeId = null;
+  const form = $("#pgTransactionChargeForm");
+  if (!form) return;
+  form.reset();
+  form.elements.id.value = "";
+  form.elements.paymentMode.value = "upi";
+  form.elements.chargeType.value = "percent";
+  form.elements.chargeValue.value = "0";
+  form.elements.isActive.checked = true;
+  $("#pgTransactionChargeSubmitButton").textContent = "Create PG Charge Rule";
+  $("#cancelPgTransactionChargeEditButton")?.classList.add("d-none");
+}
+
+function pgTransactionChargeLabel(value = "") {
+  const labels = {
+    upi: "UPI",
+    debit_card: "Debit Card",
+    credit_card: "Credit Card",
+    net_banking: "Net Banking",
+    wallet: "Wallet",
+    cash: "Cash",
+    other: "Other"
+  };
+  return labels[value] || String(value || "Other").replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function pgTransactionChargeRows(items = []) {
+  return (items || []).map((item) => {
+    const value = item.chargeType === "flat" ? priceMasterMoneyText(item.chargeValue || 0) : `${priceMasterNumberText(item.chargeValue || 0)}%`;
+    return `<tr>
+      <td><b>${escapeHtml(pgTransactionChargeLabel(item.paymentMode))}</b><div class="row-note">${escapeHtml(item.paymentMode || "other")}</div></td>
+      <td><b>${escapeHtml(item.chargeType === "flat" ? "Flat" : "Percent")}</b><div class="row-note">${escapeHtml(value)}</div></td>
+      <td>${escapeHtml(item.description || "-")}</td>
+      <td>${status(item.isActive === false ? "inactive" : "active")}</td>
+      <td class="text-end"><button class="btn btn-sm btn-outline-primary" data-action="edit-pg-transaction-charge" data-id="${escapeHtml(item.id)}" type="button">Edit</button> <button class="btn btn-sm btn-outline-danger" data-action="delete-record" data-endpoint="/masters/pg-transaction-charges" data-id="${escapeHtml(item.id)}" type="button">Delete</button></td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadPgTransactionCharges() {
+  const result = await safeApi("/masters/pg-transaction-charges");
+  cache.pgTransactionCharges = result.data || [];
+  const formHtml = `<form class="master-form stack" data-form="pg-transaction-charge" id="pgTransactionChargeForm">
+    <input type="hidden" name="id">
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Payment Mode", `<select class="form-select" name="paymentMode"><option value="upi">UPI</option><option value="debit_card">Debit Card</option><option value="credit_card">Credit Card</option><option value="net_banking">Net Banking</option><option value="wallet">Wallet</option><option value="cash">Cash</option><option value="other">Other</option></select>`)}
+      ${priceMasterFloatingField("Charge Type", `<select class="form-select" name="chargeType"><option value="percent">Percent</option><option value="flat">Flat</option></select>`)}
+      ${priceMasterFloatingField("Charge Value", `<input class="form-control" name="chargeValue" type="number" min="0" step="0.01" value="0" required>`)}
+    </div>
+    ${priceMasterFloatingField("Description", `<textarea class="form-control" name="description" rows="2" maxlength="500" placeholder="Internal payment gateway cost used for loss analysis"></textarea>`)}
+    <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
+    <p class="helper-text">This is an internal PG cost. It is saved against the booking for loss analysis and is not added to the customer bill.</p>
+    <div class="form-actions"><button class="btn btn-primary" id="pgTransactionChargeSubmitButton">Create PG Charge Rule</button><button class="btn btn-outline-secondary d-none" id="cancelPgTransactionChargeEditButton" data-action="cancel-pg-transaction-charge-edit" type="button">Cancel</button></div>
+  </form>`;
+  $("#pgTransactionChargesSection").innerHTML = pageTitleBlock("PG Transaction Charges", "Configure payment gateway costs by the actual payment mode used for a booking") + `<div class="master-grid single-column">${panel("PG Charge Rule", "Use percentage or fixed gateway costs", formHtml)}${panel("Configured PG Charges", "These rules are stored with every paid booking for margin and loss analysis", table(["Payment Mode", "Charge", "Description", "Status", ""], pgTransactionChargeRows(cache.pgTransactionCharges)))}</div>`;
 }
 
 async function loadBookingEngine() {
@@ -17013,6 +18355,63 @@ function assistantMasterSlabEditor(kind, title, description, slabs, { basePaise 
   </section>`;
 }
 
+function assistantMasterOfferSlabRow(slab = {}, index = 0) {
+  const discountType = slab.discountType === "flat" ? "flat" : "percent";
+  return `<tr data-assistant-master-offer-slab data-offer-slab-index="${index}">
+    <td>
+      <label class="assistant-master-offer-distance"><span>Up to</span><input class="form-control form-control-sm" type="number" min="0.1" max="10000" step="0.1" value="${slab.maxDistanceKm == null ? "" : escapeHtml(assistantMasterDecimal(slab.maxDistanceKm))}" data-offer-slab-field="maxDistanceKm" required><b>km</b></label>
+    </td>
+    <td>
+      <div class="assistant-master-rate-inputs">
+        <select class="form-select form-select-sm" data-offer-slab-field="discountType" aria-label="Offer discount type">
+          <option value="percent" ${discountType === "percent" ? "selected" : ""}>Percent</option>
+          <option value="flat" ${discountType === "flat" ? "selected" : ""}>Flat</option>
+        </select>
+        <label><span data-offer-discount-unit>${discountType === "flat" ? "INR" : "%"}</span><input class="form-control form-control-sm" type="number" min="0" max="1000000" step="0.01" value="${escapeHtml(slab.discountValue ?? "")}" data-offer-slab-field="discountValue" required></label>
+      </div>
+    </td>
+    <td class="text-end"><button class="btn btn-outline-danger btn-xs" data-action="remove-assistant-master-offer-slab" type="button" aria-label="Remove delivery offer slab" title="Remove slab">Remove</button></td>
+  </tr>`;
+}
+
+function assistantMasterCollectOfferSlabs(form) {
+  return [...form.querySelectorAll("[data-assistant-master-offer-slab]")].map((row) => ({
+    maxDistanceKm: Number(row.querySelector('[data-offer-slab-field="maxDistanceKm"]')?.value || 0),
+    discountType: row.querySelector('[data-offer-slab-field="discountType"]')?.value === "flat" ? "flat" : "percent",
+    discountValue: Number(row.querySelector('[data-offer-slab-field="discountValue"]')?.value || 0)
+  }));
+}
+
+function validateAssistantMasterOfferSlabs(slabs) {
+  if (slabs.length > 20) throw new Error("Delivery offers support a maximum of 20 slabs.");
+  let previousMaxDistanceKm = 0;
+  slabs.forEach((slab, index) => {
+    if (!Number.isFinite(slab.maxDistanceKm) || slab.maxDistanceKm <= 0) throw new Error(`Offer slab ${index + 1}: enter a valid maximum distance.`);
+    if (index > 0 && slab.maxDistanceKm <= previousMaxDistanceKm) throw new Error(`Offer slab ${index + 1}: maximum distance must be greater than the previous slab.`);
+    if (!Number.isFinite(slab.discountValue) || slab.discountValue < 0) throw new Error(`Offer slab ${index + 1}: enter a valid discount value.`);
+    if (slab.discountType === "percent" && slab.discountValue > 100) throw new Error(`Offer slab ${index + 1}: percentage cannot be greater than 100%.`);
+    previousMaxDistanceKm = slab.maxDistanceKm;
+  });
+}
+
+function assistantMasterOfferEditor(slabs = []) {
+  return `<section class="assistant-master-slab-section assistant-master-offer-section">
+    <div class="assistant-master-section-head">
+      <div><p>Offers</p><h2>Delivery Distance Offers</h2><span>Apply the first matching discount slab to the routed delivery charge. Leave empty when no distance offer is active.</span></div>
+    </div>
+    <div class="table-responsive assistant-master-slab-table-wrap">
+      <table class="table assistant-master-slab-table assistant-master-offer-table">
+        <thead><tr><th>Distance</th><th>Discount</th><th></th></tr></thead>
+        <tbody data-assistant-master-offer-list>${slabs.length ? slabs.map((slab, index) => assistantMasterOfferSlabRow(slab, index)).join("") : `<tr class="assistant-master-offer-empty"><td colspan="3">No delivery offer slabs configured.</td></tr>`}</tbody>
+      </table>
+    </div>
+    <div class="assistant-master-slab-footer">
+      <button class="btn btn-outline-primary btn-sm" data-action="add-assistant-master-offer-slab" type="button">+ Add offer slab</button>
+      <p class="helper-text">Example: Up to 1 km = 100%, up to 3 km = 10%, up to 5 km = 30%.</p>
+    </div>
+  </section>`;
+}
+
 async function loadAssistantMasterValues() {
   const payload = await api("/settings/assistant-master");
   const settings = payload.data || {};
@@ -17504,13 +18903,21 @@ const loaders = {
   microMarkets: () => loadLocationHierarchyPage("microMarkets"),
   nanoMarkets: () => loadLocationHierarchyPage("nanoMarkets"),
   marketTypes: loadMarketTypes,
+  pillarMaster: loadPillarMaster,
+  actionMaster: loadActionMaster,
+  taskMaster: loadTaskMaster,
+  serviceMaster: loadServiceMaster,
+  serviceCategoryMaster: loadServiceCategoryMaster,
+  aiWorkQuery: loadAiWorkQuery,
   services: loadServices,
   categoryServices: loadCategoryServices,
   categories: loadCategories,
   categoryPrice: loadCategoryPrice,
   bookingEngine: loadBookingEngine,
   taxMaster: loadTaxMaster,
+  addonCharges: loadAddOnCharges,
   paymentMode: loadPaymentModeMaster,
+  pgTransactionCharges: loadPgTransactionCharges,
   clusterServices: loadClusterServices,
   bookingTypes: loadBookingTypes,
   surgeMaster: loadSurgeMaster,
@@ -17554,13 +18961,21 @@ const titles = {
   microMarkets: "Micro Market",
   nanoMarkets: "Nano Market",
   marketTypes: "Market Type",
+  pillarMaster: "Pillar Master",
+  actionMaster: "Action Master",
+  taskMaster: "Task Master",
+  serviceMaster: "Service Master",
+  serviceCategoryMaster: "Service Category Master",
+  aiWorkQuery: "AI Work Query",
   services: "Services",
   categoryServices: "Service Master",
   categories: "Categories",
   categoryPrice: "Category Price",
   bookingEngine: "Booking Engine",
   taxMaster: "Tax Master",
+  addonCharges: "Add-on Charges",
   paymentMode: "Payment Methods",
+  pgTransactionCharges: "PG Transaction Charges",
   clusterServices: "Cluster Services",
   bookingTypes: "Booking Type Master",
   surgeMaster: "Surge Master",
@@ -18714,6 +20129,7 @@ document.addEventListener("submit", async (event) => {
       await api(path, {
         method,
         body: JSON.stringify({
+          taxCategory: data.taxCategory || "service",
           taxApplicableOn: data.taxApplicableOn || "selling_price",
           taxApplicability: data.taxApplicability || "exclusive",
           taxType: data.taxType || "percent",
@@ -18726,6 +20142,47 @@ document.addEventListener("submit", async (event) => {
       });
       resetTaxMasterForm();
       await loadTaxMaster();
+      return;
+    }
+    if (formName === "addon-charge") {
+      const addonType = data.addonType || "service";
+      const discountSlabs = collectAddOnSlabs(form, "discount");
+      const deliveryDistanceSlabs = addonType === "delivery" ? collectAddOnSlabs(form, "delivery") : [];
+      validateAddOnSlabs(addonType === "delivery" ? deliveryDistanceSlabs : discountSlabs, addonType === "delivery" ? "delivery" : "discount");
+      const costType = data.costType === "percent" ? "percent" : "flat";
+      const percentageBase = data.percentageBase || "selling_price";
+      if (costType === "percent" && percentageBase === "customer_price" && Number(data.customerPrice || 0) < 0) throw new Error("Enter a valid customer price.");
+      const payload = {
+        addonType,
+        scopeType: data.scopeType || "all",
+        scope: data.scopeType === "all" ? "all" : addOnScopeSelectedText(form, data.scopeType === "state" ? "stateId" : data.scopeType === "city" ? "cityId" : data.scopeType === "zone" ? "zoneId" : data.scopeType === "cluster" ? "clusterId" : data.scopeType === "micro_market" ? "microMarketId" : "nanoMarketId", data.scopeType || "all"),
+        stateId: ["state", "city", "zone", "cluster", "micro_market", "nano_market"].includes(data.scopeType) ? data.stateId || null : null,
+        cityId: ["city", "zone", "cluster", "micro_market", "nano_market"].includes(data.scopeType) ? data.cityId || null : null,
+        zoneId: ["zone", "cluster", "micro_market", "nano_market"].includes(data.scopeType) ? data.zoneId || null : null,
+        clusterId: ["cluster", "micro_market", "nano_market"].includes(data.scopeType) ? data.clusterId || null : null,
+        microMarketId: ["micro_market", "nano_market"].includes(data.scopeType) ? data.microMarketId || null : null,
+        nanoMarketId: data.scopeType === "nano_market" ? data.nanoMarketId || null : null,
+        title: String(data.title || "").trim(),
+        description: data.description || null,
+        label: String(data.label || data.title || "").trim(),
+        applicableOn: data.applicableOn || "all_customer",
+        costType,
+        costValue: Math.max(0, Number(data.costValue || 0)),
+        percentageBase,
+        customerPrice: costType === "percent" && percentageBase === "customer_price" ? Math.max(0, Number(data.customerPrice || 0)) : null,
+        discountSlabs: addonType === "delivery" ? [] : discountSlabs,
+        deliveryDistanceSlabs,
+        isActive: Boolean(form.elements.isActive?.checked)
+      };
+      if (!payload.title) throw new Error("Add-on title is required.");
+      if (!payload.label) throw new Error("Add-on label is required.");
+      const wasEditing = Boolean(editingAddOnChargeId);
+      const method = wasEditing ? "PUT" : "POST";
+      const path = wasEditing ? `/masters/addon-charges/${editingAddOnChargeId}` : "/masters/addon-charges";
+      await api(path, { method, body: JSON.stringify(payload) });
+      resetAddOnChargeForm();
+      await loadAddOnCharges();
+      showAlert(wasEditing ? "Add-on charge updated." : "Add-on charge created.", "success");
       return;
     }
     if (formName === "payment-mode") {
@@ -18754,6 +20211,25 @@ document.addEventListener("submit", async (event) => {
       });
       resetPaymentModeForm();
       await loadPaymentModeMaster();
+      return;
+    }
+    if (formName === "pg-transaction-charge") {
+      const wasEditing = Boolean(editingPgTransactionChargeId);
+      const method = wasEditing ? "PUT" : "POST";
+      const path = wasEditing ? `/masters/pg-transaction-charges/${editingPgTransactionChargeId}` : "/masters/pg-transaction-charges";
+      await api(path, {
+        method,
+        body: JSON.stringify({
+          paymentMode: data.paymentMode || "other",
+          chargeType: data.chargeType === "flat" ? "flat" : "percent",
+          chargeValue: Math.max(0, Number(data.chargeValue || 0)),
+          description: data.description || null,
+          isActive: Boolean(data.isActive)
+        })
+      });
+      resetPgTransactionChargeForm();
+      await loadPgTransactionCharges();
+      showAlert(wasEditing ? "PG charge rule updated." : "PG charge rule created.", "success");
       return;
     }
     if (formName === "booking-engine") {
@@ -19546,6 +21022,24 @@ document.addEventListener("change", async (event) => {
     syncBookingEngineExtensionPolicyControl(input.closest("form"));
     return;
   }
+  const addOnChargeForm = input.closest?.('[data-form="addon-charge"]');
+  if (addOnChargeForm) {
+    if (input instanceof HTMLSelectElement && input.matches?.("[data-addon-scope-type],[data-addon-scope-state],[data-addon-scope-city],[data-addon-scope-zone],[data-addon-scope-cluster],[data-addon-scope-micro-market]")) {
+      syncAddOnScopeControls(addOnChargeForm);
+      return;
+    }
+    if (input instanceof HTMLSelectElement || input.matches?.("[data-addon-type]")) {
+      syncAddOnScopeControls(addOnChargeForm);
+      syncAddOnChargeTypeControls(addOnChargeForm);
+      return;
+    }
+  }
+  if (input instanceof HTMLSelectElement && input.matches('[data-offer-slab-field="discountType"]')) {
+    const row = input.closest("[data-assistant-master-offer-slab]");
+    const unit = row?.querySelector("[data-offer-discount-unit]");
+    if (unit) unit.textContent = input.value === "flat" ? "INR" : "%";
+    return;
+  }
   const assistantMasterSlabSection = input.closest?.("[data-assistant-master-slab-section]");
   if (assistantMasterSlabSection) {
     updateAssistantMasterSlabPreview(assistantMasterSlabSection.dataset.assistantMasterSlabSection);
@@ -20029,6 +21523,12 @@ document.addEventListener("change", async (event) => {
       showAlert(`${files.length} file${files.length === 1 ? "" : "s"} uploaded.`, "success");
       return;
     }
+    if (input.dataset.imageUpload === "serviceCategoryMedia") {
+      const files = [...(input.files || [])];
+      await uploadServiceCategoryMediaFiles(files);
+      showAlert(`${files.length} file${files.length === 1 ? "" : "s"} uploaded.`, "success");
+      return;
+    }
     if (input.dataset.documentUpload) {
       await uploadDocumentFile(file, input.dataset.documentUpload, input.closest("[data-upload-box]"));
       return;
@@ -20230,6 +21730,12 @@ document.addEventListener("drop", async (event) => {
   if (!file) return;
   try {
     clearAlert();
+    if (box.dataset.uploadBox === "serviceCategoryMedia") {
+      const files = [...(event.dataTransfer?.files || [])];
+      await uploadServiceCategoryMediaFiles(files);
+      showAlert(`${files.length} file${files.length === 1 ? "" : "s"} uploaded.`, "success");
+      return;
+    }
     if (box.dataset.uploadKind === "document") {
       await uploadDocumentFile(file, box.dataset.uploadBox, box);
       return;
@@ -20263,6 +21769,85 @@ document.addEventListener("drop", async (event) => {
 
 document.addEventListener("click", async (event) => {
   if (event.target.closest?.('a[href^="https://wa.me/"]')) return;
+  const addAssistantMasterOfferSlab = event.target.closest?.('[data-action="add-assistant-master-offer-slab"]');
+  if (addAssistantMasterOfferSlab) {
+    event.preventDefault();
+    try {
+      const form = addAssistantMasterOfferSlab.closest('[data-form="assistant-master-values"]');
+      if (!form) return;
+      const slabs = assistantMasterCollectOfferSlabs(form);
+      if (slabs.length >= 20) throw new Error("Delivery offers support a maximum of 20 slabs.");
+      const last = slabs.at(-1);
+      const maxDistanceKm = last?.maxDistanceKm > 0 ? Number((last.maxDistanceKm + 2).toFixed(1)) : 1;
+      const list = form.querySelector("[data-assistant-master-offer-list]");
+      list?.querySelector(".assistant-master-offer-empty")?.remove();
+      list?.insertAdjacentHTML("beforeend", assistantMasterOfferSlabRow({ maxDistanceKm, discountType: "percent", discountValue: 0 }, slabs.length));
+    } catch (error) {
+      showAlert(error.message);
+    }
+    return;
+  }
+  const addOnDiscountSlab = event.target.closest?.('[data-action="add-addon-discount-slab"]');
+  if (addOnDiscountSlab) {
+    event.preventDefault();
+    const form = addOnDiscountSlab.closest('[data-form="addon-charge"]');
+    const list = form?.querySelector("[data-addon-discount-list]");
+    if (!form || !list) return;
+    const rows = [...form.querySelectorAll("[data-addon-discount-row]")];
+    if (rows.length >= 20) return showAlert("A maximum of 20 discount slabs is allowed.");
+    const last = rows.at(-1)?.querySelector('[data-addon-discount-field="maxAmount"]')?.value;
+    list.querySelector(".addon-charge-empty")?.remove();
+    list.insertAdjacentHTML("beforeend", addOnDiscountSlabRow({ maxAmount: last ? Number(last) + 1 : 0, discountType: "percent", discountValue: 0 }, rows.length));
+    return;
+  }
+  const removeOnDiscountSlab = event.target.closest?.('[data-action="remove-addon-discount-slab"]');
+  if (removeOnDiscountSlab) {
+    event.preventDefault();
+    const form = removeOnDiscountSlab.closest('[data-form="addon-charge"]');
+    const row = removeOnDiscountSlab.closest("[data-addon-discount-row]");
+    if (!form || !row) return;
+    row.remove();
+    const list = form.querySelector("[data-addon-discount-list]");
+    if (list && !list.querySelector("[data-addon-discount-row]")) list.innerHTML = `<tr class="addon-charge-empty"><td colspan="4">No discount slabs configured.</td></tr>`;
+    return;
+  }
+  const addOnDeliverySlab = event.target.closest?.('[data-action="add-addon-delivery-slab"]');
+  if (addOnDeliverySlab) {
+    event.preventDefault();
+    const form = addOnDeliverySlab.closest('[data-form="addon-charge"]');
+    const list = form?.querySelector("[data-addon-delivery-list]");
+    if (!form || !list) return;
+    const rows = [...form.querySelectorAll("[data-addon-delivery-row]")];
+    if (rows.length >= 20) return showAlert("A maximum of 20 delivery offer slabs is allowed.");
+    const last = rows.at(-1)?.querySelector('[data-addon-delivery-field="maxDistanceKm"]')?.value;
+    list.querySelector(".addon-charge-empty")?.remove();
+    list.insertAdjacentHTML("beforeend", addOnDeliverySlabRow({ maxDistanceKm: last ? Number(last) + 1 : 1, discountType: "percent", discountValue: 0 }, rows.length));
+    return;
+  }
+  const removeOnDeliverySlab = event.target.closest?.('[data-action="remove-addon-delivery-slab"]');
+  if (removeOnDeliverySlab) {
+    event.preventDefault();
+    const form = removeOnDeliverySlab.closest('[data-form="addon-charge"]');
+    const row = removeOnDeliverySlab.closest("[data-addon-delivery-row]");
+    if (!form || !row) return;
+    row.remove();
+    const list = form.querySelector("[data-addon-delivery-list]");
+    if (list && !list.querySelector("[data-addon-delivery-row]")) list.innerHTML = `<tr class="addon-charge-empty"><td colspan="4">No delivery offer slabs configured.</td></tr>`;
+    return;
+  }
+  const removeAssistantMasterOfferSlab = event.target.closest?.('[data-action="remove-assistant-master-offer-slab"]');
+  if (removeAssistantMasterOfferSlab) {
+    event.preventDefault();
+    const row = removeAssistantMasterOfferSlab.closest("[data-assistant-master-offer-slab]");
+    const form = removeAssistantMasterOfferSlab.closest('[data-form="assistant-master-values"]');
+    if (!row || !form) return;
+    row.remove();
+    const list = form.querySelector("[data-assistant-master-offer-list]");
+    if (list && !list.querySelector("[data-assistant-master-offer-slab]")) {
+      list.innerHTML = `<tr class="assistant-master-offer-empty"><td colspan="3">No delivery offer slabs configured.</td></tr>`;
+    }
+    return;
+  }
   const addAssistantMasterSlab = event.target.closest?.('[data-action="add-assistant-master-slab"]');
   if (addAssistantMasterSlab) {
     event.preventDefault();
@@ -20552,7 +22137,7 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
-  const button = event.target.closest("[data-action], [data-section], #cancelModuleEditButton, #cancelStateEditButton, #cancelCityEditButton, #cancelZoneEditButton, #cancelClusterEditButton, #cancelServiceEditButton, #cancelServiceCategoryEditButton, #cancelCategoryMasterEditButton, #cancelCategoryServiceMasterEditButton, #cancelCategoryPriceEditButton, #cancelTaxMasterEditButton, #cancelBookingEngineEditButton, #cancelBookingEngineQuickReplyEditButton, #cancelBookingTypeEditButton, #cancelSurgeRuleEditButton, #cancelPriceRuleEditButton, #cancelStoreCategoryEditButton, #cancelStoreKeywordEditButton, #cancelStoreEditButton, #cancelVehicleMasterEditButton, #cancelUserEditButton");
+  const button = event.target.closest("[data-action], [data-section], #cancelModuleEditButton, #cancelStateEditButton, #cancelCityEditButton, #cancelZoneEditButton, #cancelClusterEditButton, #cancelServiceEditButton, #cancelServiceCategoryEditButton, #cancelCategoryMasterEditButton, #cancelCategoryServiceMasterEditButton, #cancelCategoryPriceEditButton, #cancelTaxMasterEditButton, #cancelAddOnChargeEditButton, #cancelBookingEngineEditButton, #cancelBookingEngineQuickReplyEditButton, #cancelBookingTypeEditButton, #cancelSurgeRuleEditButton, #cancelPriceRuleEditButton, #cancelStoreCategoryEditButton, #cancelStoreKeywordEditButton, #cancelStoreEditButton, #cancelVehicleMasterEditButton, #cancelUserEditButton");
   if (!button) return;
   if (button.dataset.section && !button.dataset.action) {
     if (button.closest(".nav-menu")) return;
@@ -20602,6 +22187,10 @@ document.addEventListener("click", async (event) => {
   }
   if (button.id === "cancelTaxMasterEditButton") {
     resetTaxMasterForm();
+    return;
+  }
+  if (button.id === "cancelAddOnChargeEditButton") {
+    resetAddOnChargeForm();
     return;
   }
   if (button.id === "cancelBookingEngineEditButton") {
@@ -20768,6 +22357,11 @@ document.addEventListener("click", async (event) => {
   if (action === "cancel-payment-mode-edit") {
     event.preventDefault();
     resetPaymentModeForm();
+    return;
+  }
+  if (action === "cancel-pg-transaction-charge-edit") {
+    event.preventDefault();
+    resetPgTransactionChargeForm();
     return;
   }
   if (action === "toggle-payment-mode-enabled" || action === "toggle-payment-mode-active") {
@@ -21277,6 +22871,16 @@ document.addEventListener("click", async (event) => {
       const index = Number(button.dataset.index);
       bookingMasterAttachments = bookingMasterAttachments.filter((_, itemIndex) => itemIndex !== index);
       renderBookingMasterAttachmentPreview();
+      return;
+    }
+    if (action === "remove-service-category-media") {
+      const hidden = $("#serviceCategoryMediaUrls");
+      const preview = $("#serviceCategoryMediaPreview");
+      if (!hidden) return;
+      const media = parseServiceCategoryMedia(hidden.value);
+      media.splice(Number(button.dataset.index), 1);
+      hidden.value = JSON.stringify(media);
+      if (preview) preview.innerHTML = serviceCategoryMediaGallery(media);
       return;
     }
     if (action === "preview-booking-master-attachment") {
@@ -21899,6 +23503,7 @@ document.addEventListener("click", async (event) => {
       if (button.dataset.endpoint === "/masters/category-service-masters") resetCategoryServiceMasterForm();
       if (button.dataset.endpoint === "/masters/category-prices") resetCategoryPriceForm();
       if (button.dataset.endpoint === "/masters/tax-master") resetTaxMasterForm();
+      if (button.dataset.endpoint === "/masters/addon-charges") resetAddOnChargeForm();
       if (button.dataset.endpoint === "/masters/booking-engine") resetBookingEngineForm();
       if (button.dataset.endpoint === "/masters/booking-engine/quick-replies") resetBookingEngineQuickReplyForm();
       if (button.dataset.endpoint === "/stores") resetStoreForm();
@@ -22157,6 +23762,7 @@ document.addEventListener("click", async (event) => {
       if (!item || !form) return;
       editingTaxMasterRuleId = id;
       form.elements.id.value = item.id;
+      form.elements.taxCategory.value = item.taxCategory || "service";
       form.elements.taxApplicableOn.value = item.taxApplicableOn || "selling_price";
       form.elements.taxApplicability.value = item.taxApplicability || "exclusive";
       form.elements.taxType.value = item.taxType || "percent";
@@ -22171,6 +23777,40 @@ document.addEventListener("click", async (event) => {
       taxMasterEvaluateFormula(form);
       $("#taxMasterSubmitButton").textContent = "Update Tax Rule";
       $("#cancelTaxMasterEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-addon-charge") {
+      const item = (cache.addonCharges || []).find((rule) => rule.id === id);
+      const form = $("#addonChargeForm");
+      if (!item || !form) return;
+      editingAddOnChargeId = id;
+      form.elements.id.value = item.id || "";
+      form.elements.addonType.value = item.addonType || "service";
+      form.elements.scopeType.value = item.scopeType || "all";
+      form.elements.stateId.value = item.stateId || "";
+      form.elements.cityId.value = item.cityId || "";
+      form.elements.zoneId.value = item.zoneId || "";
+      form.elements.clusterId.value = item.clusterId || "";
+      form.elements.microMarketId.value = item.microMarketId || "";
+      form.elements.nanoMarketId.value = item.nanoMarketId || "";
+      form.elements.applicableOn.value = item.applicableOn || "all_customer";
+      form.elements.title.value = item.title || "";
+      form.elements.label.value = item.label || item.title || "";
+      form.elements.description.value = item.description || "";
+      form.elements.costType.value = item.costType || "flat";
+      form.elements.costValue.value = item.costValue ?? 0;
+      form.elements.percentageBase.value = item.percentageBase || "selling_price";
+      form.elements.customerPrice.value = item.customerPrice ?? "";
+      form.elements.isActive.checked = item.isActive !== false;
+      const discountSlabs = Array.isArray(item.discountSlabs) ? item.discountSlabs : [];
+      const deliverySlabs = Array.isArray(item.deliveryDistanceSlabs) ? item.deliveryDistanceSlabs : [];
+      form.querySelector("[data-addon-discount-list]").innerHTML = discountSlabs.length ? discountSlabs.map((slab, index) => addOnDiscountSlabRow(slab, index)).join("") : `<tr class="addon-charge-empty"><td colspan="4">No discount slabs configured.</td></tr>`;
+      form.querySelector("[data-addon-delivery-list]").innerHTML = deliverySlabs.length ? deliverySlabs.map((slab, index) => addOnDeliverySlabRow(slab, index)).join("") : `<tr class="addon-charge-empty"><td colspan="4">No delivery offer slabs configured.</td></tr>`;
+      syncAddOnScopeControls(form);
+      syncAddOnChargeTypeControls(form);
+      $("#addonChargeSubmitButton").textContent = "Update Add-on Charge";
+      $("#cancelAddOnChargeEditButton").classList.remove("d-none");
       form.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
@@ -22199,6 +23839,22 @@ document.addEventListener("click", async (event) => {
       form.elements.isActive.checked = item.isActive !== false;
       $("#paymentModeSubmitButton").textContent = "Update Payment Method";
       $("#cancelPaymentModeEditButton").classList.remove("d-none");
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (action === "edit-pg-transaction-charge") {
+      const item = (cache.pgTransactionCharges || []).find((rule) => rule.id === id);
+      const form = $("#pgTransactionChargeForm");
+      if (!item || !form) return;
+      editingPgTransactionChargeId = id;
+      form.elements.id.value = item.id || "";
+      form.elements.paymentMode.value = item.paymentMode || "other";
+      form.elements.chargeType.value = item.chargeType === "flat" ? "flat" : "percent";
+      form.elements.chargeValue.value = item.chargeValue ?? 0;
+      form.elements.description.value = item.description || "";
+      form.elements.isActive.checked = item.isActive !== false;
+      $("#pgTransactionChargeSubmitButton").textContent = "Update PG Charge Rule";
+      $("#cancelPgTransactionChargeEditButton").classList.remove("d-none");
       form.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }

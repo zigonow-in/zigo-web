@@ -916,7 +916,8 @@ export async function getAssistantMasterSetting(client: Queryable = pool) {
     return {
       ...assistantMasterSettingCache.data,
       travelCostSlabs: assistantMasterSettingCache.data.travelCostSlabs.map((slab) => ({ ...slab })),
-      assistantTravelPayoutSlabs: assistantMasterSettingCache.data.assistantTravelPayoutSlabs.map((slab) => ({ ...slab }))
+      assistantTravelPayoutSlabs: assistantMasterSettingCache.data.assistantTravelPayoutSlabs.map((slab) => ({ ...slab })),
+      deliveryOfferSlabs: assistantMasterSettingCache.data.deliveryOfferSlabs.map((slab) => ({ ...slab }))
     };
   }
   try {
@@ -945,7 +946,8 @@ export async function getAssistantMasterSetting(client: Queryable = pool) {
     return {
       ...data,
       travelCostSlabs: data.travelCostSlabs.map((slab) => ({ ...slab })),
-      assistantTravelPayoutSlabs: data.assistantTravelPayoutSlabs.map((slab) => ({ ...slab }))
+      assistantTravelPayoutSlabs: data.assistantTravelPayoutSlabs.map((slab) => ({ ...slab })),
+      deliveryOfferSlabs: data.deliveryOfferSlabs.map((slab) => ({ ...slab }))
     };
   } catch (error) {
     if (isUndefinedTableError(error)) return { ...normalizeAssistantMasterSettings(DEFAULT_ASSISTANT_MASTER_SETTINGS), updatedAt: null };

@@ -2,7 +2,43 @@ import { Router } from "express";
 import { z } from "zod";
 import { requirePermission, requireSuperAdmin } from "../../http/auth.js";
 import { HttpError } from "../../http/errors.js";
+import { identifyAdminWork } from "../ai/serviceIdentifier.js";
+import {
+  ADDON_APPLICABILITY,
+  ADDON_CHARGE_TYPES,
+  ADDON_COST_TYPES,
+  ADDON_PERCENT_BASES,
+  ADDON_SCOPE_TYPES,
+  listAddOnChargeMasters,
+  createAddOnChargeMaster,
+  updateAddOnChargeMaster,
+  deleteAddOnChargeMaster
+} from "../addons/addons.repository.js";
 import { listMarketTypes, createMarketType, updateMarketType, deleteMarketType } from "./marketTypes.repository.js";
+import { listServicePillars, createServicePillar, updateServicePillar, deleteServicePillar } from "./servicePillars.repository.js";
+import {
+  listPersonalAssistantServices,
+  listPersonalAssistantTasks,
+  createPersonalAssistantService,
+  updatePersonalAssistantService,
+  deletePersonalAssistantService
+} from "./personalAssistantServices.repository.js";
+import {
+  listPersonalAssistantActions,
+  listPersonalAssistantTaskDefinitions,
+  createPersonalAssistantAction,
+  updatePersonalAssistantAction,
+  deletePersonalAssistantAction,
+  createPersonalAssistantTask,
+  updatePersonalAssistantTask,
+  deletePersonalAssistantTask
+} from "./taskMasters.repository.js";
+import {
+  listServiceCategories,
+  createServiceCategory,
+  updateServiceCategory,
+  deleteServiceCategory
+} from "./serviceCategories.repository.js";
 import { listLocationHierarchy, listZonePolygons, saveLocationHierarchy, deleteLocationHierarchy, type LocationLevel } from "./locationHierarchy.repository.js";
 import {
   createCategory,
@@ -56,6 +92,7 @@ import {
   listDeliveryTypes,
   listPriceMasterRules,
   listPaymentModeRules,
+  listPgTransactionChargeMasters,
   listServices,
   listStates,
   listSurgeRules,
@@ -73,6 +110,9 @@ import {
   updateDeliveryType,
   updatePriceMasterRule,
   updatePaymentModeRule,
+  createPgTransactionChargeMaster,
+  updatePgTransactionChargeMaster,
+  deletePgTransactionChargeMaster,
   updateService,
   updateState,
   updateSurgeRule,
@@ -87,6 +127,56 @@ export const mastersRouter = Router();
 
 const idParamsSchema = z.object({ id: z.string().uuid() });
 const active = z.coerce.boolean().default(true);
+const servicePillarBodySchema = z.object({
+  code: z.string().trim().min(2).max(100).regex(/^[a-z0-9][a-z0-9_-]*$/i, "Code can contain letters, numbers, underscores and hyphens."),
+  name: z.string().trim().min(2).max(160),
+  description: z.string().trim().max(5000).nullable().optional(),
+  displayOrder: z.coerce.number().int().min(0).max(100000).default(0),
+  status: z.enum(["draft", "active", "inactive", "retired"]).default("draft")
+});
+const personalAssistantServiceBodySchema = z.object({
+  code: z.string().trim().min(2).max(100).regex(/^[a-z0-9][a-z0-9_-]*$/i, "Code can contain letters, numbers, underscores and hyphens."),
+  name: z.string().trim().min(2).max(160),
+  description: z.string().trim().max(5000).nullable().optional(),
+  pillarIds: z.array(z.string().uuid()).min(1).max(10),
+  taskIds: z.array(z.string().uuid()).min(1).max(500),
+  displayOrder: z.coerce.number().int().min(0).max(100000).default(0),
+  status: z.enum(["draft", "active", "inactive", "retired"]).default("draft"),
+  isActive: z.coerce.boolean().default(false),
+  isEnabled: z.coerce.boolean().default(false)
+});
+const serviceCategoryBodySchema = z.object({
+  pillarIds: z.array(z.string().uuid()).min(1, "Select at least one Pillar.").max(20),
+  code: z.string().trim().min(2).max(100).regex(/^[a-z0-9][a-z0-9_-]*$/i, "Code can contain letters, numbers, underscores and hyphens."),
+  name: z.string().trim().min(2).max(160),
+  description: z.string().trim().max(5000).nullable().optional(),
+  mediaUrls: z.array(z.object({
+    url: z.string().trim().min(1).max(1000),
+    type: z.enum(["image", "video"]),
+    originalName: z.string().trim().max(255).optional(),
+    mimeType: z.string().trim().max(120).optional()
+  })).max(50).default([]),
+  serviceIds: z.array(z.string().uuid()).min(1, "Map at least one Service Master record to the category.").max(500),
+  displayOrder: z.coerce.number().int().min(0).max(100000).default(0),
+  isActive: z.coerce.boolean().default(true)
+});
+const personalAssistantActionBodySchema = z.object({
+  code: z.string().trim().min(2).max(100).regex(/^[a-z0-9][a-z0-9_-]*$/i, "Code can contain letters, numbers, underscores and hyphens."),
+  name: z.string().trim().min(2).max(160),
+  description: z.string().trim().max(5000).nullable().optional(),
+  status: z.enum(["draft", "active", "inactive", "retired"]).default("draft")
+});
+const personalAssistantTaskBodySchema = z.object({
+  code: z.string().trim().min(2).max(100).regex(/^[a-z0-9][a-z0-9_-]*$/i, "Code can contain letters, numbers, underscores and hyphens."),
+  name: z.string().trim().min(2).max(160),
+  description: z.string().trim().max(5000).nullable().optional(),
+  riskTier: z.enum(["standard", "controlled", "elevated", "safeguarded"]).default("standard"),
+  actionIds: z.array(z.string().uuid()).min(1).max(500),
+  status: z.enum(["draft", "active", "inactive", "retired"]).default("draft")
+});
+const aiWorkQuerySchema = z.object({
+  query: z.string().trim().min(3, "Enter a problem or request.").max(2000)
+});
 const stateBodySchema = z.object({ code: z.string().min(2), name: z.string().min(2), countryName: z.string().optional(), isActive: active });
 const cityBodySchema = z.object({ stateId: z.string().uuid().nullable().optional(), code: z.string().min(2), name: z.string().min(2), isActive: active });
 const zoneBodySchema = z.object({ cityId: z.string().uuid().nullable().optional(), code: z.string().min(2), name: z.string().min(2), isActive: active });
@@ -355,6 +445,7 @@ const priceMasterBodySchema = z.object({
   isActive: active
 });
 const taxMasterBodySchema = z.object({
+  taxCategory: z.enum(["task", "delivery", "packaging", "platform", "weather", "service", "handling"]).default("service"),
   taxApplicableOn: z.enum(["base_price", "selling_price"]).default("selling_price"),
   taxApplicability: z.enum(["inclusive", "exclusive"]).default("exclusive"),
   taxType: z.enum(["percent", "flat"]).default("percent"),
@@ -363,6 +454,64 @@ const taxMasterBodySchema = z.object({
   taxLabel: z.string().trim().min(1).max(120),
   taxNote: z.string().trim().max(1000).nullable().optional(),
   isActive: active
+});
+const addOnDiscountSlabSchema = z.object({
+  maxAmount: z.coerce.number().min(0.01),
+  discountType: z.enum(["percent", "flat"]),
+  discountValue: z.coerce.number().min(0)
+});
+const addOnDeliveryDistanceSlabSchema = z.object({
+  maxDistanceKm: z.coerce.number().min(0.01),
+  discountType: z.enum(["percent", "flat"]),
+  discountValue: z.coerce.number().min(0)
+});
+const addOnChargeBodySchema = z.object({
+  addonType: z.enum(ADDON_CHARGE_TYPES),
+  scope: z.string().trim().min(1).max(120).optional(),
+  scopeType: z.enum(ADDON_SCOPE_TYPES).default("all"),
+  stateId: z.string().uuid().nullable().optional(),
+  cityId: z.string().uuid().nullable().optional(),
+  zoneId: z.string().uuid().nullable().optional(),
+  clusterId: z.string().uuid().nullable().optional(),
+  microMarketId: z.string().uuid().nullable().optional(),
+  nanoMarketId: z.string().uuid().nullable().optional(),
+  title: z.string().trim().min(1).max(160),
+  description: z.string().trim().max(5000).nullable().optional(),
+  label: z.string().trim().min(1).max(160),
+  applicableOn: z.enum(ADDON_APPLICABILITY).default("all_customer"),
+  costType: z.enum(ADDON_COST_TYPES).default("flat"),
+  costValue: z.coerce.number().min(0).default(0),
+  percentageBase: z.enum(ADDON_PERCENT_BASES).default("selling_price"),
+  customerPrice: z.coerce.number().min(0).nullable().optional(),
+  discountSlabs: z.array(addOnDiscountSlabSchema).default([]),
+  deliveryDistanceSlabs: z.array(addOnDeliveryDistanceSlabSchema).default([]),
+  isActive: active
+}).superRefine((value, context) => {
+  if (value.costType === "percent" && value.costValue > 100) context.addIssue({ code: z.ZodIssueCode.too_big, maximum: 100, type: "number", inclusive: true, path: ["costValue"], message: "Percent cost cannot exceed 100." });
+  if (value.percentageBase === "customer_price" && value.customerPrice == null) context.addIssue({ code: z.ZodIssueCode.custom, path: ["customerPrice"], message: "Customer price is required when percentage is based on customer price." });
+  const validateSlabs = (slabs: Array<{ maxAmount?: number; maxDistanceKm?: number; discountType: string; discountValue: number }>, path: string) => {
+    let previous = 0;
+    slabs.forEach((slab, index) => {
+      const limit = Number(slab.maxAmount ?? slab.maxDistanceKm ?? 0);
+      if (limit <= previous) context.addIssue({ code: z.ZodIssueCode.custom, path: [path, index], message: "Slabs must be in increasing order." });
+      if (slab.discountType === "percent" && slab.discountValue > 100) context.addIssue({ code: z.ZodIssueCode.too_big, maximum: 100, type: "number", inclusive: true, path: [path, index, "discountValue"], message: "Percent discount cannot exceed 100." });
+      previous = limit;
+    });
+  };
+  validateSlabs(value.discountSlabs, "discountSlabs");
+  validateSlabs(value.deliveryDistanceSlabs, "deliveryDistanceSlabs");
+  const requiredByScope: Record<string, string> = {
+    state: "stateId",
+    city: "cityId",
+    zone: "zoneId",
+    cluster: "clusterId",
+    micro_market: "microMarketId",
+    nano_market: "nanoMarketId"
+  };
+  const requiredField = requiredByScope[value.scopeType];
+  if (requiredField && !value[requiredField as keyof typeof value]) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: [requiredField], message: "Select a location for this scope." });
+  }
 });
 const paymentModeBodySchema = z.object({
   code: z.string().trim().min(2).max(40),
@@ -379,6 +528,13 @@ const paymentModeBodySchema = z.object({
   sortOrder: z.coerce.number().int().min(0).default(0),
   description: z.string().trim().max(1000).nullable().optional(),
   isEnabled: z.coerce.boolean().default(true),
+  isActive: active
+});
+const pgTransactionChargeBodySchema = z.object({
+  paymentMode: z.string().trim().min(2).max(60).regex(/^[a-z0-9][a-z0-9_ -]*$/i),
+  chargeType: z.enum(["percent", "flat"]).default("percent"),
+  chargeValue: z.coerce.number().min(0).max(100000).default(0),
+  description: z.string().trim().max(500).nullable().optional(),
   isActive: active
 });
 const categoryPriceQuerySchema = z.object({
@@ -578,6 +734,48 @@ mastersRouter.get("/clusters/report", requirePermission("locations.view"), async
 });
 
 crudRoutes("/states", "locations", stateBodySchema, { list: listStates, create: createState, update: updateState, remove: deleteState });
+crudRoutes("/service-pillars", "services", servicePillarBodySchema, {
+  list: listServicePillars,
+  create: createServicePillar,
+  update: updateServicePillar,
+  remove: deleteServicePillar
+});
+mastersRouter.get("/personal-assistant-service-tasks", requirePermission("services.view"), async (_req, res, next) => {
+  try { res.json({ data: await listPersonalAssistantTasks() }); }
+  catch (error) { next(error); }
+});
+mastersRouter.post("/ai/identify-work", requirePermission("services.view"), async (req, res, next) => {
+  try {
+    const { query } = aiWorkQuerySchema.parse(req.body);
+    res.json({ data: await identifyAdminWork(query) });
+  } catch (error) {
+    next(error);
+  }
+});
+crudRoutes("/personal-assistant-actions", "services", personalAssistantActionBodySchema, {
+  list: listPersonalAssistantActions,
+  create: createPersonalAssistantAction,
+  update: updatePersonalAssistantAction,
+  remove: (id) => deletePersonalAssistantAction(id)
+});
+crudRoutes("/personal-assistant-tasks", "services", personalAssistantTaskBodySchema, {
+  list: listPersonalAssistantTaskDefinitions,
+  create: createPersonalAssistantTask,
+  update: updatePersonalAssistantTask,
+  remove: (id) => deletePersonalAssistantTask(id)
+});
+crudRoutes("/personal-assistant-services", "services", personalAssistantServiceBodySchema, {
+  list: listPersonalAssistantServices,
+  create: createPersonalAssistantService,
+  update: updatePersonalAssistantService,
+  remove: deletePersonalAssistantService
+});
+crudRoutes("/personal-assistant-service-categories", "services", serviceCategoryBodySchema, {
+  list: listServiceCategories,
+  create: createServiceCategory,
+  update: updateServiceCategory,
+  remove: deleteServiceCategory
+});
 crudRoutes("/market-types", "locations", z.object({
   name: z.string().trim().min(2).max(160),
   code: z.string().trim().min(2).max(100),
@@ -615,7 +813,9 @@ crudRoutes("/booking-types", "services", bookingTypeBodySchema, { list: listBook
 crudRoutes("/surge-rules", "services", surgeRuleBodySchema, { list: listSurgeRules, create: createSurgeRule, update: updateSurgeRule, remove: deleteSurgeRule });
 crudRoutes("/price-master", "services", priceMasterBodySchema, { list: listPriceMasterRules, create: createPriceMasterRule, update: updatePriceMasterRule, remove: deletePriceMasterRule });
 crudRoutes("/tax-master", "services", taxMasterBodySchema, { list: listTaxMasterRules, create: createTaxMasterRule, update: updateTaxMasterRule, remove: deleteTaxMasterRule });
+crudRoutes("/addon-charges", "services", addOnChargeBodySchema, { list: listAddOnChargeMasters, create: createAddOnChargeMaster, update: updateAddOnChargeMaster, remove: deleteAddOnChargeMaster });
 crudRoutes("/payment-modes", "services", paymentModeBodySchema, { list: listPaymentModeRules, create: createPaymentModeRule, update: updatePaymentModeRule, remove: deletePaymentModeRule });
+crudRoutes("/pg-transaction-charges", "services", pgTransactionChargeBodySchema, { list: listPgTransactionChargeMasters, create: createPgTransactionChargeMaster, update: updatePgTransactionChargeMaster, remove: deletePgTransactionChargeMaster });
 
 mastersRouter.get("/category-prices", requirePermission("services.view"), async (req, res, next) => {
   try {

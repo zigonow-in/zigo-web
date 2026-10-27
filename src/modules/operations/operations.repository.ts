@@ -7,12 +7,13 @@ import { locationClustersCanInterserve } from "../masters/locationHierarchy.repo
 import { requestOlaJson } from "../maps/olaMaps.service.js";
 import { generateZigoBookingReference, isZigoBookingReference, zigoServiceTypeCode } from "../../utils/bookingReference.js";
 import { calculateClusterCategoryPricing } from "../pricing/pricing.js";
-import { quotePriceMaster, resolveBookingEngineRuleForContext } from "../masters/masters.repository.js";
+import { quotePriceMaster, resolveBookingEngineRuleForContext, resolvePgTransactionCharge } from "../masters/masters.repository.js";
 import { getAssistantMasterSetting, getBookingEngineSetting, getBookingTypeAutomationSetting } from "../settings/settings.repository.js";
 import { ensurePaymentsSchema } from "../payments/payments.repository.js";
 import { ensureBookingEngineSchema, releaseCapacityReservations, upsertBookingOrchestrationState, upsertCapacityReservation } from "./bookingEngine.js";
 import { dispatchConfigFromEnv, stopAssistantCalendarBlocksForBooking } from "./assistantDispatchEngine.js";
 import { ADMIN_ASSIGNMENT_OFFER_RESPONSE_GRACE_MS } from "./assignmentOfferPolicy.js";
+import { ensureAddOnChargeSchema } from "../addons/addons.repository.js";
 
 type Queryable = Pick<typeof pool, "query">;
 
@@ -179,6 +180,12 @@ export async function listBookings(input: {
           case when sr.metadata->>'tipAmountPaise' ~ '^\d+$' then (sr.metadata->>'tipAmountPaise')::bigint end,
           0) as "tipAmountPaise",
         coalesce(bbs.grand_total_paise, sr.booking_amount_paise, sr.estimated_amount_paise, 0) as "grandTotalPaise",
+        coalesce(bbs.pg_transaction_charge_master_id, null) as "pgTransactionChargeMasterId",
+        coalesce(bbs.pg_transaction_payment_mode, sr.payment_type, 'cash') as "pgTransactionPaymentMode",
+        coalesce(bbs.pg_transaction_charge_type, 'percent') as "pgTransactionChargeType",
+        coalesce(bbs.pg_transaction_charge_value, 0) as "pgTransactionChargeValue",
+        coalesce(bbs.pg_transaction_charge_base_paise, 0) as "pgTransactionChargeBasePaise",
+        coalesce(bbs.pg_transaction_charge_paise, 0) as "pgTransactionChargePaise",
         coalesce(bbs.tax_details, sr.metadata->'pricingBreakdown'->'taxRows', sr.payment_details->'taxRows', '[]'::jsonb) as "taxDetails",
         coalesce(bbs.pricing_details, sr.metadata->'pricingBreakdown', '{}'::jsonb) as "billingSnapshot",
         sr.waiting_time_minutes as "waitingTimeMinutes",
@@ -822,6 +829,8 @@ export async function validateBookingLocation(input: {
         z.id as "zoneId",
         z.polygon_description as "zonePolygonDescription",
         z.is_open as "zoneIsOpen",
+        city.id as "cityId",
+        state.id as "stateId",
         cl.metadata,
         cl.priority,
         city.name as "cityName",
@@ -873,11 +882,16 @@ export async function validateBookingLocation(input: {
       },
       zone: {
         zoneId: cluster.zoneId,
+        cityId: cluster.cityId,
+        stateId: cluster.stateId,
         name: cluster.zoneName,
         cityName: cluster.cityName
       },
       cluster: {
         clusterId: cluster.id,
+        cityId: cluster.cityId,
+        stateId: cluster.stateId,
+        zoneId: cluster.zoneId,
         name: cluster.name,
         code: cluster.code,
         cityName: cluster.cityName,
@@ -1179,6 +1193,11 @@ function rankLocationCandidates(candidates: LocationCandidate[], query: string) 
 function numberFromUnknown(value: unknown) {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function roundPaiseToRupee(value: unknown) {
+  const paise = Number(value);
+  return Number.isFinite(paise) ? Math.max(0, Math.round(paise / 100) * 100) : 0;
 }
 
 function assertCoordinateRange(latitude: number, longitude: number) {
@@ -2576,11 +2595,15 @@ function normalizeBookingCartItems(metadata: Record<string, unknown> | undefined
     serviceName: typeof item.serviceName === "string" ? item.serviceName : null,
     categoryId: typeof item.categoryId === "string" ? item.categoryId : null,
     categoryName: typeof item.categoryName === "string" ? item.categoryName : null,
+    name: typeof item.name === "string" ? item.name : null,
     storeId: typeof item.storeId === "string" ? item.storeId : null,
     storeName: typeof item.storeName === "string" ? item.storeName : null,
     itemType: typeof item.itemType === "string" ? item.itemType : null,
     basePricePaise: Math.max(0, Math.round(Number(item.basePrice || 0) * 100)),
     sellingPricePaise: Math.max(0, Math.round(Number(item.price || item.sellingPrice || 0) * 100)),
+    discountType: typeof item.discountType === "string" ? item.discountType : null,
+    discountValue: Math.max(0, Number(item.discountValue || 0)),
+    categoryPriceRuleId: typeof item.categoryPriceRuleId === "string" ? item.categoryPriceRuleId : null,
     durationMinutes: Math.max(1, Math.round(Number(item.durationMinutes || item.cartDurationMinutes || 30)))
   }));
 }
@@ -2631,6 +2654,7 @@ export async function createBookingByAdmin(input: {
   try {
     await client.query("begin");
     await ensureBookingEngineSchema(client);
+    await ensureAddOnChargeSchema();
     const customer = await client.query(
       `
         select c.id, u.display_name, u.phone, u.email::text as email, coalesce(u.metadata->>'accountStatus', 'active') as status
@@ -2766,7 +2790,7 @@ export async function createBookingByAdmin(input: {
     const persistedPricing = inputMetadata.pricingBreakdown && typeof inputMetadata.pricingBreakdown === "object" && !Array.isArray(inputMetadata.pricingBreakdown)
       ? inputMetadata.pricingBreakdown as Record<string, unknown>
       : {};
-    const persistedTaxRows = (Array.isArray(persistedPricing.taxRows) ? persistedPricing.taxRows : [])
+    const persistedTaxRows: Array<Record<string, unknown> & { applicability: string; amountPaise: number }> = (Array.isArray(persistedPricing.taxRows) ? persistedPricing.taxRows : [])
       .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object" && !Array.isArray(row))
       .map((row) => ({
         ...row,
@@ -2774,6 +2798,53 @@ export async function createBookingByAdmin(input: {
         amountPaise: Math.max(0, Math.round(Number(row.amountPaise || 0)))
       }));
     const persistedTaxRowTotal = persistedTaxRows.reduce((sum, row) => sum + row.amountPaise, 0);
+    const persistedAddonLines = (Array.isArray(persistedPricing.addonLines) ? persistedPricing.addonLines : [])
+      .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object" && !Array.isArray(row))
+      .map((row) => ({
+        id: typeof row.id === "string" ? row.id : null,
+        addonType: String(row.addonType || "service"),
+        scope: String(row.scope || "all"),
+        scopeType: String(row.scopeType || "all"),
+        stateId: typeof row.stateId === "string" ? row.stateId : null,
+        cityId: typeof row.cityId === "string" ? row.cityId : null,
+        zoneId: typeof row.zoneId === "string" ? row.zoneId : null,
+        clusterId: typeof row.clusterId === "string" ? row.clusterId : null,
+        microMarketId: typeof row.microMarketId === "string" ? row.microMarketId : null,
+        nanoMarketId: typeof row.nanoMarketId === "string" ? row.nanoMarketId : null,
+        title: String(row.title || row.label || "Add-on"),
+        label: String(row.label || row.title || "Add-on"),
+        applicableOn: String(row.applicableOn || "all_customer"),
+        costType: String(row.costType || "flat"),
+        percentageBase: row.percentageBase ? String(row.percentageBase) : null,
+        baseAmountPaise: Math.max(0, Math.round(Number(row.baseAmountPaise || 0))),
+        grossAmountPaise: Math.max(0, Math.round(Number(row.grossAmountPaise || 0))),
+        discountType: String(row.discountType || "none"),
+        discountValue: Math.max(0, Number(row.discountValue || 0)),
+        discountAmountPaise: Math.max(0, Math.round(Number(row.discountAmountPaise || 0))),
+        netAmountPaise: Math.max(0, Math.round(Number(row.netAmountPaise || 0))),
+        rawGrossAmountPaise: Math.max(0, Math.round(Number(row.rawGrossAmountPaise ?? row.grossAmountPaise ?? 0))),
+        rawNetAmountPaise: Math.max(0, Math.round(Number(row.rawNetAmountPaise ?? row.netAmountPaise ?? 0))),
+        inclusiveTaxAmountPaise: Math.max(0, Math.round(Number(row.inclusiveTaxAmountPaise || 0))),
+        exclusiveTaxAmountPaise: Math.max(0, Math.round(Number(row.exclusiveTaxAmountPaise || 0))),
+        taxAmountPaise: Math.max(0, Math.round(Number(row.taxAmountPaise || 0))),
+        taxableAfterDiscountPaise: Math.max(0, Math.round(Number(row.taxableAfterDiscountPaise ?? row.rawNetAmountPaise ?? row.netAmountPaise ?? 0))),
+        amountAfterDiscountPaise: Math.max(0, Math.round(Number(row.amountAfterDiscountPaise ?? row.netAmountPaise ?? 0))),
+        totalAmountPaise: Math.max(0, Math.round(Number(row.totalAmountPaise ?? row.rawNetAmountPaise ?? row.netAmountPaise ?? 0))),
+        roundingAdjustmentPaise: Math.round(Number(row.roundingAdjustmentPaise || 0)),
+        metadata: row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata) ? row.metadata : {}
+      }));
+    const usesPreTaxAddonPricing = persistedPricing.taxDisplayMode === "pre_tax_addons_v1";
+    const savedAddonTotalPaise = Number(persistedPricing.addonTotalPaise);
+    const addonTotalPaise = Number.isFinite(savedAddonTotalPaise)
+      ? Math.max(0, Math.round(savedAddonTotalPaise))
+      : persistedAddonLines
+        .filter((row) => row.addonType !== "delivery")
+        .reduce((sum, row) => sum + row.netAmountPaise, 0);
+    const savedAddonDiscountPaise = Number(persistedPricing.addonDiscountPaise);
+    const addonDiscountPaise = Number.isFinite(savedAddonDiscountPaise)
+      ? Math.max(0, Math.round(savedAddonDiscountPaise))
+      : persistedAddonLines.reduce((sum, row) => sum + row.discountAmountPaise, 0);
+    const deliveryChargesPaise = Math.max(0, Math.round(Number(persistedPricing.deliveryChargesPaise || 0)));
     const inclusiveTaxAmountPaise = persistedTaxRows.length
       ? persistedTaxRows.filter((row) => row.applicability === "inclusive").reduce((sum, row) => sum + row.amountPaise, 0)
       : Math.max(0, Math.round(Number(persistedPricing.inclusiveTaxAmountPaise || 0)));
@@ -2783,10 +2854,44 @@ export async function createBookingByAdmin(input: {
     const taxAmountPaise = persistedTaxRows.length
       ? persistedTaxRowTotal
       : Math.max(0, Math.round(Number(persistedPricing.taxAmountPaise || inclusiveTaxAmountPaise + exclusiveTaxAmountPaise)));
-    const itemTotalPaise = Math.max(0, sellingPricePaise - Math.min(sellingPricePaise, inclusiveTaxAmountPaise));
+    const itemTotalPaise = usesPreTaxAddonPricing
+      ? Math.max(0, Math.round(Number(persistedPricing.itemTotalPaise ?? sellingPricePaise)))
+      : sellingPricePaise;
     const tipAmountPaise = Math.max(0, Math.min(100_000, Math.round(Number(persistedPricing.tipAmountPaise || inputMetadata.tipAmountPaise || 0))));
     const waitingChargesPaise = Math.max(0, Math.round(Number(persistedPricing.waitingChargesPaise || inputMetadata.waitingChargesPaise || 0)));
-    const grandTotalPaise = Math.max(0, sellingPricePaise + exclusiveTaxAmountPaise + tipAmountPaise + waitingChargesPaise);
+    // New pricing snapshots expose item/add-on amounts before tax. Rebuild the
+    // payable total from those display amounts plus all tax so inclusive tax is
+    // included exactly once. Legacy snapshots retain the original calculation.
+    const calculatedGrandTotalPaise = usesPreTaxAddonPricing
+      ? roundPaiseToRupee(itemTotalPaise + addonTotalPaise + taxAmountPaise + tipAmountPaise + waitingChargesPaise)
+      : roundPaiseToRupee(sellingPricePaise + addonTotalPaise + deliveryChargesPaise + exclusiveTaxAmountPaise + tipAmountPaise + waitingChargesPaise);
+    const savedAmountToPayPaise = Number(persistedPricing.amountToPayPaise ?? persistedPricing.grandTotalPaise ?? persistedPricing.totalAmountPaise);
+    const grandTotalPaise = Number.isFinite(savedAmountToPayPaise) && savedAmountToPayPaise >= 0
+      ? roundPaiseToRupee(savedAmountToPayPaise)
+      : calculatedGrandTotalPaise;
+    const originalDeliveryChargesPaise = Math.max(0, Math.round(Number(persistedPricing.originalDeliveryChargesPaise || deliveryChargesPaise)));
+    const deliveryDiscountPaise = Math.max(0, Math.round(Number(persistedPricing.deliveryDiscountPaise || Math.max(0, originalDeliveryChargesPaise - deliveryChargesPaise))));
+    const totalDiscountPaise = Math.max(0, Math.round(Number(persistedPricing.totalDiscountPaise ?? (discountPaise + addonDiscountPaise + deliveryDiscountPaise))));
+    const subtotalAfterDiscountPaise = Math.max(0, Math.round(Number(persistedPricing.subtotalAfterDiscountPaise ?? (usesPreTaxAddonPricing
+      ? itemTotalPaise + addonTotalPaise
+      : itemTotalPaise + addonTotalPaise + deliveryChargesPaise))));
+    const preRoundTotalPaise = Math.max(0, Math.round(Number(persistedPricing.preRoundTotalPaise ?? (usesPreTaxAddonPricing
+      ? itemTotalPaise + addonTotalPaise + taxAmountPaise + tipAmountPaise + waitingChargesPaise
+      : sellingPricePaise + addonTotalPaise + deliveryChargesPaise + exclusiveTaxAmountPaise + tipAmountPaise + waitingChargesPaise))));
+    const roundingAdjustmentPaise = Math.round(Number(persistedPricing.roundingAdjustmentPaise ?? (grandTotalPaise - preRoundTotalPaise)));
+    const razorpayPayment = inputMetadata.razorpayPayment && typeof inputMetadata.razorpayPayment === "object" && !Array.isArray(inputMetadata.razorpayPayment)
+      ? inputMetadata.razorpayPayment as Record<string, unknown>
+      : {};
+    const razorpayCard = razorpayPayment.card && typeof razorpayPayment.card === "object" && !Array.isArray(razorpayPayment.card)
+      ? razorpayPayment.card as Record<string, unknown>
+      : {};
+    const pgTransactionCharge = await resolvePgTransactionCharge({
+      paymentMode: razorpayPayment.method || inputMetadata.paymentType || "cash",
+      cardType: razorpayPayment.cardType || razorpayCard.type,
+      amountPaise: grandTotalPaise
+    });
+    const paidPaymentMethod = pgTransactionCharge.paymentMode;
+    const paidPaymentMode = paidPaymentMethod === "cash" ? "cash" : "online";
     const billingSnapshot = {
       categoryPriceRuleId: persistedPricing.categoryPriceRuleId || null,
       baseAmountPaise: basePricePaise,
@@ -2806,6 +2911,12 @@ export async function createBookingByAdmin(input: {
       taxAmountPaise,
       inclusiveTaxAmountPaise,
       exclusiveTaxAmountPaise,
+      itemTaxableAfterDiscountPaise: Math.max(0, Math.round(Number(persistedPricing.itemTaxableAfterDiscountPaise ?? sellingPricePaise))),
+      itemTaxInclusivePaise: Math.max(0, Math.round(Number(persistedPricing.itemTaxInclusivePaise ?? Math.max(0, inclusiveTaxAmountPaise - Number(persistedPricing.addonTaxInclusivePaise || 0))))),
+      itemTaxExclusivePaise: Math.max(0, Math.round(Number(persistedPricing.itemTaxExclusivePaise ?? Math.max(0, exclusiveTaxAmountPaise - Number(persistedPricing.addonTaxExclusivePaise || 0))))),
+      deliveryChargesPaise,
+      originalDeliveryChargesPaise,
+      deliveryDiscountPaise,
       tipAmountPaise,
       tipDetails: persistedPricing.tipDetails || {
         amountPaise: tipAmountPaise,
@@ -2813,8 +2924,29 @@ export async function createBookingByAdmin(input: {
       },
       waitingChargesPaise,
       grandTotalPaise,
+      amountToPayPaise: grandTotalPaise,
       totalAmountPaise: grandTotalPaise,
-      taxRows: persistedTaxRows
+      taxRows: persistedTaxRows,
+      addonLines: persistedAddonLines,
+      addonTotalPaise,
+      addonDiscountPaise,
+      addonTaxableAfterDiscountPaise: Math.max(0, Math.round(Number(persistedPricing.addonTaxableAfterDiscountPaise ?? persistedAddonLines.reduce((sum, row) => sum + row.taxableAfterDiscountPaise, 0)))),
+      addonTaxInclusivePaise: Math.max(0, Math.round(Number(persistedPricing.addonTaxInclusivePaise ?? persistedAddonLines.reduce((sum, row) => sum + row.inclusiveTaxAmountPaise, 0)))),
+      addonTaxExclusivePaise: Math.max(0, Math.round(Number(persistedPricing.addonTaxExclusivePaise ?? persistedAddonLines.reduce((sum, row) => sum + row.exclusiveTaxAmountPaise, 0)))),
+      totalDiscountPaise,
+      subtotalAfterDiscountPaise,
+      preRoundTotalPaise,
+      roundingAdjustmentPaise,
+      taxDisplayMode: usesPreTaxAddonPricing ? "pre_tax_addons_v1" : "legacy",
+      paymentMode: paidPaymentMode,
+      paymentMethod: paidPaymentMethod,
+      pgTransactionCharge,
+      pgTransactionChargeMasterId: pgTransactionCharge.masterId,
+      pgTransactionPaymentMode: pgTransactionCharge.paymentMode,
+      pgTransactionChargeType: pgTransactionCharge.chargeType,
+      pgTransactionChargeValue: pgTransactionCharge.chargeValue,
+      pgTransactionChargeBasePaise: pgTransactionCharge.baseAmountPaise,
+      pgTransactionChargePaise: pgTransactionCharge.chargeAmountPaise
     };
     const paymentType = String(inputMetadata.paymentType || "cash").toLowerCase();
     const paymentStatus = String(inputMetadata.paymentStatus || (paymentType === "cash" ? "due" : "due")).toLowerCase();
@@ -2835,6 +2967,15 @@ export async function createBookingByAdmin(input: {
       taxAmountPaise,
       inclusiveTaxAmountPaise,
       exclusiveTaxAmountPaise,
+      deliveryChargesPaise,
+      originalDeliveryChargesPaise: billingSnapshot.originalDeliveryChargesPaise,
+      deliveryDiscountPaise: billingSnapshot.deliveryDiscountPaise,
+      addonLines: persistedAddonLines,
+      addonTotalPaise,
+      paymentMode: paidPaymentMode,
+      paymentMethod: paidPaymentMethod,
+      pgTransactionCharge,
+      pgTransactionChargePaise: pgTransactionCharge.chargeAmountPaise,
       tipAmountPaise,
       grandTotalPaise,
       taxRows: persistedTaxRows,
@@ -3070,15 +3211,18 @@ export async function createBookingByAdmin(input: {
     await client.query(
       `
         insert into zigo.booking_billing_snapshots
-          (service_request_id, base_price_paise, discount_paise, selling_price_paise,
+        (service_request_id, base_price_paise, discount_paise, selling_price_paise,
            item_total_paise, tax_amount_paise, inclusive_tax_amount_paise,
            exclusive_tax_amount_paise, tip_amount_paise, waiting_charges_paise,
-           grand_total_paise, currency, tax_details, pricing_details)
+         grand_total_paise, currency, tax_details, pricing_details,
+         pg_transaction_charge_master_id, pg_transaction_payment_mode, pg_transaction_charge_type,
+         pg_transaction_charge_value, pg_transaction_charge_base_paise, pg_transaction_charge_paise)
         values
           ($1::uuid, $2::bigint, $3::bigint, $4::bigint,
            $5::bigint, $6::bigint, $7::bigint,
            $8::bigint, $9::bigint, $10::bigint,
-           $11::bigint, 'INR', $12::jsonb, $13::jsonb)
+           $11::bigint, 'INR', $12::jsonb, $13::jsonb,
+           nullif($14, '')::uuid, $15, $16, $17::numeric, $18::bigint, $19::bigint)
         on conflict (service_request_id) do update
         set base_price_paise = excluded.base_price_paise,
             discount_paise = excluded.discount_paise,
@@ -3093,6 +3237,12 @@ export async function createBookingByAdmin(input: {
             currency = excluded.currency,
             tax_details = excluded.tax_details,
             pricing_details = excluded.pricing_details,
+            pg_transaction_charge_master_id = excluded.pg_transaction_charge_master_id,
+            pg_transaction_payment_mode = excluded.pg_transaction_payment_mode,
+            pg_transaction_charge_type = excluded.pg_transaction_charge_type,
+            pg_transaction_charge_value = excluded.pg_transaction_charge_value,
+            pg_transaction_charge_base_paise = excluded.pg_transaction_charge_base_paise,
+            pg_transaction_charge_paise = excluded.pg_transaction_charge_paise,
             updated_at = now()
       `,
       [
@@ -3108,9 +3258,158 @@ export async function createBookingByAdmin(input: {
         waitingChargesPaise,
         grandTotalPaise,
         JSON.stringify(persistedTaxRows),
-        JSON.stringify(billingSnapshot)
+        JSON.stringify(billingSnapshot),
+        pgTransactionCharge.masterId || "",
+        pgTransactionCharge.paymentMode,
+        pgTransactionCharge.chargeType,
+        pgTransactionCharge.chargeValue,
+        pgTransactionCharge.baseAmountPaise,
+        pgTransactionCharge.chargeAmountPaise
       ]
     );
+
+    await client.query(
+      `update zigo.booking_billing_snapshots
+          set item_base_price_paise = $2,
+              item_discount_paise = $3,
+              item_selling_price_paise = $4,
+              item_taxable_after_discount_paise = $5,
+              item_tax_inclusive_paise = $6,
+              item_tax_exclusive_paise = $7,
+              addon_total_paise = $8,
+              addon_discount_paise = $9,
+              addon_taxable_after_discount_paise = $10,
+              addon_tax_inclusive_paise = $11,
+              addon_tax_exclusive_paise = $12,
+              original_delivery_charges_paise = $13,
+              delivery_discount_paise = $14,
+              delivery_charges_paise = $15,
+              total_discount_paise = $16,
+              subtotal_after_discount_paise = $17,
+              pre_round_total_paise = $18,
+              rounding_adjustment_paise = $19,
+              amount_to_pay_paise = $20,
+              updated_at = now()
+        where service_request_id = $1::uuid`,
+      [request.rows[0].id,
+        basePricePaise,
+        discountPaise,
+        sellingPricePaise,
+        Number(billingSnapshot.itemTaxableAfterDiscountPaise || sellingPricePaise),
+        Number(billingSnapshot.itemTaxInclusivePaise || 0),
+        Number(billingSnapshot.itemTaxExclusivePaise || 0),
+        addonTotalPaise,
+        addonDiscountPaise,
+        Number(billingSnapshot.addonTaxableAfterDiscountPaise || 0),
+        Number(billingSnapshot.addonTaxInclusivePaise || 0),
+        Number(billingSnapshot.addonTaxExclusivePaise || 0),
+        originalDeliveryChargesPaise,
+        deliveryDiscountPaise,
+        deliveryChargesPaise,
+        totalDiscountPaise,
+        subtotalAfterDiscountPaise,
+        preRoundTotalPaise,
+        roundingAdjustmentPaise,
+        grandTotalPaise]
+    );
+
+    const itemSellingTotalPaise = Math.max(1, cartItems.reduce((sum, item) => sum + Number(item.sellingPricePaise || 0), 0) || sellingPricePaise);
+    for (const [index, item] of cartItems.entries()) {
+      const itemBasePaise = Math.max(0, Math.round(Number(item.basePricePaise || 0)));
+      const itemSellingPaise = Math.max(0, Math.round(Number(item.sellingPricePaise || 0)));
+      const itemDiscountPaise = Math.max(0, Math.min(itemBasePaise, itemBasePaise - itemSellingPaise));
+      const taxShare = itemSellingTotalPaise > 0 ? itemSellingPaise / itemSellingTotalPaise : 0;
+      const itemTaxInclusivePaise = Math.max(0, Math.round(Number(billingSnapshot.itemTaxInclusivePaise || 0) * taxShare));
+      const itemTaxExclusivePaise = Math.max(0, Math.round(Number(billingSnapshot.itemTaxExclusivePaise || 0) * taxShare));
+      const itemTotalAfterTaxPaise = Math.max(0, itemSellingPaise - itemTaxInclusivePaise);
+      const itemTaxAmountPaise = itemTaxInclusivePaise + itemTaxExclusivePaise;
+      const itemTotalAmountPaise = itemTotalAfterTaxPaise + itemTaxExclusivePaise;
+      await client.query(
+        `insert into zigo.booking_item_charge_lines
+          (service_request_id, line_sequence, item_type, service_id, category_id,
+           service_name, category_name, base_price_paise, discount_type, discount_value,
+           discount_amount_paise, selling_price_paise, taxable_after_discount_paise,
+           item_total_paise, tax_inclusive_paise, tax_exclusive_paise, tax_amount_paise,
+           total_amount_paise, rounding_adjustment_paise, metadata)
+         values ($1::uuid, $2::int, $3, nullif($4, '')::uuid, nullif($5, '')::uuid,
+                 $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb)`,
+        [request.rows[0].id,
+          index + 1,
+          String(item.itemType || "category"),
+          String(item.serviceId || ""),
+          String(item.categoryId || ""),
+          String(item.serviceName || ""),
+          String(item.categoryName || item.name || ""),
+          itemBasePaise,
+          String(item.discountType || billingSnapshot.discountType || "none"),
+          Number(item.discountValue || billingSnapshot.discountValue || 0),
+          itemDiscountPaise,
+          itemSellingPaise,
+          itemSellingPaise,
+          itemTotalAfterTaxPaise,
+          itemTaxInclusivePaise,
+          itemTaxExclusivePaise,
+          itemTaxAmountPaise,
+          itemTotalAmountPaise,
+          0,
+          JSON.stringify({ durationMinutes: item.durationMinutes || 0, categoryPriceRuleId: item.categoryPriceRuleId || null })]
+      );
+    }
+
+    const addonLineIdsByType = new Map<string, string[]>();
+    for (const line of persistedAddonLines) {
+      const inserted = await client.query<{ id: string }>(
+        `insert into zigo.booking_addon_charge_lines
+          (service_request_id, addon_charge_master_id, addon_type, scope, scope_type,
+           state_id, city_id, zone_id, cluster_id, micro_market_id, nano_market_id, title, label,
+           customer_applicability, cost_type, percentage_base, base_amount_paise,
+           gross_amount_paise, discount_type, discount_value, discount_amount_paise,
+           net_amount_paise, raw_gross_amount_paise, raw_net_amount_paise,
+           taxable_after_discount_paise, amount_after_discount_paise,
+           inclusive_tax_amount_paise, exclusive_tax_amount_paise, tax_amount_paise,
+           total_amount_paise, rounding_adjustment_paise, metadata)
+         values ($1::uuid, nullif($2, '')::uuid, $3, $4, $5, nullif($6, '')::uuid,
+                 nullif($7, '')::uuid, nullif($8, '')::uuid, nullif($9, '')::uuid,
+                 nullif($10, '')::uuid, nullif($11, '')::uuid, $12, $13, $14, $15, $16,
+                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32::jsonb)
+         returning id`,
+        [request.rows[0].id, line.id || "", line.addonType, line.scope, line.scopeType || "all",
+          line.stateId || "", line.cityId || "", line.zoneId || "", line.clusterId || "",
+          line.microMarketId || "", line.nanoMarketId || "", line.title, line.label,
+          line.applicableOn, line.costType, line.percentageBase, line.baseAmountPaise,
+          line.grossAmountPaise, line.discountType, line.discountValue, line.discountAmountPaise,
+          line.netAmountPaise, line.rawGrossAmountPaise, line.rawNetAmountPaise,
+          line.taxableAfterDiscountPaise, line.amountAfterDiscountPaise,
+          line.inclusiveTaxAmountPaise, line.exclusiveTaxAmountPaise, line.taxAmountPaise,
+          line.totalAmountPaise, line.roundingAdjustmentPaise, JSON.stringify(line.metadata)]
+      );
+      const ids = addonLineIdsByType.get(line.addonType) || [];
+      ids.push(inserted.rows[0].id);
+      addonLineIdsByType.set(line.addonType, ids);
+    }
+    for (const row of persistedTaxRows) {
+      const taxCategory = String(row.taxCategory || "service");
+      const addonLineId = addonLineIdsByType.get(taxCategory)?.[0] || null;
+      await client.query(
+        `insert into zigo.booking_tax_lines
+          (service_request_id, addon_charge_line_id, tax_master_rule_id, tax_category, tax_label,
+           applicable_on, tax_applicability, tax_type, tax_value, taxable_amount_paise,
+           tax_amount_paise, metadata)
+         values ($1::uuid, nullif($2, '')::uuid, nullif($3, '')::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)`,
+        [request.rows[0].id, addonLineId || "", typeof row.id === "string" ? row.id : "",
+          taxCategory, String(row.label || "Tax"), String(row.applicableOn || "selling_price"),
+          String(row.applicability || "exclusive"), String(row.taxType || "percent"),
+          Math.max(0, Number(row.taxValue || 0)), Math.max(0, Math.round(Number(row.taxableAmount || row.taxableAmountPaise || 0))),
+          Math.max(0, Math.round(Number(row.amountPaise || 0))), JSON.stringify({
+            formula: row.formula || "",
+            addonTaxAmountPaise: Math.max(0, Math.round(Number(row.addonTaxAmountPaise || 0))),
+            addonInclusiveTaxAmountPaise: Math.max(0, Math.round(Number(row.addonInclusiveTaxAmountPaise || 0))),
+            addonExclusiveTaxAmountPaise: Math.max(0, Math.round(Number(row.addonExclusiveTaxAmountPaise || 0))),
+            itemTaxAmountPaise: Math.max(0, Math.round(Number(row.itemTaxAmountPaise || 0))),
+            taxDisplayMode: String(persistedPricing.taxDisplayMode || "legacy")
+          })]
+      );
+    }
 
     const serviceRequestUpdate = await client.query(
       `
@@ -4417,6 +4716,8 @@ export async function confirmBookingPaymentByAdmin(serviceRequestId: string, act
     const paymentDetails = {
       status: response === "yes" ? "paid" : "pending",
       mode: "upi",
+      paymentMode: "online",
+      paymentMethod: "upi",
       amountPaise,
       confirmedBy: "admin",
       adminResponse: response,

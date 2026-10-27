@@ -7,6 +7,12 @@ export type AssistantDistanceSlab = {
   ratePaise: number;
 };
 
+export type AssistantDistanceOfferSlab = {
+  maxDistanceKm: number;
+  discountType: "percent" | "flat";
+  discountValue: number;
+};
+
 export type AssistantMasterSettings = {
   broadcastTimeSeconds: number;
   autoArrivedRadiusMeters: number;
@@ -14,6 +20,7 @@ export type AssistantMasterSettings = {
   travelCostBasePaise: number;
   travelCostSlabs: AssistantDistanceSlab[];
   assistantTravelPayoutSlabs: AssistantDistanceSlab[];
+  deliveryOfferSlabs: AssistantDistanceOfferSlab[];
 };
 
 const DEFAULT_DISTANCE_SLABS: AssistantDistanceSlab[] = [
@@ -30,7 +37,8 @@ export const DEFAULT_ASSISTANT_MASTER_SETTINGS: AssistantMasterSettings = {
   dryRunDistanceKm: 3,
   travelCostBasePaise: 3000,
   travelCostSlabs: DEFAULT_DISTANCE_SLABS.map((slab) => ({ ...slab })),
-  assistantTravelPayoutSlabs: DEFAULT_DISTANCE_SLABS.map((slab) => ({ ...slab }))
+  assistantTravelPayoutSlabs: DEFAULT_DISTANCE_SLABS.map((slab) => ({ ...slab })),
+  deliveryOfferSlabs: []
 };
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number) {
@@ -74,6 +82,33 @@ export function validateAssistantDistanceSlabs(slabs: AssistantDistanceSlab[]) {
   return null;
 }
 
+export function validateAssistantDistanceOfferSlabs(slabs: AssistantDistanceOfferSlab[]) {
+  if (!Array.isArray(slabs)) return "Delivery offer slabs must be a list.";
+  if (slabs.length > 20) return "A maximum of 20 delivery offer slabs is allowed.";
+
+  let previousMaxDistanceKm = 0;
+  for (let index = 0; index < slabs.length; index += 1) {
+    const slab = slabs[index];
+    if (!Number.isFinite(slab.maxDistanceKm) || slab.maxDistanceKm <= 0) {
+      return `Offer slab ${index + 1} has an invalid maximum distance.`;
+    }
+    if (index > 0 && slab.maxDistanceKm <= previousMaxDistanceKm) {
+      return `Offer slab ${index + 1} must have a greater maximum distance than the previous slab.`;
+    }
+    if (slab.discountType !== "percent" && slab.discountType !== "flat") {
+      return `Offer slab ${index + 1} has an invalid discount type.`;
+    }
+    if (!Number.isFinite(slab.discountValue) || slab.discountValue < 0) {
+      return `Offer slab ${index + 1} has an invalid discount value.`;
+    }
+    if (slab.discountType === "percent" && slab.discountValue > 100) {
+      return `Offer slab ${index + 1} percentage cannot be greater than 100%.`;
+    }
+    previousMaxDistanceKm = slab.maxDistanceKm;
+  }
+  return null;
+}
+
 function normalizedSlabs(value: unknown, fallback: AssistantDistanceSlab[]) {
   if (!Array.isArray(value)) return fallback.map((slab) => ({ ...slab }));
   const slabs = value.map((entry) => {
@@ -87,6 +122,19 @@ function normalizedSlabs(value: unknown, fallback: AssistantDistanceSlab[]) {
     };
   });
   return validateAssistantDistanceSlabs(slabs) ? fallback.map((slab) => ({ ...slab })) : slabs;
+}
+
+function normalizedOfferSlabs(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const slabs = value.map((entry) => {
+    const source = typeof entry === "object" && entry !== null ? entry as Record<string, unknown> : {};
+    return {
+      maxDistanceKm: boundedDecimal(source.maxDistanceKm, Number.NaN, 0, 10000),
+      discountType: source.discountType === "flat" ? "flat" as const : "percent" as const,
+      discountValue: boundedDecimal(source.discountValue, Number.NaN, 0, 100000000)
+    };
+  });
+  return validateAssistantDistanceOfferSlabs(slabs) ? [] : slabs;
 }
 
 export function normalizeAssistantMasterSettings(value: unknown): AssistantMasterSettings {
@@ -120,7 +168,8 @@ export function normalizeAssistantMasterSettings(value: unknown): AssistantMaste
     assistantTravelPayoutSlabs: normalizedSlabs(
       source.assistantTravelPayoutSlabs,
       DEFAULT_ASSISTANT_MASTER_SETTINGS.assistantTravelPayoutSlabs
-    )
+    ),
+    deliveryOfferSlabs: normalizedOfferSlabs(source.deliveryOfferSlabs)
   };
 }
 

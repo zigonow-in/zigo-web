@@ -11,7 +11,8 @@ export const DEFAULT_ASSISTANT_MASTER_SETTINGS = {
     dryRunDistanceKm: 3,
     travelCostBasePaise: 3000,
     travelCostSlabs: DEFAULT_DISTANCE_SLABS.map((slab) => ({ ...slab })),
-    assistantTravelPayoutSlabs: DEFAULT_DISTANCE_SLABS.map((slab) => ({ ...slab }))
+    assistantTravelPayoutSlabs: DEFAULT_DISTANCE_SLABS.map((slab) => ({ ...slab })),
+    deliveryOfferSlabs: []
 };
 function boundedInteger(value, fallback, min, max) {
     const numeric = Math.round(Number(value));
@@ -58,6 +59,33 @@ export function validateAssistantDistanceSlabs(slabs) {
     }
     return null;
 }
+export function validateAssistantDistanceOfferSlabs(slabs) {
+    if (!Array.isArray(slabs))
+        return "Delivery offer slabs must be a list.";
+    if (slabs.length > 20)
+        return "A maximum of 20 delivery offer slabs is allowed.";
+    let previousMaxDistanceKm = 0;
+    for (let index = 0; index < slabs.length; index += 1) {
+        const slab = slabs[index];
+        if (!Number.isFinite(slab.maxDistanceKm) || slab.maxDistanceKm <= 0) {
+            return `Offer slab ${index + 1} has an invalid maximum distance.`;
+        }
+        if (index > 0 && slab.maxDistanceKm <= previousMaxDistanceKm) {
+            return `Offer slab ${index + 1} must have a greater maximum distance than the previous slab.`;
+        }
+        if (slab.discountType !== "percent" && slab.discountType !== "flat") {
+            return `Offer slab ${index + 1} has an invalid discount type.`;
+        }
+        if (!Number.isFinite(slab.discountValue) || slab.discountValue < 0) {
+            return `Offer slab ${index + 1} has an invalid discount value.`;
+        }
+        if (slab.discountType === "percent" && slab.discountValue > 100) {
+            return `Offer slab ${index + 1} percentage cannot be greater than 100%.`;
+        }
+        previousMaxDistanceKm = slab.maxDistanceKm;
+    }
+    return null;
+}
 function normalizedSlabs(value, fallback) {
     if (!Array.isArray(value))
         return fallback.map((slab) => ({ ...slab }));
@@ -73,6 +101,19 @@ function normalizedSlabs(value, fallback) {
     });
     return validateAssistantDistanceSlabs(slabs) ? fallback.map((slab) => ({ ...slab })) : slabs;
 }
+function normalizedOfferSlabs(value) {
+    if (!Array.isArray(value))
+        return [];
+    const slabs = value.map((entry) => {
+        const source = typeof entry === "object" && entry !== null ? entry : {};
+        return {
+            maxDistanceKm: boundedDecimal(source.maxDistanceKm, Number.NaN, 0, 10000),
+            discountType: source.discountType === "flat" ? "flat" : "percent",
+            discountValue: boundedDecimal(source.discountValue, Number.NaN, 0, 100000000)
+        };
+    });
+    return validateAssistantDistanceOfferSlabs(slabs) ? [] : slabs;
+}
 export function normalizeAssistantMasterSettings(value) {
     const source = typeof value === "object" && value !== null ? value : {};
     return {
@@ -81,7 +122,8 @@ export function normalizeAssistantMasterSettings(value) {
         dryRunDistanceKm: boundedDecimal(source.dryRunDistanceKm, DEFAULT_ASSISTANT_MASTER_SETTINGS.dryRunDistanceKm, 0, 500),
         travelCostBasePaise: boundedInteger(source.travelCostBasePaise, DEFAULT_ASSISTANT_MASTER_SETTINGS.travelCostBasePaise, 0, 100_000_000),
         travelCostSlabs: normalizedSlabs(source.travelCostSlabs, DEFAULT_ASSISTANT_MASTER_SETTINGS.travelCostSlabs),
-        assistantTravelPayoutSlabs: normalizedSlabs(source.assistantTravelPayoutSlabs, DEFAULT_ASSISTANT_MASTER_SETTINGS.assistantTravelPayoutSlabs)
+        assistantTravelPayoutSlabs: normalizedSlabs(source.assistantTravelPayoutSlabs, DEFAULT_ASSISTANT_MASTER_SETTINGS.assistantTravelPayoutSlabs),
+        deliveryOfferSlabs: normalizedOfferSlabs(source.deliveryOfferSlabs)
     };
 }
 export function calculateAssistantDistanceSlabs(slabs, distanceKm, basePaise = 0) {

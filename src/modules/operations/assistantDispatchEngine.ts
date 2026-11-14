@@ -76,7 +76,7 @@ export function dispatchConfigFromEnv(): AssistantDispatchConfig {
   return {
     arrivalBufferMinutes: envNumber("DISPATCH_ARRIVAL_BUFFER_MINUTES", 2),
     wrapUpBufferMinutes: envNumber("DISPATCH_WRAP_UP_BUFFER_MINUTES", 5),
-    gpsFreshnessSeconds: envNumber("DISPATCH_GPS_FRESHNESS_SECONDS", 120),
+    gpsFreshnessSeconds: envNumber("DISPATCH_GPS_FRESHNESS_SECONDS", 30),
     heartbeatTimeoutSeconds: envNumber("DISPATCH_HEARTBEAT_TIMEOUT_SECONDS", 90),
     travelMultiplier: envNumber("DISPATCH_TRAVEL_MULTIPLIER", 1.2),
     holdDurationSeconds: envNumber("DISPATCH_HOLD_DURATION_SECONDS", 90),
@@ -590,7 +590,13 @@ export async function refreshAssistantAvailabilityCache(assistantId: string, cli
   const workStatus = activeBlock
     ? (activeBlock === "BOOKING" && String(row.statusCode || "").toLowerCase() === "working" ? "WORKING" : workStatusForBlock(activeBlock))
     : "FREE";
-  const presenceStatus: PresenceStatus = !onlineIntent ? "OFFLINE" : heartbeatFresh ? "ONLINE" : row.heartbeatAt ? "STALE" : "OFFLINE";
+  const presenceStatus: PresenceStatus = !onlineIntent
+    ? "OFFLINE"
+    : heartbeatFresh && gpsFresh
+      ? "ONLINE"
+      : row.heartbeatAt || row.gpsCapturedAt
+        ? "STALE"
+        : "OFFLINE";
   const confidence: AvailabilityConfidence = presenceStatus === "ONLINE" && gpsFresh ? "CONFIRMED" : row.futureShiftAt ? "EXPECTED" : "UNKNOWN";
   const nextAvailableAt = row.nextBlockEndAt && row.nextBlockEndAt > now ? row.nextBlockEndAt : now;
   const nextLat = numberOrNull(row.activeBlockEndLat) ?? numberOrNull(row.latitude);

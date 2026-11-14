@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { env } from "../config/env.js";
 import { HttpError } from "./errors.js";
 const writeMethods = new Set(["POST", "PUT", "PATCH"]);
 const suspiciousPathPatterns = [
@@ -19,6 +20,12 @@ export function corsOrigin(originConfig) {
         .map((origin) => origin.trim())
         .filter(Boolean);
 }
+export function configuredWebViewOrigins() {
+    return env.WEBVIEW_ALLOWED_ORIGINS
+        .split(",")
+        .map((origin) => origin.trim())
+        .filter((origin) => /^([a-z][a-z\d+.-]*):\/\/[^\s]+$/i.test(origin));
+}
 export const attachRequestId = (req, res, next) => {
     const incoming = req.get("x-request-id");
     const requestId = incoming && /^[a-zA-Z0-9._:-]{8,128}$/.test(incoming) ? incoming : crypto.randomUUID();
@@ -29,7 +36,12 @@ export const attachRequestId = (req, res, next) => {
 export const applySecurityHeaders = (_req, res, next) => {
     res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-    res.setHeader("Permissions-Policy", "camera=(), microphone=(), payment=*, usb=(), geolocation=(self)");
+    const webViewOrigins = configuredWebViewOrigins();
+    // X-Frame-Options cannot express an allowlist. CSP frame-ancestors below
+    // handles the configured mobile shells, so the legacy header must not
+    // override it with SAMEORIGIN.
+    res.removeHeader("X-Frame-Options");
+    res.setHeader("Permissions-Policy", `camera=(), microphone=(), payment=*, usb=(), geolocation=(self ${webViewOrigins.map((origin) => `"${origin}"`).join(" ")})`);
     res.setHeader("Cache-Control", "no-store");
     next();
 };

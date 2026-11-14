@@ -1,5 +1,6 @@
 import { pool } from "../../db/pool.js";
 import { HttpError } from "../../http/errors.js";
+import { inclusiveCalendarDateRange } from "../../utils/dateRange.js";
 let offerSchemaReady = null;
 export function ensureOfferMasterSchema(client = pool) {
     if (client === pool && offerSchemaReady)
@@ -181,6 +182,28 @@ export function validateOfferInput(input) {
         errors.push("Discount offers require a discount type and value.");
     if (offer.offerType === "PACKAGE" && !offer.packagePricePaise)
         errors.push("Package offers require a package purchase price.");
+    if (offer.offerType === "PACKAGE") {
+        const packageProduct = (offer.metadata?.packageProduct || {});
+        const quantity = Number(packageProduct.quantity ?? 0);
+        const durationMinutes = Number(packageProduct.durationMinutes ?? 0);
+        const validityDays = Number(packageProduct.validityDays ?? 0);
+        const minimumRedemptionMinutes = Number(packageProduct.minimumRedemptionMinutes ?? 0);
+        const maximumUsageMinutes = Number(packageProduct.maximumUsageMinutesPerBooking ?? 0);
+        if (!["bookings", "service_hours"].includes(String(packageProduct.entitlementType || "")))
+            errors.push("Package entitlement type is required.");
+        if (!Number.isInteger(quantity) || quantity <= 0)
+            errors.push("Package quantity must be greater than zero.");
+        if (!Number.isInteger(validityDays) || validityDays <= 0)
+            errors.push("Package validity must be greater than zero days.");
+        if (!Number.isInteger(minimumRedemptionMinutes) || minimumRedemptionMinutes <= 0)
+            errors.push("Package minimum redemption must be greater than zero minutes.");
+        if (!Number.isInteger(maximumUsageMinutes) || maximumUsageMinutes <= 0)
+            errors.push("Package maximum usage per booking must be greater than zero minutes.");
+        if (String(packageProduct.entitlementType) === "bookings" && (!Number.isInteger(durationMinutes) || durationMinutes <= 0))
+            errors.push("Booking bundles require a duration per booking.");
+    }
+    if (offer.offerType === "FREE_SERVICE" && Number(offer.freeQuantity ?? 0) <= 0)
+        errors.push("Free service offers require the covered duration in minutes.");
     if (offer.offerType === "FIXED_PRICE" && !offer.fixedPricePaise)
         errors.push("Fixed price offers require a fixed price.");
     if (offer.offerType === "BUY_X_GET_Y" && (!offer.buyQuantity || !offer.freeQuantity))
@@ -488,20 +511,57 @@ export async function listEligibleOffersForCustomer(customerUserId, filters = {}
         and o.status in ('ACTIVE','SCHEDULED')
         and (o.active_from is null or o.active_from <= now())
         and (o.active_until is null or o.active_until >= now())
+        and (o.user_segment = 'all'
+          or (o.user_segment = 'new' and not exists (select 1 from zigo.service_requests sr join zigo.customers c on c.id = sr.customer_id where c.user_id = $1::uuid))
+          or (o.user_segment = 'old' and exists (select 1 from zigo.service_requests sr join zigo.customers c on c.id = sr.customer_id where c.user_id = $1::uuid)))
         and not exists (select 1 from zigo.offer_excluded_users x where x.offer_id = o.id and x.user_id = $1::uuid)
         and (o.audience_type <> 'selected_users' or exists (select 1 from zigo.offer_included_users i where i.offer_id = o.id and i.user_id = $1::uuid))
         and ($2::uuid is null or not exists (select 1 from zigo.offer_categories c where c.offer_id = o.id) or exists (select 1 from zigo.offer_categories c where c.offer_id = o.id and c.category_id = $2::uuid))
         and ($3::uuid is null or not exists (select 1 from zigo.offer_durations d where d.offer_id = o.id) or exists (select 1 from zigo.offer_durations d where d.offer_id = o.id and d.category_price_rule_id = $3::uuid))
         and ($4::text is null or not exists (select 1 from zigo.offer_booking_types bt where bt.offer_id = o.id) or exists (select 1 from zigo.offer_booking_types bt where bt.offer_id = o.id and bt.booking_type in ($4, 'both')))
-        and ($5::uuid is null or not exists (select 1 from zigo.offer_payment_modes pm where pm.offer_id = o.id) or exists (select 1 from zigo.offer_payment_modes pm where pm.offer_id = o.id and pm.payment_mode_id = $5::uuid))
-        and ($6::text is null or not exists (select 1 from zigo.offer_payment_modes pm where pm.offer_id = o.id) or exists (select 1 from zigo.offer_payment_modes pm where pm.offer_id = o.id and pm.payment_mode_code = $6))
+        and (($5::uuid is null and $6::text is null)
+          or not exists (select 1 from zigo.offer_payment_modes pm where pm.offer_id = o.id)
+          or exists (select 1 from zigo.offer_payment_modes pm where pm.offer_id = o.id
+            and (($5::uuid is not null and pm.payment_mode_id = $5::uuid)
+              or ($6::text is not null and lower(pm.payment_mode_code) = lower($6::text))))
+        )
+        and (($7::uuid is null and $8::uuid is null)
+          or not exists (select 1 from zigo.offer_services os where os.offer_id = o.id)
+          or exists (select 1 from zigo.offer_services os where os.offer_id = o.id and (os.service_master_id = $7::uuid or os.service_id = $8::uuid)))
+        and ($9::uuid is null or not exists (select 1 from zigo.offer_scopes os where os.offer_id = o.id) or exists (
+          select 1 from zigo.offer_scopes os
+          left join zigo.clusters cl on cl.id = $9::uuid
+          left join zigo.cities city on city.id = cl.city_id
+          where os.offer_id = o.id
+            and (os.scope_type = 'all' or (os.scope_type = 'cluster' and os.cluster_id = $9::uuid)
+              or (os.scope_type = 'city' and os.city_id = cl.city_id)
+              or (os.scope_type = 'zone' and os.zone_id = cl.zone_id)
+              or (os.scope_type = 'state' and os.state_id = city.state_id))
+        ))
+        and (coalesce(o.redeem_limit_per_user, 0) <= 0 or (select count(*) from zigo.offer_redemption_ledger r where r.offer_id = o.id and r.customer_id = $1::uuid and r.status in ('RESERVED', 'CONSUMED')) < o.redeem_limit_per_user)
+        and (coalesce(o.redeem_limit_total, 0) <= 0 or (select count(*) from zigo.offer_redemption_ledger r where r.offer_id = o.id and r.status in ('RESERVED', 'CONSUMED')) < o.redeem_limit_total)
+        and (coalesce(o.redeem_limit_daily, 0) <= 0 or (select count(*) from zigo.offer_redemption_ledger r where r.offer_id = o.id and r.created_at >= current_date and r.status in ('RESERVED', 'CONSUMED')) < o.redeem_limit_daily)
+        and (coalesce(o.cooldown_minutes, 0) <= 0 or not exists (select 1 from zigo.offer_redemption_ledger r where r.offer_id = o.id and r.customer_id = $1::uuid and r.created_at >= now() - make_interval(mins => o.cooldown_minutes) and r.status in ('RESERVED', 'CONSUMED')))
       order by
         case when exists (select 1 from zigo.user_offer_entitlements e where e.offer_id = o.id and e.customer_id = $1::uuid and e.status = 'ACTIVE' and e.remaining_units > 0) then 0 else 1 end,
         case when exists (select 1 from zigo.offer_included_users i where i.offer_id = o.id and i.user_id = $1::uuid) then 0 else 1 end,
         o.priority desc,
         o.updated_at desc
-    `, [customerUserId, filters.categoryId || null, filters.durationId || null, filters.bookingType || null, filters.paymentModeId || null, filters.paymentModeCode || null]);
-    return result.rows;
+    `, [customerUserId, filters.categoryId || null, filters.durationId || null, filters.bookingType || null, filters.paymentModeId || null, filters.paymentModeCode || null, filters.serviceMasterId || null, filters.serviceId || null, filters.clusterId || null]);
+    const entitlements = await pool.query(`select distinct on (offer_id)
+       offer_id as "offerId", id as "entitlementId", total_units as "totalUnits", remaining_units as "remainingUnits", purchase_order_id as "purchaseOrderId"
+       from zigo.user_offer_entitlements
+      where customer_id = $1::uuid and status = 'ACTIVE' and remaining_units > 0
+      order by offer_id, valid_until nulls last, created_at`, [customerUserId]);
+    const entitlementByOfferId = new Map(entitlements.rows.map((row) => [String(row.offerId), row]));
+    return result.rows.map((row) => ({
+        ...row,
+        hasActiveEntitlement: entitlementByOfferId.has(String(row.id)),
+        activeEntitlementId: entitlementByOfferId.get(String(row.id))?.entitlementId || null,
+        activeEntitlementTotalUnits: entitlementByOfferId.get(String(row.id))?.totalUnits || 0,
+        activeEntitlementRemainingUnits: entitlementByOfferId.get(String(row.id))?.remainingUnits || 0,
+        activeEntitlementPurchaseOrderId: entitlementByOfferId.get(String(row.id))?.purchaseOrderId || null
+    }));
 }
 export async function validateCustomerOfferCode(customerUserId, code, filters = {}) {
     const offers = await listEligibleOffersForCustomer(customerUserId, filters);
@@ -558,4 +618,177 @@ export async function listOfferRedemptions(offerId) {
       order by r.created_at desc
     `, [offerId]);
     return result.rows;
+}
+export async function listOfferRedemptionReport(input = {}) {
+    await ensureOfferMasterSchema();
+    const page = Math.max(1, Math.trunc(Number(input.page || 1)));
+    const pageSize = Math.max(5, Math.min(1000, Math.trunc(Number(input.pageSize || 50))));
+    const offset = (page - 1) * pageSize;
+    const params = [];
+    const where = [];
+    const dateRange = inclusiveCalendarDateRange(input.startDate, input.endDate);
+    if (dateRange.startDate) {
+        params.push(dateRange.startDate);
+        where.push(`r.created_at >= ($${params.length}::date::timestamp at time zone 'Asia/Kolkata')`);
+    }
+    if (dateRange.endDateExclusive) {
+        params.push(dateRange.endDateExclusive);
+        where.push(`r.created_at < ($${params.length}::date::timestamp at time zone 'Asia/Kolkata')`);
+    }
+    if (input.offerType && input.offerType !== "all") {
+        params.push(input.offerType);
+        where.push(`o.offer_type = $${params.length}`);
+    }
+    if (input.status && input.status !== "all") {
+        params.push(input.status);
+        where.push(`r.status = $${params.length}`);
+    }
+    const search = String(input.search || "").trim();
+    if (search) {
+        params.push(`%${search.toLowerCase()}%`);
+        const searchParam = `$${params.length}`;
+        where.push(`(
+      lower(coalesce(u.display_name, '')) like ${searchParam}
+      or lower(coalesce(u.phone, '')) like ${searchParam}
+      or lower(coalesce(u.email::text, '')) like ${searchParam}
+      or lower(coalesce(c.customer_code, '')) like ${searchParam}
+      or lower(coalesce(o.title, '')) like ${searchParam}
+      or lower(coalesce(o.public_code, '')) like ${searchParam}
+      or lower(coalesce(o.internal_name, '')) like ${searchParam}
+      or lower(coalesce(sr.request_number, '')) like ${searchParam}
+      or r.id::text like ${searchParam}
+    )`);
+    }
+    const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+    const reportSql = `
+    select
+      r.id as "redemptionId",
+      r.offer_id as "offerId",
+      r.offer_version_id as "offerVersionId",
+      r.entitlement_id as "entitlementId",
+      r.booking_id as "bookingId",
+      r.status as "redemptionStatus",
+      r.benefit_type as "benefitType",
+      r.benefit_amount_paise as "benefitAmountPaise",
+      r.reason,
+      r.created_at as "redeemedAt",
+      r.updated_at as "updatedAt",
+      o.internal_name as "offerInternalName",
+      o.public_code as "offerCode",
+      o.title as "offerTitle",
+      o.offer_type as "offerType",
+      o.discount_type as "discountType",
+      o.discount_value as "discountValue",
+      o.package_price_paise as "packagePricePaise",
+      o.redeem_limit_per_user as "redeemLimitPerUser",
+      u.id as "customerId",
+      coalesce(nullif(u.display_name, ''), 'Customer') as "customerName",
+      u.phone as "customerPhone",
+      u.email::text as "customerEmail",
+      c.customer_code as "customerCode",
+      sr.request_number as "bookingReference",
+      sr.status_code as "bookingStatus",
+      coalesce(sr.booking_type, sr.metadata->>'bookingType', case when sr.scheduled_at is not null then 'schedule' else 'instant' end) as "bookingType",
+      sr.created_at as "bookingCreatedAt",
+      sr.scheduled_at as "scheduledAt",
+      sr.booking_start_at as "bookingStartAt",
+      sr.booking_end_at as "bookingEndAt",
+      coalesce(sr.duration_minutes, 0)::int as "durationMinutes",
+      coalesce(s.name, '') as "serviceName",
+      coalesce(cat.name, '') as "categoryName",
+      coalesce(csm.service_title, '') as "serviceMasterName",
+      coalesce(bbs.base_price_paise, sr.base_price_paise, 0) as "basePricePaise",
+      coalesce(bbs.item_total_paise, sr.selling_price_paise, 0) as "itemTotalPaise",
+      coalesce(bbs.addon_total_paise, 0) as "addonTotalPaise",
+      coalesce(bbs.total_discount_paise, bbs.discount_paise, sr.discount_paise, 0) as "totalDiscountPaise",
+      coalesce(bbs.item_discount_paise, bbs.discount_paise, sr.discount_paise, 0) as "itemDiscountPaise",
+      coalesce(bbs.addon_discount_paise, 0) as "addonDiscountPaise",
+      coalesce(bbs.delivery_discount_paise, 0) as "deliveryDiscountPaise",
+      coalesce(bbs.tax_amount_paise, 0) as "taxAmountPaise",
+      coalesce(bbs.grand_total_paise, bbs.amount_to_pay_paise, sr.booking_amount_paise, sr.estimated_amount_paise, 0) as "bookingAmountPaise",
+      greatest(coalesce(payment_summary.paid_amount_paise, 0), coalesce(razorpay_summary.paid_amount_paise, 0),
+        case when coalesce(sr.payment_details->>'paidAmountPaise', '') ~ '^\\d+$' then (sr.payment_details->>'paidAmountPaise')::bigint else 0 end,
+        case when coalesce(sr.is_paid, false) or lower(coalesce(sr.payment_status, '')) in ('paid', 'success', 'captured', 'completed')
+          then coalesce(bbs.grand_total_paise, bbs.amount_to_pay_paise, sr.booking_amount_paise, sr.estimated_amount_paise, 0) else 0 end,
+        0) as "paidAmountPaise",
+      coalesce(po.id, null) as "purchaseOrderId",
+      po.status as "purchaseStatus",
+      po.amount_paise as "packagePurchasePricePaise",
+      po.created_at as "packagePurchasedAt",
+      coalesce(e.total_units, 0)::int as "packageTotalUnits",
+      greatest(0, coalesce(e.total_units, 0) - coalesce(entitlement_usage.use_count, 0))::int as "packageRemainingUnits",
+      e.valid_until as "packageValidUntil",
+      coalesce(customer_offer_usage.use_count, 0)::int as "customerOfferUseCount",
+      coalesce(entitlement_usage.use_count, customer_offer_usage.use_count, 0)::int as "packageUseCount",
+      coalesce(referral.reward_amount_paise, 0) as "referralRewardPaise",
+      case when coalesce(e.total_units, 0) > 0 and coalesce(po.status, '') = 'COMPLETED'
+        then round(po.amount_paise::numeric / e.total_units)::bigint else 0 end as "allocatedPackageRevenuePaise"
+    from zigo.offer_redemption_ledger r
+    join zigo.offers o on o.id = r.offer_id
+    left join zigo.users u on u.id = r.customer_id
+    left join zigo.customers c on c.user_id = r.customer_id
+    left join zigo.service_requests sr on sr.id = r.booking_id
+    left join zigo.booking_billing_snapshots bbs on bbs.service_request_id = sr.id
+    left join zigo.services s on s.id = sr.service_id
+    left join zigo.categories cat on cat.id = sr.category_id
+    left join zigo.category_service_masters csm
+      on csm.id = case
+        when coalesce(cat.config->'categorySettings'->>'serviceMasterId', '') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        then (cat.config->'categorySettings'->>'serviceMasterId')::uuid
+        else null
+      end
+    left join zigo.user_offer_entitlements e on e.id = r.entitlement_id
+    left join zigo.offer_purchase_orders po on po.id = e.purchase_order_id
+    left join lateral (
+      select coalesce(sum(pt.amount_paise) filter (where pt.status_code in ('paid', 'success', 'captured', 'completed')), 0)::bigint as paid_amount_paise
+      from zigo.payment_transactions pt
+      where pt.service_request_id = sr.id
+    ) payment_summary on true
+    left join lateral (
+      select coalesce(sum(rp.amount_paise) filter (where rp.status_code in ('paid', 'success', 'captured', 'completed')), 0)::bigint as paid_amount_paise
+      from zigo.razorpay_payments rp
+      where rp.service_request_id = sr.id
+    ) razorpay_summary on true
+    left join lateral (
+      select count(*)::int as use_count
+      from zigo.offer_redemption_ledger usage
+      where usage.offer_id = r.offer_id
+        and usage.customer_id = r.customer_id
+        and usage.status in ('RESERVED', 'CONSUMED')
+    ) customer_offer_usage on true
+    left join lateral (
+      select count(*)::int as use_count
+      from zigo.offer_redemption_ledger usage
+      where usage.entitlement_id = r.entitlement_id
+        and usage.status in ('RESERVED', 'CONSUMED')
+    ) entitlement_usage on true
+    left join lateral (
+      select coalesce(sum(ra.reward_amount_paise), 0)::bigint as reward_amount_paise
+      from zigo.offer_referral_attributions ra
+      where ra.offer_id = r.offer_id
+        and ra.booking_id = r.booking_id
+        and ra.status not in ('REVERSED', 'CANCELLED')
+    ) referral on true
+    ${whereSql}
+  `;
+    const result = await pool.query(`select * from (${reportSql}) report order by "redeemedAt" desc, "redemptionId" desc limit $${params.length + 1} offset $${params.length + 2}`, [...params, pageSize, offset]);
+    const summary = await pool.query(`select
+       count(*)::int as "redemptionCount",
+       count(distinct "customerId")::int as "customerCount",
+       count(distinct "offerId")::int as "offerCount",
+       coalesce(sum("benefitAmountPaise"), 0)::bigint as "benefitAmountPaise",
+       coalesce(sum("referralRewardPaise"), 0)::bigint as "referralRewardPaise",
+       coalesce(sum("bookingAmountPaise"), 0)::bigint as "bookingAmountPaise",
+       coalesce(sum("paidAmountPaise"), 0)::bigint as "paidAmountPaise",
+       coalesce(sum("allocatedPackageRevenuePaise"), 0)::bigint as "allocatedPackageRevenuePaise",
+       coalesce(sum("paidAmountPaise" + "allocatedPackageRevenuePaise"), 0)::bigint as "recognizedRevenuePaise",
+       coalesce(sum("benefitAmountPaise" + "referralRewardPaise"), 0)::bigint as "estimatedPromoBurnPaise"
+     from (${reportSql}) report`, params);
+    const total = await pool.query(`select count(*)::text as total from (${reportSql}) report`, params);
+    const totalRecords = Number(total.rows[0]?.total || 0);
+    return {
+        rows: result.rows,
+        summary: summary.rows[0] || {},
+        pagination: { page, pageSize, totalRecords, totalPages: Math.max(1, Math.ceil(totalRecords / pageSize)) }
+    };
 }

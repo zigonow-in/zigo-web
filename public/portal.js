@@ -20,7 +20,7 @@ function withBasePath(path = "") {
   return `${zigoBasePath}${value}`;
 }
 
-const uploadMediaRevision = "attachment-preview-20261013";
+const uploadMediaRevision = "attachment-preview-20261111";
 
 function uploadAssetPath(path = "") {
   const original = String(path || "").trim();
@@ -443,7 +443,8 @@ const state = {
   customerCartRouteEditIndex: -1,
   customerCartRouteDeleteIndex: -1,
   customerCartRouteExpanded: false,
-  customerCartBillExpanded: false,
+  customerCartBillExpanded: true,
+  customerCartPolicyExpanded: false,
   customerCartLocationQuery: "",
   customerCartLocationResults: [],
   customerCartLocationBusy: false,
@@ -482,7 +483,7 @@ const state = {
   customerAvailabilityDecisionContext: null,
   customerAvailabilityLoading: false,
   customerAvailabilityError: "",
-  selectedPayment: "cash",
+  selectedPayment: "razorpay",
   customerUseWallet: false,
   customerPaymentSheetOpen: false,
   customerPaymentSheetContext: null,
@@ -590,6 +591,11 @@ Object.defineProperty(state, "customerView", {
   set(value) {
     const nextView = String(value || "home");
     const previousView = customerViewValue;
+    if (nextView === "cart" && previousView !== "cart") {
+      state.customerCartRouteExpanded = false;
+      state.customerCartBillExpanded = true;
+      state.customerCartPolicyExpanded = false;
+    }
     customerViewValue = nextView;
     pushCustomerHistoryEntry(previousView, nextView);
     if (actor === "customer" && state.token) queueMicrotask(writePortalSessionCache);
@@ -721,6 +727,9 @@ let customerOlaLocationMapResolved = null;
 let customerLocationMapMoving = false;
 let customerSearchPlaceholderTimer = null;
 let customerHomeCategoryImageSliderTimer = null;
+let customerHomeCategoryImageSliderTimers = new Set();
+let customerHomeCategoryImageSliderRunId = 0;
+let customerHomeCategoryCardHeightResizeFrame = null;
 let customerCartNoticeTimer = null;
 let customerOtpResendTimer = null;
 let customerCartRouteDrag = null;
@@ -744,7 +753,7 @@ let assistantLocationPingBusy = false;
 let customerHomeCategorySheetDrag = null;
 let assistantOverdueRefreshQueued = false;
 const customerCatalogCacheMaxAgeMs = 60 * 1000;
-const customerCatalogCacheVersion = "category_expand_title_visible_v1";
+const customerCatalogCacheVersion = "category_guidance_row_style_v3";
 const customerSearchPlaceholders = ["personal assistant", "waiting queue", "health care", "errands"];
 const zigoPaymentUpiId = "8899339136@hdfc";
 const zigoPaymentPayeeName = "ZIGO";
@@ -826,6 +835,12 @@ function syncPortalToastHost() {
     return;
   }
   let section = reviewScreen.querySelector(":scope > .customer-review-notification-stack");
+  const hasVisibleNotice = Boolean(section?.querySelector(":scope > :not(.hidden)"));
+  if (!String(toast.textContent || "").trim() && !hasVisibleNotice) {
+    resetPortalToastHost();
+    section?.remove();
+    return;
+  }
   if (!section) {
     const header = reviewScreen.querySelector(":scope > .customer-page-header");
     section = document.createElement("section");
@@ -2885,7 +2900,7 @@ async function setCustomerReviewBookingItem(item = {}) {
   state.customerCartLocationMessage = "";
   state.customerPaymentSheetOpen = false;
   state.customerPaymentBusy = false;
-  state.selectedPayment = "cash";
+  state.selectedPayment = "razorpay";
   state.customerBookingReference = "";
   state.customerRazorpayPayment = null;
   await saveCustomerCartToServer(state.cart, "");
@@ -2909,7 +2924,7 @@ function resetCustomerNewBookingDraftState() {
   state.customerPaymentSheetOpen = false;
   state.customerPaymentSheetContext = null;
   state.customerPaymentBusy = false;
-  state.selectedPayment = "cash";
+  state.selectedPayment = "razorpay";
   state.customerTrackTipsByBooking = {};
   state.customerTrackBillExpanded = false;
   state.customerTrackMediaExpanded = false;
@@ -3229,6 +3244,66 @@ function normalizeSupplyUnavailableAction(value = "") {
   return "";
 }
 
+function customerCategoryGuidanceSettings(category = {}) {
+  const configured = category.config?.categoryGuidance || {};
+  const value = (camelCase, snakeCase = "") => category[camelCase]
+    ?? category[snakeCase]
+    ?? configured[camelCase]
+    ?? configured[snakeCase];
+  const displayModeValue = String(value("categoryGuidanceDisplayMode", "category_guidance_display_mode") || "list").trim().toLowerCase();
+  const fontFamilyValue = String(value("categoryGuidanceFontFamily", "category_guidance_font_family") || "Inter").trim();
+  const textColorValue = normalizeServiceTextColor(value("categoryGuidanceTextColor", "category_guidance_text_color")) || "#2b2f38";
+  const titleFontFamilyValue = String(value("categoryGuidanceTitleFontFamily", "category_guidance_title_font_family") || "Inter").trim();
+  const titleTextColorValue = normalizeServiceTextColor(value("categoryGuidanceTitleTextColor", "category_guidance_title_text_color")) || "#2b2f38";
+  const titleIconSize = Math.max(12, Math.min(64, Math.round(numberValue(value("categoryGuidanceTitleIconSize", "category_guidance_title_icon_size"), 24))));
+  const rowTextPositionValue = String(value("categoryGuidanceRowTextPosition", "category_guidance_row_text_position") || "outside").trim().toLowerCase();
+  const rowTextAlignValue = String(value("categoryGuidanceRowTextAlign", "category_guidance_row_text_align") || "left").trim().toLowerCase();
+  const rowImageSize = Math.max(24, Math.min(240, Math.round(numberValue(value("categoryGuidanceRowImageSize", "category_guidance_row_image_size"), 44))));
+  const rowRadius = Math.max(0, Math.min(40, Math.round(numberValue(value("categoryGuidanceRowRadius", "category_guidance_row_radius"), 8))));
+  const rowOverlayHeight = Math.max(0, Math.min(100, Math.round(numberValue(value("categoryGuidanceRowOverlayHeight", "category_guidance_row_overlay_height"), 100))));
+  const rowOpacity = (camelCase, snakeCase, fallback) => {
+    const raw = Number(value(camelCase, snakeCase));
+    if (!Number.isFinite(raw)) return fallback;
+    return Math.max(0, Math.min(1, raw > 1 ? raw / 100 : raw));
+  };
+  const rowOverlayColor = normalizeServiceTextColor(value("categoryGuidanceRowOverlayColor", "category_guidance_row_overlay_color")) || "#111936";
+  const iconValue = (camelCase, snakeCase, fallback) => {
+    const configuredValue = value(camelCase, snakeCase);
+    return configuredValue == null ? fallback : String(configuredValue).trim();
+  };
+  return {
+    showTaskList: booleanValue(value("showTaskList", "show_task_list"), true),
+    showCanDoList: booleanValue(value("showCanDoList", "show_can_do_list"), true),
+    showCantDoList: booleanValue(value("showCantDoList", "show_cant_do_list"), true),
+    icons: {
+      task: iconValue("taskIcon", "task_icon", "&#9733;"),
+      canDo: iconValue("canDoIcon", "can_do_icon", "&#10003;"),
+      cantDo: iconValue("cantDoIcon", "cant_do_icon", "&#10005;")
+    },
+    displayMode: displayModeValue === "grid" ? "grid" : "list",
+    gridColumns: Math.max(1, Math.min(4, Math.round(numberValue(value("categoryGuidanceGridColumns", "category_guidance_grid_columns"), 3)))),
+    showImage: booleanValue(value("categoryGuidanceShowImage", "category_guidance_show_image"), false),
+    fontFamily: ["Inter", "Arial", "Roboto", "Poppins", "Georgia", "Verdana", "system-ui"].includes(fontFamilyValue) ? fontFamilyValue : "Inter",
+    fontSize: normalizeServiceFontSize(value("categoryGuidanceFontSize", "category_guidance_font_size"), 10),
+    textColor: textColorValue,
+    titleFontFamily: ["Inter", "Arial", "Roboto", "Poppins", "Georgia", "Verdana", "system-ui"].includes(titleFontFamilyValue) ? titleFontFamilyValue : "Inter",
+    titleFontSize: normalizeServiceFontSize(value("categoryGuidanceTitleFontSize", "category_guidance_title_font_size"), 12),
+    titleFontWeight: normalizeServiceFontWeight(value("categoryGuidanceTitleFontWeight", "category_guidance_title_font_weight"), 700),
+    titleTextColor: titleTextColorValue,
+    titleIconSize,
+    rowImageSize,
+    rowRadius,
+    rowTextPosition: rowTextPositionValue === "inside" ? "inside" : "outside",
+    rowTextAlign: ["left", "center", "right"].includes(rowTextAlignValue) ? rowTextAlignValue : "left",
+    rowOverlayEnabled: booleanValue(value("categoryGuidanceRowOverlayEnabled", "category_guidance_row_overlay_enabled"), true),
+    rowOverlayColor,
+    rowOverlayHeight,
+    rowOverlayOpacity: rowOpacity("categoryGuidanceRowOverlayOpacity", "category_guidance_row_overlay_opacity", 0.45),
+    rowOverlayGradientEnabled: booleanValue(value("categoryGuidanceRowOverlayGradientEnabled", "category_guidance_row_overlay_gradient_enabled"), true),
+    rowOverlayGradientOpacity: rowOpacity("categoryGuidanceRowOverlayGradientOpacity", "category_guidance_row_overlay_gradient_opacity", 0.35)
+  };
+}
+
 function normalizeCustomerCatalog(raw = {}) {
   const source = raw && typeof raw === "object" ? raw : {};
   const services = normalizeArray(source.services).map((service, index) => {
@@ -3259,6 +3334,8 @@ function normalizeCustomerCatalog(raw = {}) {
     serviceMasterId: String(service.id || service.serviceMasterId || ""),
     serviceTitle: service.serviceTitle || service.title || "Service",
     serviceSubtitle: service.serviceSubtitle || service.subtitle || "",
+    showCategoryName: booleanValue(service.showCategoryName ?? service.show_category_name, true),
+    showCategoryDescription: booleanValue(service.showCategoryDescription ?? service.show_category_description, true),
     icons: normalizeArray(service.icons),
     serviceTitleFontSize: normalizeServiceFontSize(service.serviceTitleFontSize, 18),
     serviceTitleFontWeight: normalizeServiceFontWeight(service.serviceTitleFontWeight, 400),
@@ -3316,8 +3393,38 @@ function normalizeCustomerCatalog(raw = {}) {
       code: category.code || category.categoryCode || "",
       name: String(category.name ?? category.categoryName ?? "").trim(),
       description: category.description || category.categoryDescription || "",
+      showSubCategoryName: booleanValue(category.showSubCategoryName ?? category.show_sub_category_name ?? category.config?.categorySettings?.showSubCategoryName ?? category.config?.categorySettings?.show_sub_category_name, true),
+      showSubCategoryDescription: booleanValue(category.showSubCategoryDescription ?? category.show_sub_category_description ?? category.config?.categorySettings?.showSubCategoryDescription ?? category.config?.categorySettings?.show_sub_category_description, true),
+      ...customerCategoryGuidanceSettings(category),
       imageUrl: category.imageUrl || category.categoryImageUrl || "",
       imageUrls: customerCategoryImageUrls(category),
+      categoryMediaThumbnailUrl: category.categoryMediaThumbnailUrl || category.category_media_thumbnail_url || category.config?.categorySettings?.categoryMediaThumbnailUrl || category.config?.categorySettings?.category_media_thumbnail_url || "",
+      categoryImageHeight: numberValue(category.categoryImageHeight ?? category.category_image_height ?? category.config?.categorySettings?.categoryImageHeight, 0),
+      categoryImageWidth: numberValue(category.categoryImageWidth ?? category.category_image_width ?? category.config?.categorySettings?.categoryImageWidth, 0),
+      categoryCardSpaceUtilize: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardSpaceUtilize ?? category.category_card_space_utilize ?? category.config?.categorySettings?.categoryCardSpaceUtilize ?? category.config?.categorySettings?.category_card_space_utilize, 1)))),
+      categoryCardGridWidth: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardGridWidth ?? category.category_card_grid_width ?? category.config?.categorySettings?.categoryCardGridWidth ?? category.config?.categorySettings?.category_card_grid_width ?? category.categoryCardSpaceUtilize ?? category.category_card_space_utilize, 1)))),
+      categoryCardGridHeight: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardGridHeight ?? category.category_card_grid_height ?? category.config?.categorySettings?.categoryCardGridHeight ?? category.config?.categorySettings?.category_card_grid_height, 1)))),
+      categoryMediaFit: category.categoryMediaFit || category.category_media_fit || category.config?.categorySettings?.categoryMediaFit || "cover",
+      categoryMediaTransition: category.categoryMediaTransition || category.category_media_transition || category.config?.categorySettings?.categoryMediaTransition || "fade",
+      categoryMediaTransitionDuration: numberValue(category.categoryMediaTransitionDuration ?? category.category_media_transition_duration ?? category.config?.categorySettings?.categoryMediaTransitionDuration, 500),
+      categoryMediaDisplayDuration: numberValue(category.categoryMediaDisplayDuration ?? category.category_media_display_duration ?? category.config?.categorySettings?.categoryMediaDisplayDuration, 3000),
+      categoryMediaSliderMode: category.categoryMediaSliderMode || category.category_media_slider_mode || category.config?.categorySettings?.categoryMediaSliderMode || category.config?.categorySettings?.category_media_slider_mode || "queue",
+      categoryMediaRepeat: ["auto", "2", "3", "4"].includes(String(category.categoryMediaRepeat ?? category.category_media_repeat ?? category.config?.categorySettings?.categoryMediaRepeat ?? category.config?.categorySettings?.category_media_repeat)) ? String(category.categoryMediaRepeat ?? category.category_media_repeat ?? category.config?.categorySettings?.categoryMediaRepeat ?? category.config?.categorySettings?.category_media_repeat) : "auto",
+      categoryNamePosition: category.categoryNamePosition || category.category_name_position || category.config?.categorySettings?.categoryNamePosition || "inside",
+      categoryNameColor: category.categoryNameColor || category.category_name_color || category.config?.categorySettings?.categoryNameColor || "#ffffff",
+      categoryNameFontSize: numberValue(category.categoryNameFontSize ?? category.category_name_font_size ?? category.config?.categorySettings?.categoryNameFontSize, 20),
+      categoryNameFontWeight: numberValue(category.categoryNameFontWeight ?? category.category_name_font_weight ?? category.config?.categorySettings?.categoryNameFontWeight, 700),
+      categoryNameFontFamily: category.categoryNameFontFamily || category.category_name_font_family || category.config?.categorySettings?.categoryNameFontFamily || "Inter",
+      categoryNameAlign: category.categoryNameAlign || category.category_name_align || category.config?.categorySettings?.categoryNameAlign || "left",
+      categoryNameVerticalAlign: category.categoryNameVerticalAlign || category.category_name_vertical_align || category.config?.categorySettings?.categoryNameVerticalAlign || "bottom",
+      categoryOverlayEnabled: category.categoryOverlayEnabled ?? category.category_overlay_enabled ?? category.config?.categorySettings?.categoryOverlayEnabled ?? true,
+      categoryOverlayOpacity: numberValue(category.categoryOverlayOpacity ?? category.category_overlay_opacity ?? category.config?.categorySettings?.categoryOverlayOpacity, 0.45),
+      categoryOverlayGradientEnabled: category.categoryOverlayGradientEnabled ?? category.category_overlay_gradient_enabled ?? category.config?.categorySettings?.categoryOverlayGradientEnabled ?? true,
+      categoryOverlayGradientOpacity: numberValue(category.categoryOverlayGradientOpacity ?? category.category_overlay_gradient_opacity ?? category.config?.categorySettings?.categoryOverlayGradientOpacity, 0.35),
+      categoryOverlayColor: category.categoryOverlayColor || category.category_overlay_color || category.config?.categorySettings?.categoryOverlayColor || "#111936",
+      categoryOverlayFit: category.categoryOverlayFit || category.category_overlay_fit || category.config?.categorySettings?.categoryOverlayFit || "50",
+      categoryOverlayWidth: numberValue(category.categoryOverlayWidth ?? category.category_overlay_width ?? category.config?.categorySettings?.categoryOverlayWidth, 100),
+      categoryOverlayPosition: category.categoryOverlayPosition || category.category_overlay_position || category.config?.categorySettings?.categoryOverlayPosition || "auto",
       basePrice,
       additionalCharges: numberValue(category.additionalCharges ?? category.additional_charges, 0),
       discountType: category.discountType || category.discount_type || "none",
@@ -3330,6 +3437,11 @@ function normalizeCustomerCatalog(raw = {}) {
       homeDisplayMode: category.homeDisplayMode || category.home_display_mode || category.config?.categorySettings?.homeDisplayMode || ((category.showInHomePage ?? category.show_in_home_page ?? category.config?.categorySettings?.showInHomePage) === false ? "categoryPrice" : "category"),
       categoryImageHeight: numberValue(category.categoryImageHeight ?? category.category_image_height ?? category.config?.categorySettings?.categoryImageHeight, 0),
       categoryImageWidth: numberValue(category.categoryImageWidth ?? category.category_image_width ?? category.config?.categorySettings?.categoryImageWidth, 0),
+      categoryCardSpaceUtilize: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardSpaceUtilize ?? category.category_card_space_utilize ?? category.config?.categorySettings?.categoryCardSpaceUtilize ?? category.config?.categorySettings?.category_card_space_utilize, 1)))),
+      categoryCardGridWidth: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardGridWidth ?? category.category_card_grid_width ?? category.config?.categorySettings?.categoryCardGridWidth ?? category.config?.categorySettings?.category_card_grid_width ?? category.categoryCardSpaceUtilize ?? category.category_card_space_utilize, 1)))),
+      categoryCardGridHeight: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardGridHeight ?? category.category_card_grid_height ?? category.config?.categorySettings?.categoryCardGridHeight ?? category.config?.categorySettings?.category_card_grid_height, 1)))),
+      categoryMediaSliderMode: category.categoryMediaSliderMode || category.category_media_slider_mode || category.config?.categorySettings?.categoryMediaSliderMode || category.config?.categorySettings?.category_media_slider_mode || "queue",
+      categoryMediaRepeat: ["auto", "2", "3", "4"].includes(String(category.categoryMediaRepeat ?? category.category_media_repeat ?? category.config?.categorySettings?.categoryMediaRepeat ?? category.config?.categorySettings?.category_media_repeat)) ? String(category.categoryMediaRepeat ?? category.category_media_repeat ?? category.config?.categorySettings?.categoryMediaRepeat ?? category.config?.categorySettings?.category_media_repeat) : "auto",
       priceDisplayMode: category.priceDisplayMode || category.price_display_mode || category.config?.categorySettings?.priceDisplayMode || "row",
       priceGridRows: numberValue(category.priceGridRows ?? category.price_grid_rows ?? category.config?.categorySettings?.priceGridRows, 3),
       priceGridColumns: numberValue(category.priceGridColumns ?? category.price_grid_columns ?? category.config?.categorySettings?.priceGridColumns, 3),
@@ -3380,8 +3492,38 @@ function normalizeCustomerCatalog(raw = {}) {
       name: String(category.name ?? category.categoryName ?? "").trim(),
       code: category.code || category.categoryCode || "",
       description: category.description || category.categoryDescription || "",
+      showSubCategoryName: booleanValue(category.showSubCategoryName ?? category.show_sub_category_name ?? category.config?.categorySettings?.showSubCategoryName ?? category.config?.categorySettings?.show_sub_category_name, true),
+      showSubCategoryDescription: booleanValue(category.showSubCategoryDescription ?? category.show_sub_category_description ?? category.config?.categorySettings?.showSubCategoryDescription ?? category.config?.categorySettings?.show_sub_category_description, true),
+      ...customerCategoryGuidanceSettings(category),
       imageUrl: category.imageUrl || category.categoryImageUrl || "",
       imageUrls: customerCategoryImageUrls(category),
+      categoryMediaThumbnailUrl: category.categoryMediaThumbnailUrl || category.category_media_thumbnail_url || category.config?.categorySettings?.categoryMediaThumbnailUrl || category.config?.categorySettings?.category_media_thumbnail_url || "",
+      categoryImageHeight: numberValue(category.categoryImageHeight ?? category.category_image_height ?? category.config?.categorySettings?.categoryImageHeight, 0),
+      categoryImageWidth: numberValue(category.categoryImageWidth ?? category.category_image_width ?? category.config?.categorySettings?.categoryImageWidth, 0),
+      categoryCardSpaceUtilize: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardSpaceUtilize ?? category.category_card_space_utilize ?? category.config?.categorySettings?.categoryCardSpaceUtilize ?? category.config?.categorySettings?.category_card_space_utilize, 1)))),
+      categoryCardGridWidth: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardGridWidth ?? category.category_card_grid_width ?? category.config?.categorySettings?.categoryCardGridWidth ?? category.config?.categorySettings?.category_card_grid_width ?? category.categoryCardSpaceUtilize ?? category.category_card_space_utilize, 1)))),
+      categoryCardGridHeight: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardGridHeight ?? category.category_card_grid_height ?? category.config?.categorySettings?.categoryCardGridHeight ?? category.config?.categorySettings?.category_card_grid_height, 1)))),
+      categoryMediaFit: category.categoryMediaFit || category.category_media_fit || category.config?.categorySettings?.categoryMediaFit || "cover",
+      categoryMediaTransition: category.categoryMediaTransition || category.category_media_transition || category.config?.categorySettings?.categoryMediaTransition || "fade",
+      categoryMediaTransitionDuration: numberValue(category.categoryMediaTransitionDuration ?? category.category_media_transition_duration ?? category.config?.categorySettings?.categoryMediaTransitionDuration, 500),
+      categoryMediaDisplayDuration: numberValue(category.categoryMediaDisplayDuration ?? category.category_media_display_duration ?? category.config?.categorySettings?.categoryMediaDisplayDuration, 3000),
+      categoryMediaSliderMode: category.categoryMediaSliderMode || category.category_media_slider_mode || category.config?.categorySettings?.categoryMediaSliderMode || category.config?.categorySettings?.category_media_slider_mode || "queue",
+      categoryMediaRepeat: ["auto", "2", "3", "4"].includes(String(category.categoryMediaRepeat ?? category.category_media_repeat ?? category.config?.categorySettings?.categoryMediaRepeat ?? category.config?.categorySettings?.category_media_repeat)) ? String(category.categoryMediaRepeat ?? category.category_media_repeat ?? category.config?.categorySettings?.categoryMediaRepeat ?? category.config?.categorySettings?.category_media_repeat) : "auto",
+      categoryNamePosition: category.categoryNamePosition || category.category_name_position || category.config?.categorySettings?.categoryNamePosition || "inside",
+      categoryNameColor: category.categoryNameColor || category.category_name_color || category.config?.categorySettings?.categoryNameColor || "#ffffff",
+      categoryNameFontSize: numberValue(category.categoryNameFontSize ?? category.category_name_font_size ?? category.config?.categorySettings?.categoryNameFontSize, 20),
+      categoryNameFontWeight: numberValue(category.categoryNameFontWeight ?? category.category_name_font_weight ?? category.config?.categorySettings?.categoryNameFontWeight, 700),
+      categoryNameFontFamily: category.categoryNameFontFamily || category.category_name_font_family || category.config?.categorySettings?.categoryNameFontFamily || "Inter",
+      categoryNameAlign: category.categoryNameAlign || category.category_name_align || category.config?.categorySettings?.categoryNameAlign || "left",
+      categoryNameVerticalAlign: category.categoryNameVerticalAlign || category.category_name_vertical_align || category.config?.categorySettings?.categoryNameVerticalAlign || "bottom",
+      categoryOverlayEnabled: category.categoryOverlayEnabled ?? category.category_overlay_enabled ?? category.config?.categorySettings?.categoryOverlayEnabled ?? true,
+      categoryOverlayOpacity: numberValue(category.categoryOverlayOpacity ?? category.category_overlay_opacity ?? category.config?.categorySettings?.categoryOverlayOpacity, 0.45),
+      categoryOverlayGradientEnabled: category.categoryOverlayGradientEnabled ?? category.category_overlay_gradient_enabled ?? category.config?.categorySettings?.categoryOverlayGradientEnabled ?? true,
+      categoryOverlayGradientOpacity: numberValue(category.categoryOverlayGradientOpacity ?? category.category_overlay_gradient_opacity ?? category.config?.categorySettings?.categoryOverlayGradientOpacity, 0.35),
+      categoryOverlayColor: category.categoryOverlayColor || category.category_overlay_color || category.config?.categorySettings?.categoryOverlayColor || "#111936",
+      categoryOverlayFit: category.categoryOverlayFit || category.category_overlay_fit || category.config?.categorySettings?.categoryOverlayFit || "50",
+      categoryOverlayWidth: numberValue(category.categoryOverlayWidth ?? category.category_overlay_width ?? category.config?.categorySettings?.categoryOverlayWidth, 100),
+      categoryOverlayPosition: category.categoryOverlayPosition || category.category_overlay_position || category.config?.categorySettings?.categoryOverlayPosition || "auto",
       note: category.note || "",
       taskListTitle: category.taskListTitle || "Tasks related to category",
       taskList: normalizeArray(category.taskList),
@@ -3402,6 +3544,11 @@ function normalizeCustomerCatalog(raw = {}) {
       homeDisplayMode: category.homeDisplayMode || category.home_display_mode || category.config?.categorySettings?.homeDisplayMode || ((category.showInHomePage ?? category.show_in_home_page ?? category.config?.categorySettings?.showInHomePage) === false ? "categoryPrice" : "category"),
       categoryImageHeight: numberValue(category.categoryImageHeight ?? category.category_image_height ?? category.config?.categorySettings?.categoryImageHeight, 0),
       categoryImageWidth: numberValue(category.categoryImageWidth ?? category.category_image_width ?? category.config?.categorySettings?.categoryImageWidth, 0),
+      categoryCardSpaceUtilize: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardSpaceUtilize ?? category.category_card_space_utilize ?? category.config?.categorySettings?.categoryCardSpaceUtilize ?? category.config?.categorySettings?.category_card_space_utilize, 1)))),
+      categoryCardGridWidth: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardGridWidth ?? category.category_card_grid_width ?? category.config?.categorySettings?.categoryCardGridWidth ?? category.config?.categorySettings?.category_card_grid_width ?? category.categoryCardSpaceUtilize ?? category.category_card_space_utilize, 1)))),
+      categoryCardGridHeight: Math.max(1, Math.min(5, Math.round(numberValue(category.categoryCardGridHeight ?? category.category_card_grid_height ?? category.config?.categorySettings?.categoryCardGridHeight ?? category.config?.categorySettings?.category_card_grid_height, 1)))),
+      categoryMediaSliderMode: category.categoryMediaSliderMode || category.category_media_slider_mode || category.config?.categorySettings?.categoryMediaSliderMode || category.config?.categorySettings?.category_media_slider_mode || "queue",
+      categoryMediaRepeat: ["auto", "2", "3", "4"].includes(String(category.categoryMediaRepeat ?? category.category_media_repeat ?? category.config?.categorySettings?.categoryMediaRepeat ?? category.config?.categorySettings?.category_media_repeat)) ? String(category.categoryMediaRepeat ?? category.category_media_repeat ?? category.config?.categorySettings?.categoryMediaRepeat ?? category.config?.categorySettings?.category_media_repeat) : "auto",
       priceDisplayMode: category.priceDisplayMode || category.price_display_mode || category.config?.categorySettings?.priceDisplayMode || "row",
       priceGridRows: numberValue(category.priceGridRows ?? category.price_grid_rows ?? category.config?.categorySettings?.priceGridRows, 3),
       priceGridColumns: numberValue(category.priceGridColumns ?? category.price_grid_columns ?? category.config?.categorySettings?.priceGridColumns, 3),
@@ -5245,7 +5392,7 @@ function customerPaymentMethods() {
     const value = customerPaymentMethodValue(method);
     if (!value || seen.has(value)) return [];
     seen.add(value);
-    const configuredIcon = ["wallet", "cash", "receipt", "business", "package"].includes(String(metadata.icon || "")) ? String(metadata.icon) : "package";
+    const configuredIcon = ["wallet", "cash", "receipt", "business", "package", "phonepe"].includes(String(metadata.icon || "")) ? String(metadata.icon) : "package";
     const walletBalancePaise = Math.max(0, Number(
       state.user?.wallet?.availableBalancePaise
       ?? state.user?.walletBalancePaise
@@ -5487,31 +5634,39 @@ customerCartConfirmBarHtml = function customerCartConfirmBarHtmlFinal(totals = c
   const bookingAmountPaise = Math.max(0, Math.round(amount * 100));
   const walletAppliedPaise = state.customerUseWallet ? Math.min(walletBalancePaise, bookingAmountPaise) : 0;
   const remainingAmount = Math.max(0, (bookingAmountPaise - walletAppliedPaise) / 100);
+  const displayedAmount = walletAppliedPaise > 0 ? remainingAmount : amount;
+  const actionLabel = displayedAmount > 0 ? "Pay Now" : "Confirm";
   const walletControl = walletBalancePaise > 0
     ? `<label class="customer-wallet-use-control"><input type="checkbox" data-use-customer-wallet ${state.customerUseWallet ? "checked" : ""}><span>Use ZIGO Wallet</span><b>${escapeHtml(money(walletBalancePaise / 100))}</b></label>`
     : "";
   const hasPaymentChoice = selectablePaymentMethods.length > 1;
   const paymentMethodControl = hasPaymentChoice
-    ? `<button class="customer-payment-mode-field" type="button" data-open-review-payment-sheet aria-label="Change payment mode">
+    ? `<button class="customer-payment-mode-field customer-pay-method-control" type="button" data-open-review-payment-sheet aria-label="Change payment mode">
         ${customerIcon(customerPaymentIcon(selectedPayment))}
         <span>${escapeHtml(customerPaymentLabel(selectedPayment))}</span>
-        ${customerIcon("chevronDown")}
       </button>`
-    : `<span class="customer-payment-mode-field static" aria-label="Selected payment mode">
+    : `<span class="customer-payment-mode-field customer-pay-method-control static" aria-label="Selected payment mode">
         ${customerIcon(customerPaymentIcon(selectedPayment))}
         <span>${escapeHtml(customerPaymentLabel(selectedPayment))}</span>
       </span>`;
   return `<div class="customer-cart-bar cart-confirm-bar">
     <div class="customer-pay-main">
       <div class="customer-pay-left">
-        ${paymentMethodControl}
+        <div class="customer-pay-method-wrap">
+          <small class="customer-pay-using">Pay using ${customerIcon("chevronUp")}</small>
+          ${paymentMethodControl}
+        </div>
         ${walletControl}
         <div class="customer-pay-amount">
           <b><span>₹</span>${escapeHtml((walletAppliedPaise > 0 ? remainingAmount : amount).toFixed(0))}</b>
           ${discount > 0 ? `<del>${escapeHtml(money(total))}</del><em>Save ${escapeHtml(money(discount))}</em>` : ""}
         </div>
       </div>
-      <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length && selectedPayment ? "" : "disabled"}><span>Proceed to Pay</span></button>
+      <button class="primary-btn customer-pay-submit" type="button" data-confirm-booking ${state.cart.length && selectedPayment ? "" : "disabled"}>
+        <b class="customer-pay-submit-amount">${escapeHtml(customerReviewMoney(displayedAmount))}</b>
+        <span>${actionLabel}</span>
+        ${customerIcon("chevronRight")}
+      </button>
     </div>
   </div>`;
 };
@@ -5748,6 +5903,11 @@ function customerCartRouteTitle(stop = {}, fallback = "Location") {
   return label || address.split(",")[0]?.trim() || fallback;
 }
 
+function customerCartRouteDisplayName(stop = {}, fallback = "Location") {
+  const personName = String(stop.personName || stop.metadata?.personName || stop.nameOnAddress || stop.metadata?.nameOnAddress || "").trim();
+  return personName || customerCartRouteTitle(stop, fallback);
+}
+
 function customerCartRouteMobile(stop = {}) {
   const raw = stop.contactNumber || stop.mobile || stop.phone || stop.metadata?.contactNumber || "";
   const mobile = customerDisplayMobile10(raw);
@@ -5780,45 +5940,6 @@ function customerCartRouteDetailAddress(stop = {}) {
   return parts.filter(Boolean).join(", ");
 }
 
-function customerCartRouteSummaryCopyHtml(stop = {}, fallback = "Location", className = "") {
-  const personName = String(stop.personName || stop.nameOnAddress || stop.metadata?.personName || stop.metadata?.nameOnAddress || "").trim();
-  const mobile = customerCartRouteMobile(stop);
-  const identity = [personName, mobile].filter(Boolean).join(personName && mobile ? " | " : "");
-  return `<span class="customer-route-summary-copy ${escapeHtml(className)}">
-    <b>${escapeHtml(customerCartRouteTitle(stop, fallback))}</b>
-    ${identity ? `<em>${escapeHtml(identity)}</em>` : ""}
-    <small>${escapeHtml(customerCartRouteDetailAddress(stop))}</small>
-  </span>`;
-}
-
-function customerCartRouteSummaryHtml(stops = [], canAdd = false, maxLocations = 1, mode = "current") {
-  const start = stops[0] || {};
-  const end = stops[stops.length - 1] || start;
-  const stopCount = Math.max(0, stops.length - 1);
-  const startTitle = customerCartRouteTitle(start, "Start point");
-  const isMulti = mode === "multi" && maxLocations > 1;
-  const showAddStops = Boolean(isMulti && canAdd && stops.length < Number(maxLocations || 1));
-  if (!isMulti || stops.length <= 1) {
-    return `<div class="customer-route-summary-card current-only single-location">
-      <span class="customer-route-dot start" aria-hidden="true"></span>
-      ${customerCartRouteSummaryCopyHtml(start, startTitle, "start")}
-      <button class="customer-route-location-action edit" data-edit-customer-cart-location-stop="0" type="button" aria-label="Edit location" title="Edit location">${customerIcon("edit")}</button>
-      ${showAddStops ? `<button class="customer-route-add-stop" data-open-cart-stop-picker type="button">Add Stops</button>` : ""}
-    </div>`;
-  }
-  const endTitle = stopCount ? customerCartRouteTitle(end, "End point") : "Add stop";
-  const middleStopCount = Math.max(0, stops.length - 2);
-  return `<div class="customer-route-summary-card ${stopCount ? "has-stops" : ""}">
-    <span class="customer-route-dot start" aria-hidden="true"></span>
-    ${customerCartRouteSummaryCopyHtml(start, startTitle, "start")}
-    <span class="customer-route-connector ${middleStopCount ? "" : "no-stops"}" aria-hidden="true"><i></i>${middleStopCount ? `<b>${escapeHtml(middleStopCount)} Stop${middleStopCount === 1 ? "" : "s"}</b>` : ""}<i></i></span>
-    <span class="customer-route-dot end" aria-hidden="true"></span>
-    ${stopCount ? customerCartRouteSummaryCopyHtml(end, endTitle, "end") : `<span class="customer-route-summary-copy end"><b>${escapeHtml(endTitle)}</b><small>${escapeHtml(`${Math.max(0, maxLocations - stops.length)} stops available`)}</small></span>`}
-    ${stopCount ? `<button class="customer-route-expand" data-toggle-cart-route-details type="button" aria-expanded="${state.customerCartRouteExpanded ? "true" : "false"}" aria-label="${state.customerCartRouteExpanded ? "Hide route details" : "Show route details"}">${customerIcon(state.customerCartRouteExpanded ? "chevronUp" : "chevronDown")}</button>` : `<span></span>`}
-    ${showAddStops ? `<button class="customer-route-add-stop" data-open-cart-stop-picker type="button">Add Stops</button>` : ""}
-  </div>`;
-}
-
 function customerCartRouteDetailsHtml(stops = []) {
   if (!stops.length) return "";
   return `<div class="customer-route-detail-list">
@@ -5826,17 +5947,19 @@ function customerCartRouteDetailsHtml(stops = []) {
       const isStart = index === 0;
       const isEnd = index === stops.length - 1;
       const mobile = customerCartRouteMobile(stop);
-      const personName = String(stop.personName || stop.metadata?.personName || "").trim();
-      const titleExtra = [personName, mobile].filter(Boolean).join(personName && mobile ? " | " : "");
-      return `<article class="customer-route-detail-row ${isStart ? "start" : isEnd ? "end" : "middle"}" data-route-stop-index="${escapeHtml(index)}">
+      const locationKey = customerCartLocationKey(stop);
+      return `<article class="customer-route-detail-row ${isStart ? "start" : isEnd ? "end" : "middle"}" data-route-stop-index="${escapeHtml(index)}" data-customer-cart-location-key="${escapeHtml(locationKey)}">
         <span class="customer-route-detail-marker">${isStart || isEnd ? "" : escapeHtml(index)}</span>
         <span class="customer-route-detail-copy">
-          <b>${escapeHtml(customerCartRouteTitle(stop, customerCartLocationLabel(index, stops.length)))}${titleExtra ? ` <em>${escapeHtml(titleExtra)}</em>` : ""}</b>
+          <span class="customer-route-detail-title-row">
+            <b>${escapeHtml(customerCartRouteDisplayName(stop, customerCartLocationLabel(index, stops.length)))}</b>
+            ${mobile ? `<em class="customer-route-detail-mobile">| ${escapeHtml(mobile)}</em>` : ""}
+            <span class="customer-route-detail-actions">
+              <button class="edit" data-edit-customer-cart-location-stop="${escapeHtml(index)}" type="button" aria-label="Edit location" title="Edit location">${customerIcon("edit")}</button>
+              ${stops.length > 1 ? `<button class="delete" data-open-customer-cart-route-delete="${escapeHtml(index)}" type="button" aria-label="Delete location" title="Delete location">${customerIcon("trash")}</button>` : ""}
+            </span>
+          </span>
           <small>${escapeHtml(customerCartRouteDetailAddress(stop))}</small>
-        </span>
-        <span class="customer-route-detail-actions">
-          <button class="edit" data-edit-customer-cart-location-stop="${escapeHtml(index)}" type="button" aria-label="Edit location" title="Edit location">${customerIcon("edit")}</button>
-          ${stops.length > 1 ? `<button class="delete" data-open-customer-cart-route-delete="${escapeHtml(index)}" type="button" aria-label="Delete location" title="Delete location">${customerIcon("trash")}</button>` : ""}
         </span>
       </article>`;
     }).join("")}
@@ -5873,21 +5996,24 @@ function customerCartLocationResultsHtml(canAdd = true) {
 function customerCartLocationsHtml() {
   const requirement = customerCartLocationRequirement();
   const stops = customerCartLocationStopsForPayload();
-  const canAdd = requirement.mode === "multi" && stops.length < requirement.maxLocations;
-  const selectedServiceNames = requirement.serviceRules.map((rule) => rule.categoryName || rule.serviceName).filter(Boolean).join(", ") || "selected category";
-  const ruleText = requirement.maxLocations > 1
-    ? `${requirement.maxLocations} locations allowed for ${selectedServiceNames}.`
-    : `Current location only for ${selectedServiceNames}.`;
-  const expanded = state.customerCartRouteExpanded && stops.length > 0;
-  return `<div class="customer-cart-locations ${expanded ? "is-expanded" : ""}">
-    <div class="customer-route-head">
-      <div>
-        <h2>Locations</h2>
-        <p>${escapeHtml(ruleText)}</p>
-      </div>
-      ${requirement.maxLocations > 1 ? `<span>${escapeHtml(stops.length)} / ${escapeHtml(requirement.maxLocations)}</span>` : ""}
+  const canAdd = stops.length < requirement.maxLocations;
+  const routeExpanded = Boolean(state.customerCartRouteExpanded);
+  const locationCount = `${stops.length} / ${requirement.maxLocations}`;
+  return `<div class="customer-cart-locations customer-cart-bill-card ${routeExpanded ? "is-expanded" : "is-collapsed"}">
+    <div class="customer-cart-locations-header">
+      <button class="customer-cart-locations-toggle" data-toggle-customer-cart-locations type="button" aria-expanded="${routeExpanded ? "true" : "false"}" aria-controls="customerCartLocationsBody" aria-label="${routeExpanded ? "Collapse" : "Expand"} locations">
+        <span class="customer-route-title-row">
+          <strong class="customer-cart-bill-summary-title">Locations</strong>
+          <span class="customer-route-location-count">${escapeHtml(locationCount)}</span>
+        </span>
+        ${customerIcon(routeExpanded ? "chevronUp" : "chevronDown")}
+      </button>
     </div>
-    ${stops.length ? `<div class="customer-route-boundary">${customerCartRouteSummaryHtml(stops, canAdd, requirement.maxLocations, requirement.mode)}${expanded ? customerCartRouteDetailsHtml(stops) : ""}</div>` : `<div class="muted customer-route-empty">Pick a serviceable start point before booking.<button class="customer-route-add-stop" data-open-cart-stop-picker type="button">Choose location</button></div>`}
+    <div id="customerCartLocationsBody" class="customer-cart-location-body ${routeExpanded ? "" : "is-hidden"}">
+      ${stops.length
+        ? `<div class="customer-route-boundary">${customerCartRouteDetailsHtml(stops)}</div><div class="customer-route-detail-footer ${canAdd ? "" : "is-at-limit"}"><button class="customer-route-add-stop customer-route-detail-add-stop" data-open-cart-stop-picker type="button">${customerIcon("plus")}<span>Add Stop</span></button></div>`
+        : `<div class="muted customer-route-empty">Pick your service location first.<button class="customer-route-add-stop" data-open-cart-stop-picker type="button">Choose location</button></div>`}
+    </div>
     ${customerCartRouteDeletePopupHtml()}
   </div>`;
 }
@@ -6479,6 +6605,8 @@ function customerIcon(name, className = "") {
     receipt: `<path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1-2-1Z"></path><path d="M8 7h8"></path><path d="M8 11h8"></path><path d="M8 15h5"></path>`,
     paperclip: `<path d="m21.4 11.6-8.8 8.8a6 6 0 0 1-8.5-8.5l9.5-9.5a4 4 0 1 1 5.7 5.7l-9.5 9.5a2 2 0 0 1-2.8-2.8l8.8-8.8"></path>`,
     package: `<path d="m7.5 4.3 9 5.2"></path><path d="M21 8.5 12 14 3 8.5"></path><path d="M12 22V14"></path><path d="M3 8.5v7L12 22l9-6.5v-7L12 2 3 8.5Z"></path>`,
+    file: `<path d="M6 3h8l4 4v14H6z"></path><path d="M14 3v5h5"></path>`,
+    camera: `<path d="M4 8h3l1.5-2h7L17 8h3v11H4z"></path><circle cx="12" cy="13.5" r="3"></circle>`,
     store: `<path d="M4 10h16l-1-6H5l-1 6Z"></path><path d="M5 10v10h14V10"></path><path d="M9 20v-6h6v6"></path>`,
     trash: `<path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path>`,
     edit: `<path d="M17.2 3.8a2.1 2.1 0 0 1 3 3L8 19l-4 1 1-4 12.2-12.2Z"></path><path d="m15 6 3 3"></path>`,
@@ -6494,6 +6622,8 @@ function customerIcon(name, className = "") {
     plus: `<path d="M12 5v14"></path><path d="M5 12h14"></path>`,
     minus: `<path d="M5 12h14"></path>`,
     back: `<path d="m15 18-6-6 6-6"></path>`,
+    phonepe: `<circle cx="12" cy="12" r="9"></circle><path d="M9 17V7h3.5a3 3 0 0 1 0 6H9"></path><path d="m12 13 3 4"></path>`,
+    arrowLeft: `<path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>`,
     x: `<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>`,
     check: `<path d="m5 12 4 4L19 6"></path>`,
     navigation: `<polygon points="3 11 22 2 13 21 11 13 3 11"></polygon>`,
@@ -7095,6 +7225,30 @@ function customerHomeSortedServices() {
   );
 }
 
+function customerCategoryNameVisible(category = {}) {
+  return category.showSubCategoryName !== false;
+}
+
+function customerCategoryDescriptionVisible(category = {}) {
+  return category.showSubCategoryDescription !== false;
+}
+
+function customerCategoryDisplayName(category = {}, fallback = "Category") {
+  if (!customerCategoryNameVisible(category)) return "";
+  return String(category.name || category.categoryName || fallback).trim();
+}
+
+function customerCategoryCatalogVisualHtml(category = {}, fallback = "Item") {
+  const settings = customerCategoryMediaSettings(category);
+  const cardSize = customerCategoryCardSize(category);
+  const hasCustomImageSize = Boolean(cardSize);
+  const sizeStyle = hasCustomImageSize
+    ? ` style="--category-card-size:${escapeHtml(cardSize)}px;--category-image-width:${escapeHtml(cardSize)}px;--category-image-height:${escapeHtml(cardSize)}px;"`
+    : "";
+  return `<div class="product-image category-product-image${hasCustomImageSize ? " has-custom-category-image-size" : ""}"${sizeStyle}>${customerHomeTileVisual(category, fallback, { slider: true, styleCategory: true })}</div>
+    ${settings.namePosition === "outside" ? customerCategoryNameHtml(category, settings, "outside") : ""}`;
+}
+
 function categoryCatalogCard(category = {}, service = selectedService()) {
   const serviceId = service?.id || categoryServiceId(category);
   const hasDrilldown = categoryHasDrilldown(category, serviceId);
@@ -7107,9 +7261,8 @@ function categoryCatalogCard(category = {}, service = selectedService()) {
   const disabledLabel = categoryLimitReached ? `Max ${categoryLimit.limit}` : canAddDirect ? "Price required" : "No stores";
   return `<article class="customer-product-card catalog-grid-card ${hasDrilldown ? "has-drilldown" : ""}" data-customer-category-card="${escapeHtml(category.id || "")}" ${hasDrilldown ? `data-open-category-stores="${escapeHtml(category.id)}" role="button" tabindex="0"` : ""}>
     ${favoriteButton("categories", category.id)}
-    <div class="product-image">${customerHomeTileVisual(category, "Item")}</div>
+    ${customerCategoryCatalogVisualHtml(category, "Item")}
     <div>
-      <h3>${escapeHtml(category.name)}</h3>
       <p>${escapeHtml((customerServices().find((item) => String(item.id || "") === categoryServiceId(category)) || service)?.name || "Service")}</p>
       <b>${price > 0 ? money(price) : "Price required"}</b>
       <small>${categoryDurationMinutes(category)} min</small>
@@ -7325,9 +7478,8 @@ function favoriteCatalogContent() {
   return `<div class="favorite-panel">
     <div class="customer-catalog-grid favorite-catalog-grid">${categoryRows.map((category) => `<article class="customer-product-card catalog-grid-card has-drilldown" data-open-favorite-category="${escapeHtml(category.id)}" role="button" tabindex="0">
       ${favoriteButton("categories", category.id)}
-      <div class="product-image">${customerHomeTileVisual(category, "Item")}</div>
+      ${customerCategoryCatalogVisualHtml(category, "Item")}
       <div>
-        <h3>${escapeHtml(category.name)}</h3>
         <p>${escapeHtml(service?.name || "Service")}</p>
         <b>${categoryPrice(category) > 0 ? money(categoryPrice(category)) : "Price required"}</b>
         <small>${categoryStores(category.id, serviceId).filter((store) => isFavorite("stores", store.id)).length} fav stores/items</small>
@@ -7355,6 +7507,19 @@ function customerCatalogContent() {
   return customerServiceCatalogList(serviceId);
 }
 
+function customerReviewBookingCardTimingLabel(mode = "", fallback = "") {
+  if (mode !== "schedule") return fallback;
+  const scheduledAt = customerScheduleDateTime(state.selectedScheduleDate, state.selectedScheduleTime);
+  if (!scheduledAt || !Number.isFinite(scheduledAt.getTime())) return fallback;
+  const label = new Intl.DateTimeFormat("en-IN", {
+    weekday: "long",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  }).format(scheduledAt).replace(/,/g, "");
+  return label.replace(/\b(am|pm)\b/gi, (part) => part.toUpperCase());
+}
+
 function cartRows() {
   if (!state.cart.length) {
     return `<div class="customer-empty-cart">
@@ -7367,6 +7532,7 @@ function cartRows() {
   const bookingTypeMode = bookingType.mode || state.bookingType || "instant";
   const bookingTypeLabel = customerBookingTypeLabel(bookingTypeMode);
   const bookingTypeIcon = bookingTypeMode === "schedule" ? "calendar" : "spark";
+  const bookingCardTimingLabel = customerReviewBookingCardTimingLabel(bookingTypeMode, bookingTypeLabel);
   const rows = state.cart.map((item) => {
     const selling = numberValue(item.price ?? item.sellingPrice, 0);
     const base = Math.max(numberValue(item.basePrice, 0), selling + numberValue(item.saveAmount, 0), selling);
@@ -7375,8 +7541,8 @@ function cartRows() {
       <div class="cart-thumb">${item.imageUrl || item.categoryImageUrl ? `<img src="${escapeHtml(assetUrl(item.imageUrl || item.categoryImageUrl))}" alt="">` : escapeHtml(customerChipLabel(item.name || "", ""))}</div>
       <div>
         <b>${escapeHtml(item.name)}</b>
-        <p class="cart-booking-type-line">${customerIcon(bookingTypeIcon)}<span>${escapeHtml(bookingTypeLabel)}</span></p>
-        <span>${escapeHtml(customerDurationText(item.cartDurationMinutes ?? item.durationMinutes))}</span>
+        <span class="cart-duration-line">${escapeHtml(customerDurationText(item.cartDurationMinutes ?? item.durationMinutes))}</span>
+        <p class="cart-booking-type-line">${customerIcon(bookingTypeIcon)}<span>${escapeHtml(bookingCardTimingLabel)}</span></p>
       </div>
       <div class="cart-price-stack">
         <strong>${money(selling)}</strong>
@@ -7521,17 +7687,21 @@ function customerCartDeleteModalHtml() {
 
 function cartUploadPreviewHtml() {
   const files = Array.isArray(state.cartUploads) ? state.cartUploads : [];
-  if (!files.length) return `<p class="muted upload-hint">No uploads attached.</p>`;
+  if (!files.length) return "";
   return `<div class="cart-upload-preview">
     ${files.map((file, index) => {
       const type = String(file.type || file.file?.type || "");
       const isImage = type.startsWith("image/");
       const isVideo = type.startsWith("video/");
       const url = String(file.previewUrl || "");
+      const fileType = String(file.name || "").split(".").pop()?.trim().toUpperCase() || type.split("/").pop()?.toUpperCase() || "FILE";
+      const displayFileName = String(file.name || `Upload ${index + 1}`).includes(".")
+        ? String(file.name || `Upload ${index + 1}`)
+        : `${String(file.name || `Upload ${index + 1}`)}.${fileType.toLowerCase()}`;
       return `<div class="cart-upload-chip" data-cart-upload-item="${escapeHtml(index)}">
         <button class="cart-upload-chip-main" type="button" data-open-cart-upload-preview="${escapeHtml(index)}">
           ${isImage ? `<img src="${escapeHtml(assetUrl(url))}" alt="${escapeHtml(file.name || `Upload ${index + 1}`)}">` : isVideo ? `<video src="${escapeHtml(assetUrl(url))}" muted playsinline></video>` : `<span>${escapeHtml(String(file.name || "FILE").split(".").pop()?.slice(0, 4).toUpperCase() || "FILE")}</span>`}
-          <b>${escapeHtml(file.name || `Upload ${index + 1}`)}</b>
+          <b>${escapeHtml(displayFileName)}</b>
         </button>
         <button class="cart-upload-chip-delete" type="button" aria-label="Delete upload" data-delete-cart-upload="${escapeHtml(index)}">${customerIcon("trash")}</button>
       </div>`;
@@ -7649,9 +7819,14 @@ function customerCartNoticeHtml() {
   return `<div class="customer-cart-notice ${state.customerView === "home" ? "with-bottom-nav" : ""} ${escapeHtml(notice.tone || "info")}" role="status">${escapeHtml(notice.message)}</div>`;
 }
 
+function isCustomerReviewRouteNotice(message = "") {
+  return /\b(?:added to|updated in|removed from) route\.?$/i.test(String(message).trim());
+}
+
 function customerReviewBookingNoticeHtml() {
   const notice = state.customerCartNotice;
   if (!notice?.message || state.customerView !== "cart") return "";
+  if (isCustomerReviewRouteNotice(notice.message)) return "";
   const tone = String(notice.tone || "info").trim().toLowerCase();
   if (["error", "danger", "warning"].includes(tone)) return "";
   return `<div class="customer-review-booking-notice-slot" data-customer-review-notice>
@@ -7665,6 +7840,7 @@ function customerReviewBookingNoticeHtml() {
 function showCustomerCartNotice(message, tone = "info") {
   if (customerCartNoticeTimer) clearTimeout(customerCartNoticeTimer);
   state.customerCartNotice = message ? { message, tone } : null;
+  if (state.customerView === "cart" && isCustomerReviewRouteNotice(message)) refreshCustomerCartNoticeOnly();
   customerCartNoticeTimer = setTimeout(() => {
     state.customerCartNotice = null;
     refreshCustomerCartNoticeOnly();
@@ -8928,16 +9104,175 @@ function renderCustomerSearch() {
 }
 
 function customerCategoryImageUrls(item = {}) {
+  const settings = item.config?.categorySettings || {};
+  const mediaValue = (value) => value && typeof value === "object"
+    ? value.url || value.src || value.path || value.imageUrl || value.videoUrl || ""
+    : value;
   return [...new Set([
     item.imageUrl,
     item.categoryImageUrl,
     item.category_image_url,
     item.primaryImageUrl,
-    ...(normalizeArray(item.imageUrls || item.image_urls || item.categoryImageUrls || item.category_image_urls || item.config?.categorySettings?.imageUrls))
-  ].map((url) => String(url || "").trim()).filter(Boolean))];
+    ...(normalizeArray(item.imageUrls || item.image_urls || item.categoryImageUrls || item.category_image_urls || settings.imageUrls || settings.mediaUrls || settings.media_urls))
+  ].map(mediaValue).map((url) => String(url || "").trim()).filter(Boolean))];
+}
+
+function customerCategoryMediaIsVideo(url = "") {
+  return /\.(?:mp4|webm|mov|m4v|ogv)(?:[?#].*)?$/i.test(String(url || ""));
+}
+
+function customerCategoryTabImageUrl(item = {}) {
+  const configured = item.config?.categorySettings || {};
+  const mediaUrls = customerCategoryImageUrls(item);
+  const firstVideoIndex = mediaUrls.findIndex(customerCategoryMediaIsVideo);
+  const imageAfterVideo = firstVideoIndex >= 0
+    ? mediaUrls.slice(firstVideoIndex + 1).find((url) => !customerCategoryMediaIsVideo(url))
+    : "";
+  if (imageAfterVideo) return imageAfterVideo;
+  const firstImage = mediaUrls.find((url) => !customerCategoryMediaIsVideo(url));
+  if (firstImage) return firstImage;
+  return String(item.categoryMediaThumbnailUrl || item.category_media_thumbnail_url || configured.categoryMediaThumbnailUrl || configured.category_media_thumbnail_url || "").trim();
+}
+
+function customerCategoryMediaSettings(item = {}) {
+  const configured = item.config?.categorySettings || {};
+  const setting = (camelCase, snakeCase = "") => item[camelCase] ?? item[snakeCase] ?? configured[camelCase] ?? configured[snakeCase];
+  const fits = ["cover", "contain", "fill", "none", "scale-down"];
+  const transitions = ["none", "fade", "slide", "zoom"];
+  const positionValue = String(setting("categoryNamePosition", "category_name_position") || "").trim().toLowerCase();
+  const position = ["inside", "outside"].includes(positionValue)
+    ? positionValue
+    : "inside";
+  const transitionValue = String(setting("categoryMediaTransition", "category_media_transition") || "").trim().toLowerCase();
+  const transition = transitions.includes(transitionValue)
+    ? transitionValue
+    : "fade";
+  const sliderModeValue = String(setting("categoryMediaSliderMode", "category_media_slider_mode") || "queue").trim().toLowerCase();
+  const sliderMode = sliderModeValue === "standalone" ? "standalone" : "queue";
+  const repeatValue = String(setting("categoryMediaRepeat", "category_media_repeat") || "auto").trim().toLowerCase();
+  const repeat = ["auto", "2", "3", "4"].includes(repeatValue) ? repeatValue : "auto";
+  const percent = (value, fallback) => {
+    const raw = Number(value);
+    if (!Number.isFinite(raw)) return fallback;
+    return Math.max(0, Math.min(1, raw > 1 ? raw / 100 : raw));
+  };
+  const overlayFit = String(setting("categoryOverlayFit", "category_overlay_fit") || "50").trim().toLowerCase();
+  const overlayHeight = overlayFit === "category" ? 1 : percent(overlayFit, 0.5);
+  const mediaFit = String(setting("categoryMediaFit", "category_media_fit") || "cover").trim().toLowerCase();
+  const nameFontFamily = String(setting("categoryNameFontFamily", "category_name_font_family") || "Inter");
+  const nameColor = String(setting("categoryNameColor", "category_name_color") || "#ffffff").trim() || "#ffffff";
+  return {
+    fit: fits.includes(mediaFit) ? mediaFit : "cover",
+    transition,
+    sliderMode,
+    repeat,
+    transitionDuration: Math.max(0, Math.min(3000, Math.round(numberValue(setting("categoryMediaTransitionDuration", "category_media_transition_duration"), 500)))),
+    displayDuration: Math.max(500, Math.min(60000, Math.round(numberValue(setting("categoryMediaDisplayDuration", "category_media_display_duration"), 3000)))),
+    namePosition: position,
+    nameColor,
+    nameFontSize: Math.max(8, Math.min(80, Math.round(numberValue(setting("categoryNameFontSize", "category_name_font_size"), 20)))),
+    nameFontWeight: Math.max(100, Math.min(900, Math.round(numberValue(setting("categoryNameFontWeight", "category_name_font_weight"), 700)))),
+    nameFontFamily: ["Inter", "Arial", "Roboto", "Poppins", "Georgia", "Verdana", "system-ui"].includes(nameFontFamily) ? nameFontFamily : "Inter",
+    nameAlign: ["left", "center", "right"].includes(String(setting("categoryNameAlign", "category_name_align") || "")) ? String(setting("categoryNameAlign", "category_name_align")) : "left",
+    nameVerticalAlign: ["top", "center", "bottom"].includes(String(setting("categoryNameVerticalAlign", "category_name_vertical_align") || "")) ? String(setting("categoryNameVerticalAlign", "category_name_vertical_align")) : "bottom",
+    overlayEnabled: setting("categoryOverlayEnabled", "category_overlay_enabled") !== false,
+    overlayOpacity: percent(setting("categoryOverlayOpacity", "category_overlay_opacity"), 0.45),
+    overlayGradientEnabled: setting("categoryOverlayGradientEnabled", "category_overlay_gradient_enabled") !== false,
+    overlayGradientOpacity: percent(setting("categoryOverlayGradientOpacity", "category_overlay_gradient_opacity"), 0.35),
+    overlayColor: String(setting("categoryOverlayColor", "category_overlay_color") || "#111936").trim() || "#111936",
+    overlayHeight,
+    overlayWidth: Math.max(10, Math.min(100, numberValue(setting("categoryOverlayWidth", "category_overlay_width"), 100))),
+    overlayPosition: ["left", "right", "auto"].includes(String(setting("categoryOverlayPosition", "category_overlay_position") || "")) ? String(setting("categoryOverlayPosition", "category_overlay_position")) : "auto"
+  };
+}
+
+function customerCategoryCardSize(item = {}) {
+  const configured = item.config?.categorySettings || {};
+  const value = (camelCase, snakeCase = "") => item[camelCase] ?? item[snakeCase] ?? configured[camelCase] ?? configured[snakeCase];
+  const height = Math.max(0, Math.min(600, Math.round(numberValue(value("categoryImageHeight", "category_image_height"), 0))));
+  const width = Math.max(0, Math.min(600, Math.round(numberValue(value("categoryImageWidth", "category_image_width"), 0))));
+  return Math.max(height, width);
+}
+
+function customerCategoryCardSpan(item = {}, gridColumns = 1) {
+  const configured = item.config?.categorySettings || {};
+  const rawWidth = item.categoryCardGridWidth
+    ?? item.category_card_grid_width
+    ?? configured.categoryCardGridWidth
+    ?? configured.category_card_grid_width
+    ?? item.categoryCardSpaceUtilize
+    ?? item.category_card_space_utilize
+    ?? configured.categoryCardSpaceUtilize
+    ?? configured.category_card_space_utilize;
+  const columns = Math.max(1, Math.min(5, Math.round(numberValue(gridColumns, 1))));
+  const width = Math.max(1, Math.min(columns, Math.round(numberValue(rawWidth, 1))));
+  const height = Math.max(1, Math.min(5, Math.round(numberValue(
+    item.categoryCardGridHeight
+      ?? item.category_card_grid_height
+      ?? configured.categoryCardGridHeight
+      ?? configured.category_card_grid_height,
+    1
+  ))));
+  return { width, height };
+}
+
+function customerCategoryColorRgba(color = "#111936", alpha = 1) {
+  const raw = String(color || "").trim().replace(/^#/, "");
+  const hex = raw.length === 3 ? raw.split("").map((value) => `${value}${value}`).join("") : raw;
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return `rgba(17, 25, 54, ${alpha})`;
+  const red = parseInt(hex.slice(0, 2), 16);
+  const green = parseInt(hex.slice(2, 4), 16);
+  const blue = parseInt(hex.slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${Math.max(0, Math.min(1, alpha))})`;
+}
+
+function customerCategoryMediaStyle(settings = {}) {
+  return `--category-media-fit:${escapeHtml(settings.fit)};--category-media-transition-duration:${escapeHtml(settings.transitionDuration)}ms;--category-overlay-width:${escapeHtml(settings.overlayWidth)}%;--category-overlay-height:${escapeHtml(settings.overlayHeight * 100)}%;--category-name-color:${escapeHtml(settings.nameColor)};--category-name-font-size:${escapeHtml(settings.nameFontSize)}px;--category-name-font-weight:${escapeHtml(settings.nameFontWeight)};--category-name-font-family:${escapeHtml(settings.nameFontFamily)};--category-name-align:${escapeHtml(settings.nameAlign)};`;
+}
+
+function customerCategoryNameHtml(item = {}, settings = {}, position = settings.namePosition, showName = true) {
+  if (!showName || item.showSubCategoryName === false) return "";
+  const name = String(item.name || item.categoryName || "").trim();
+  if (!name) return "";
+  const style = `${customerCategoryMediaStyle(settings)}font-size:${escapeHtml(settings.nameFontSize)}px;font-family:${escapeHtml(settings.nameFontFamily)},ui-sans-serif,system-ui,sans-serif;font-weight:${escapeHtml(settings.nameFontWeight)};color:${escapeHtml(settings.nameColor)};text-align:${escapeHtml(settings.nameAlign)};`;
+  return `<b class="zigo-home-category-name is-${escapeHtml(position)} vertical-${escapeHtml(settings.nameVerticalAlign)}" style="${style}">${escapeHtml(name)}</b>`;
+}
+
+function customerCategoryOverlayHtml(settings = {}) {
+  if (!settings.overlayEnabled) return "";
+  const color = customerCategoryColorRgba(settings.overlayColor, settings.overlayOpacity);
+  const gradient = settings.overlayGradientEnabled
+    ? `linear-gradient(to top, ${color}, ${customerCategoryColorRgba(settings.overlayColor, settings.overlayGradientOpacity)}, ${customerCategoryColorRgba(settings.overlayColor, 0)})`
+    : color;
+  return `<span class="zigo-home-category-overlay position-${escapeHtml(settings.overlayPosition)}" style="width:${escapeHtml(settings.overlayWidth)}%;height:${escapeHtml(settings.overlayHeight * 100)}%;background:${gradient};"></span>`;
+}
+
+function customerCategoryMediaElementHtml(url = "", item = {}, index = 0, isActive = false, loop = false) {
+  const source = assetUrl(url);
+  const alt = escapeHtml(item.name || item.categoryName || "Category");
+  const className = `zigo-category-media${isActive ? " is-active" : ""}`;
+  if (/\.(?:mp4|webm|mov|m4v|ogv)(?:[?#].*)?$/i.test(String(url || ""))) {
+    return `<video class="${className}" data-media-index="${escapeHtml(index)}" muted playsinline autoplay preload="metadata"${loop ? " loop" : ""} aria-label="${alt}"><source src="${escapeHtml(source)}"></video>`;
+  }
+  return `<img class="${className}" data-media-index="${escapeHtml(index)}" src="${escapeHtml(source)}" alt="${alt}">`;
+}
+
+function customerCategoryStyledVisualHtml(item = {}, fallback = "Z", options = {}) {
+  const settings = customerCategoryMediaSettings(item);
+  const urls = customerCategoryImageUrls(item);
+  const useSlider = options.slider === true && urls.length > 1;
+  const mediaUrls = useSlider && settings.transition === "slide" ? [...urls, urls[0]] : urls;
+  const mediaHtml = mediaUrls.length
+    ? useSlider
+      ? `<div class="zigo-home-category-image-slider transition-${escapeHtml(settings.transition)}" data-category-image-count="${escapeHtml(urls.length)}" data-category-media-slider-mode="${escapeHtml(settings.sliderMode)}" data-category-media-repeat="${escapeHtml(settings.repeat)}" data-category-media-transition="${escapeHtml(settings.transition)}" data-category-media-display-duration="${escapeHtml(settings.displayDuration)}" data-category-media-transition-duration="${escapeHtml(settings.transitionDuration)}" style="${customerCategoryMediaStyle(settings)}">${mediaUrls.map((url, index) => customerCategoryMediaElementHtml(url, item, index, index === 0, mediaUrls.length === 1)).join("")}</div>`
+      : customerCategoryMediaElementHtml(mediaUrls[0], item, 0, true, true)
+    : `<span>${escapeHtml(customerChipLabel(item.icon || item.name || fallback, ""))}</span>`;
+  const insideName = settings.namePosition === "inside" ? customerCategoryNameHtml(item, settings, "inside", options.showName !== false) : "";
+  return `<div class="zigo-category-media-frame" style="${customerCategoryMediaStyle(settings)}">${mediaHtml}${customerCategoryOverlayHtml(settings)}${insideName}</div>`;
 }
 
 function customerHomeTileVisual(item = {}, fallback = "Z", options = {}) {
+  if (options.styleCategory === true) return customerCategoryStyledVisualHtml(item, fallback, options);
   const images = customerCategoryImageUrls(item);
   if (images.length > 1 && options.slider === true) {
     const sliderImages = [...images, images[0]];
@@ -8951,6 +9286,14 @@ function customerHomeTileVisual(item = {}, fallback = "Z", options = {}) {
 
 function resetCustomerHomeCategorySliderElement(slider) {
   if (!slider) return;
+  slider.querySelectorAll(".zigo-category-media").forEach((media, index) => {
+    media.classList.toggle("is-active", index === 0);
+    media.onended = null;
+    if (media.tagName === "VIDEO") {
+      media.pause();
+      try { media.currentTime = 0; } catch {}
+    }
+  });
   slider.classList.remove("is-active");
   slider.style.transition = "none";
   slider.style.transform = "translateX(0)";
@@ -8958,56 +9301,257 @@ function resetCustomerHomeCategorySliderElement(slider) {
   slider.style.transition = "";
 }
 
+function syncCustomerHomeCategoryCardHeights() {
+  if (actor !== "customer") return;
+  root.querySelectorAll?.(".zigo-home-category-grid").forEach((grid) => {
+    const wraps = [...grid.querySelectorAll(".zigo-home-category-card-wrap")];
+    const spanningWraps = wraps.filter((wrap) => wrap.classList.contains("has-card-span"));
+    if (!spanningWraps.length) return;
+
+    const gridStyle = window.getComputedStyle(grid);
+    const rowGap = Number.parseFloat(gridStyle.rowGap || gridStyle.gap || "0") || 0;
+    const standardCard = wraps
+      .filter((wrap) => !wrap.classList.contains("has-card-span"))
+      .map((wrap) => wrap.querySelector(".zigo-home-category-card"))
+      .find((card) => card && card.getBoundingClientRect().height > 0);
+    let standardHeight = standardCard?.getBoundingClientRect().height || 0;
+
+    if (!standardHeight) {
+      const columns = Math.max(1, Math.round(numberValue(grid.style.getPropertyValue("--service-category-grid-columns"), 1)));
+      const gridWidth = grid.getBoundingClientRect().width;
+      const columnGap = Number.parseFloat(gridStyle.columnGap || gridStyle.gap || "0") || 0;
+      standardHeight = Math.max(0, (gridWidth - (columnGap * Math.max(0, columns - 1))) / columns);
+    }
+    if (!standardHeight) return;
+
+    spanningWraps.forEach((wrap) => {
+      const card = wrap.querySelector(".zigo-home-category-card");
+      if (!card) return;
+      const spanHeight = Math.max(1, Math.round(numberValue(wrap.style.getPropertyValue("--category-card-span-height"), 1)));
+      const targetHeight = (standardHeight * spanHeight) + (rowGap * Math.max(0, spanHeight - 1));
+      card.style.setProperty("--category-render-height", `${Math.round(targetHeight * 100) / 100}px`);
+      card.classList.add("has-rendered-category-height");
+    });
+  });
+}
+
 function stopCustomerHomeCategoryImageSequence() {
+  customerHomeCategoryImageSliderRunId += 1;
   if (customerHomeCategoryImageSliderTimer) {
     clearTimeout(customerHomeCategoryImageSliderTimer);
     customerHomeCategoryImageSliderTimer = null;
   }
+  customerHomeCategoryImageSliderTimers.forEach((timer) => clearTimeout(timer));
+  customerHomeCategoryImageSliderTimers.clear();
   root.querySelectorAll?.(".zigo-home-category-image-slider").forEach(resetCustomerHomeCategorySliderElement);
 }
 
 function startCustomerHomeCategoryImageSequence() {
   stopCustomerHomeCategoryImageSequence();
+  const runId = customerHomeCategoryImageSliderRunId;
   requestAnimationFrame(() => {
-    if (state.customerView && state.customerView !== "home") return;
-    const sliders = [...root.querySelectorAll(".zigo-home-category-image-slider")]
+    if (runId !== customerHomeCategoryImageSliderRunId) return;
+    syncCustomerHomeCategoryCardHeights();
+    const allSliders = [...root.querySelectorAll(".zigo-home-category-image-slider")]
       .filter((slider) => Number(slider.dataset.categoryImageCount || 0) > 1);
-    if (!sliders.length) return;
+    if (!allSliders.length) return;
+    const sliders = allSliders.filter((slider) => String(slider.dataset.categoryMediaSliderMode || "queue") !== "standalone");
+    const standaloneSliders = allSliders.filter((slider) => String(slider.dataset.categoryMediaSliderMode || "queue") === "standalone");
     let sliderIndex = 0;
-    let imageIndex = 0;
-    const stepDelay = 1500;
-    const nextCategoryDelay = 450;
-    const step = () => {
-      if (state.customerView && state.customerView !== "home") {
-        stopCustomerHomeCategoryImageSequence();
+    const sliderStates = sliders.map(() => ({ imageIndex: 0 }));
+    const nextCategoryDelay = 120;
+    const scheduleIndependentTimer = (callback, delay) => {
+      let timer = null;
+      timer = setTimeout(() => {
+        customerHomeCategoryImageSliderTimers.delete(timer);
+        callback();
+      }, Math.max(0, Number(delay) || 0));
+      customerHomeCategoryImageSliderTimers.add(timer);
+      return timer;
+    };
+    const pauseSliderVideos = (slider) => {
+      slider?.querySelectorAll("video").forEach((video) => {
+        video.onended = null;
+        video.pause();
+      });
+    };
+    const showMedia = (slider, imageIndex, immediate = false) => {
+      const media = [...slider.querySelectorAll(".zigo-category-media")];
+      const transition = String(slider.dataset.categoryMediaTransition || "fade");
+      const duration = Math.max(0, Number(slider.dataset.categoryMediaTransitionDuration || 500));
+      slider.classList.add("is-active");
+      slider.style.transition = immediate ? "none" : `transform ${duration}ms ease-in-out`;
+      if (transition === "slide") slider.style.transform = `translateX(${-100 * imageIndex}%)`;
+      else slider.style.transform = "translateX(0)";
+      media.forEach((node, index) => {
+        node.classList.toggle("is-active", index === imageIndex);
+        node.onended = null;
+        if (node.tagName === "VIDEO" && node !== media[imageIndex]) {
+          node.pause();
+        }
+      });
+      return media[imageIndex] || null;
+    };
+    const runStandaloneSlider = (slider) => {
+      const count = Number(slider.dataset.categoryImageCount || 0);
+      if (!slider?.isConnected || count < 2) return;
+      const transition = String(slider.dataset.categoryMediaTransition || "fade");
+      const duration = Math.max(0, Number(slider.dataset.categoryMediaTransitionDuration || 500));
+      const displayDuration = Math.max(500, Number(slider.dataset.categoryMediaDisplayDuration || 3000));
+      const repeatValue = String(slider.dataset.categoryMediaRepeat || "auto");
+      const repeatLimit = repeatValue === "auto" ? Infinity : Math.max(0, Number(repeatValue) || 0);
+      const state = { imageIndex: 0, completedRepeats: 0 };
+      const finish = () => {
+        pauseSliderVideos(slider);
+        slider.querySelectorAll(".zigo-category-media").forEach((media, index) => {
+          media.classList.toggle("is-active", index === state.imageIndex);
+        });
+      };
+      const resetToFirst = (onFirst) => {
+        if (transition === "slide" && slider.children.length > count) {
+          showMedia(slider, count, false);
+          scheduleIndependentTimer(() => {
+            if (runId !== customerHomeCategoryImageSliderRunId || !slider.isConnected) return;
+            slider.style.transition = "none";
+            slider.style.transform = "translateX(0)";
+            slider.querySelectorAll(".zigo-category-media").forEach((media, index) => {
+              media.classList.toggle("is-active", index === 0);
+              media.onended = null;
+              if (media.tagName === "VIDEO" && index !== 0) {
+                media.pause();
+                try { media.currentTime = 0; } catch {}
+              }
+            });
+            void slider.offsetHeight;
+            slider.style.transition = "";
+            state.imageIndex = 0;
+            onFirst();
+          }, duration);
+          return;
+        }
+        state.imageIndex = 0;
+        onFirst();
+      };
+      const step = () => {
+        if (runId !== customerHomeCategoryImageSliderRunId || !slider.isConnected) return;
+        const active = showMedia(slider, state.imageIndex);
+        let advanced = false;
+        const advance = () => {
+          if (runId !== customerHomeCategoryImageSliderRunId || !slider.isConnected || advanced) return;
+          advanced = true;
+          if (state.imageIndex < count - 1) {
+            state.imageIndex += 1;
+            step();
+            return;
+          }
+          if (state.completedRepeats >= repeatLimit) {
+            finish();
+            return;
+          }
+          state.completedRepeats += 1;
+          resetToFirst(step);
+        };
+        if (active?.tagName === "VIDEO") {
+          active.onended = advance;
+          active.play().catch(() => scheduleIndependentTimer(advance, displayDuration));
+        } else {
+          scheduleIndependentTimer(advance, displayDuration);
+        }
+      };
+      step();
+    };
+    standaloneSliders.forEach(runStandaloneSlider);
+    if (!sliders.length) return;
+    const scheduleMedia = (slider, active, advance, displayDuration, skipImageDisplayDuration = false) => {
+      if (runId !== customerHomeCategoryImageSliderRunId || !slider?.isConnected) return;
+      if (active?.tagName === "VIDEO") {
+        active.onended = advance;
+        active.play().catch(() => {
+          if (runId !== customerHomeCategoryImageSliderRunId) return;
+          customerHomeCategoryImageSliderTimer = setTimeout(advance, displayDuration);
+        });
         return;
       }
+      if (skipImageDisplayDuration) {
+        advance();
+        return;
+      }
+      customerHomeCategoryImageSliderTimer = setTimeout(advance, displayDuration);
+    };
+    let step;
+    const moveToNextCategory = (slider) => {
+      if (runId !== customerHomeCategoryImageSliderRunId || !slider?.isConnected) return;
+      pauseSliderVideos(slider);
+      customerHomeCategoryImageSliderTimer = setTimeout(() => {
+        if (runId !== customerHomeCategoryImageSliderRunId) return;
+        sliderIndex = (sliderIndex + 1) % sliders.length;
+        customerHomeCategoryImageSliderTimer = setTimeout(step, nextCategoryDelay);
+      }, 0);
+    };
+    step = () => {
+      if (runId !== customerHomeCategoryImageSliderRunId) return;
       const slider = sliders[sliderIndex];
       if (!slider?.isConnected) {
-        startCustomerHomeCategoryImageSequence();
         return;
       }
-      sliders.forEach((item, index) => {
-        if (index !== sliderIndex) resetCustomerHomeCategorySliderElement(item);
-      });
-      slider.classList.add("is-active");
-      slider.style.transform = `translateX(${-100 * imageIndex}%)`;
+      const stateForSlider = sliderStates[sliderIndex];
       const count = Number(slider.dataset.categoryImageCount || 0);
-      if (imageIndex < count) {
-        imageIndex += 1;
-        customerHomeCategoryImageSliderTimer = setTimeout(step, stepDelay);
-        return;
-      }
-      customerHomeCategoryImageSliderTimer = setTimeout(() => {
-        resetCustomerHomeCategorySliderElement(slider);
-        sliderIndex = (sliderIndex + 1) % sliders.length;
-        imageIndex = 0;
-        customerHomeCategoryImageSliderTimer = setTimeout(step, nextCategoryDelay);
-      }, stepDelay);
+      const transition = String(slider.dataset.categoryMediaTransition || "fade");
+      const duration = Math.max(0, Number(slider.dataset.categoryMediaTransitionDuration || 500));
+      const displayDuration = Math.max(500, Number(slider.dataset.categoryMediaDisplayDuration || 3000));
+      const activeIndex = stateForSlider.imageIndex;
+      const active = showMedia(slider, activeIndex);
+      let advanced = false;
+      const advance = () => {
+        if (runId !== customerHomeCategoryImageSliderRunId || !slider.isConnected) return;
+        if (advanced) return;
+        advanced = true;
+        if (stateForSlider.imageIndex < count - 1) {
+          stateForSlider.imageIndex += 1;
+          step();
+          return;
+        }
+        if (transition === "slide" && slider.children.length > count) {
+          showMedia(slider, count, false);
+          customerHomeCategoryImageSliderTimer = setTimeout(() => {
+            if (runId !== customerHomeCategoryImageSliderRunId || !slider.isConnected) return;
+            slider.style.transition = "none";
+            slider.style.transform = "translateX(0)";
+            const media = [...slider.querySelectorAll(".zigo-category-media")];
+            media.forEach((node, index) => {
+              node.classList.toggle("is-active", index === 0);
+              node.onended = null;
+              if (node.tagName === "VIDEO" && index !== 0) {
+                node.pause();
+                try { node.currentTime = 0; } catch {}
+              }
+            });
+            void slider.offsetHeight;
+            slider.style.transition = "";
+            stateForSlider.imageIndex = 0;
+            const first = showMedia(slider, 0);
+            scheduleMedia(slider, first, () => moveToNextCategory(slider), displayDuration, true);
+          }, duration);
+          return;
+        }
+        stateForSlider.imageIndex = 0;
+        const first = showMedia(slider, 0);
+        scheduleMedia(slider, first, () => moveToNextCategory(slider), displayDuration, true);
+      };
+      scheduleMedia(slider, active, advance, displayDuration);
     };
     step();
   });
 }
+
+window.addEventListener("resize", () => {
+  if (actor !== "customer") return;
+  if (customerHomeCategoryCardHeightResizeFrame) cancelAnimationFrame(customerHomeCategoryCardHeightResizeFrame);
+  customerHomeCategoryCardHeightResizeFrame = requestAnimationFrame(() => {
+    customerHomeCategoryCardHeightResizeFrame = null;
+    syncCustomerHomeCategoryCardHeights();
+  });
+});
 
 function customerCategoryRatingBadgeHtml(category = {}) {
   const count = Number(category.ratingCount ?? category.serviceRatingCount ?? 0);
@@ -9163,6 +9707,7 @@ function customerHomeServiceMasterLineHtml(service = {}, target = "serviceTitle"
 }
 
 function customerHomeServiceSubtitleText(service = {}) {
+  if (service.showCategoryDescription === false) return "";
   return String(service.serviceSubtitle || "").trim();
 }
 
@@ -9198,7 +9743,7 @@ function customerHomeServiceSubtitleHtml(service = {}) {
 }
 
 function customerHomeServiceMasterCopyHtml(service = {}, fallbackTitle = "") {
-  const title = String(service.serviceTitle || fallbackTitle || "").trim();
+  const title = service.showCategoryName === false ? "" : String(service.serviceTitle || fallbackTitle || "").trim();
   const subtitleHtml = customerHomeServiceSubtitleHtml(service);
   if (!title && !subtitleHtml) return "";
   return `<div class="zigo-home-service-master-copy">
@@ -9213,27 +9758,27 @@ function customerHomeServiceMasterSection(service = {}, categories = [], indexOf
   const copyHtml = customerHomeServiceMasterCopyHtml(service);
   return `<section class="zigo-category-section zigo-home-categories-section zigo-home-service-master-section">
     ${copyHtml ? `<div class="zigo-section-head zigo-home-section-title zigo-home-service-master-head" style="--service-title-left-offset:${escapeHtml(titleLeftOffset)}px;">${copyHtml}</div>` : ""}
-    <div class="zigo-home-category-grid" style="--service-category-grid-columns:${escapeHtml(gridColumns)};">${categories.map((category, index) => customerHomeCategoryTile(category, customerServiceById(categoryServiceId(category)) || {}, index + indexOffset)).join("")}</div>
+    <div class="zigo-home-category-grid" style="--service-category-grid-columns:${escapeHtml(gridColumns)};">${categories.map((category, index) => customerHomeCategoryTile(category, customerServiceById(categoryServiceId(category)) || {}, index + indexOffset, gridColumns)).join("")}</div>
   </section>`;
 }
 
-function customerHomeCategoryTile(category = {}, service = {}, index = 0) {
+function customerHomeCategoryTile(category = {}, service = {}, index = 0, gridColumns = null) {
   const serviceId = service?.id || categoryServiceId(category);
   const resolvedService = service?.id ? service : customerServiceById(serviceId) || {};
-  const categoryName = String(category.name || "").trim();
-  const imageHeight = Math.max(0, Math.min(600, Math.round(numberValue(category.categoryImageHeight, 0))));
-  const imageWidth = Math.max(0, Math.min(600, Math.round(numberValue(category.categoryImageWidth, 0))));
-  const hasCustomImageSize = Boolean(imageHeight || imageWidth);
-  const effectiveImageHeight = imageHeight || imageWidth;
-  const effectiveImageWidth = imageWidth || imageHeight;
-  const sizeStyle = imageHeight || imageWidth
-    ? ` style="--category-image-width:${escapeHtml(effectiveImageWidth)}px;--category-image-height:${escapeHtml(effectiveImageHeight)}px;"`
+  const categoryName = customerCategoryDisplayName(category, "");
+  const settings = customerCategoryMediaSettings(category);
+  const cardSize = customerCategoryCardSize(category);
+  const cardSpan = customerCategoryCardSpan(category, gridColumns || serviceCategoryGridColumns(resolvedService));
+  const hasCustomImageSize = Boolean(cardSize);
+  const sizeStyle = cardSize
+    ? ` style="--category-card-size:${escapeHtml(cardSize)}px;--category-render-height:${escapeHtml(cardSize * cardSpan.height)}px;--category-image-width:${escapeHtml(cardSize)}px;--category-image-height:${escapeHtml(cardSize)}px;"`
     : "";
-  return `<article class="zigo-home-category-card-wrap" data-customer-home-category-card="${escapeHtml(category.id || "")}" data-home-category-index="${index}">
-    <button class="zigo-home-category-card zigo-category-tone-${index % 6}${hasCustomImageSize ? " has-custom-category-image-size" : ""}" data-open-home-category-detail="${escapeHtml(category.id || "")}" data-home-category-service-id="${escapeHtml(category.serviceMasterId || category.service_master_id || categoryServiceId(category) || "")}" type="button" aria-label="${escapeHtml(category.name || "Category")}"${sizeStyle}>
-      <div class="zigo-home-category-image">${customerHomeTileVisual(category, resolvedService.icon || resolvedService.name || "Category", { slider: true })}${customerCategoryRatingBadgeHtml(category)}</div>
+  const hasCustomGridSpan = cardSpan.width > 1 || cardSpan.height > 1;
+  return `<article class="zigo-home-category-card-wrap${hasCustomGridSpan ? " has-card-span" : ""}" style="--category-card-span-width:${escapeHtml(cardSpan.width)};--category-card-span-height:${escapeHtml(cardSpan.height)};" data-customer-home-category-card="${escapeHtml(category.id || "")}" data-home-category-index="${index}">
+    <button class="zigo-home-category-card zigo-category-tone-${index % 6}${hasCustomImageSize ? " has-custom-category-image-size" : ""}" data-open-home-category-detail="${escapeHtml(category.id || "")}" data-home-category-service-id="${escapeHtml(category.serviceMasterId || category.service_master_id || categoryServiceId(category) || "")}" type="button" aria-label="${escapeHtml(categoryName || "Category")}"${sizeStyle}>
+      <div class="zigo-home-category-image" style="${customerCategoryMediaStyle(settings)}">${customerHomeTileVisual(category, resolvedService.icon || resolvedService.name || "Category", { slider: true, styleCategory: true })}${customerCategoryRatingBadgeHtml(category)}</div>
     </button>
-    ${categoryName ? `<b class="zigo-home-category-name">${escapeHtml(categoryName)}</b>` : ""}
+    ${settings.namePosition === "outside" ? customerCategoryNameHtml(category, settings, "outside") : ""}
   </article>`;
 }
 
@@ -9243,29 +9788,87 @@ function customerHomeCategoryById(categoryId = "") {
   return customerHomeDurationCategories().find((category) => String(category.id || "") === id) || null;
 }
 
-function customerHomeGuidanceList(items = [], icon = "&#9733;", tone = "do") {
-  const rows = normalizeArray(items).map((item) => String(item || "").trim()).filter(Boolean);
+function customerGuidanceIconIsImage(value = "") {
+  return /^(?:https?:\/\/|\/?uploads\/|\/|data:image\/)/i.test(String(value || "").trim());
+}
+
+function customerGuidanceIconHtml(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^&#(?:x[0-9a-f]+|\d+);$/i.test(raw)) return raw;
+  if (customerGuidanceIconIsImage(raw)) {
+    const normalized = /^uploads\//i.test(raw) ? `/${raw}` : raw;
+    const source = raw.startsWith("data:") ? raw : assetUrl(normalized);
+    return `<img class="customer-home-category-guidance-icon-image" src="${escapeHtml(source)}" alt="">`;
+  }
+  return escapeHtml(raw);
+}
+
+function customerHomeCategoryGuidanceHeading(title = "", icon = "", tone = "task", settings = {}) {
+  const iconHtml = customerGuidanceIconHtml(icon);
+  const titleStyle = `--category-guidance-title-font-family:${escapeHtml(settings.titleFontFamily || "Inter")};--category-guidance-title-font-size:${escapeHtml(settings.titleFontSize || 12)}px;--category-guidance-title-font-weight:${escapeHtml(settings.titleFontWeight || 700)};--category-guidance-title-text-color:${escapeHtml(settings.titleTextColor || "#2b2f38")};--category-guidance-title-icon-size:${escapeHtml(settings.titleIconSize || 24)}px;`;
+  return `<h3 class="customer-home-category-guidance-title ${escapeHtml(tone)}" style="${titleStyle}">${iconHtml ? `<span class="customer-home-category-guidance-title-icon">${iconHtml}</span>` : ""}<span>${escapeHtml(title)}</span></h3>`;
+}
+
+function customerHomeGuidanceList(items = [], icon = "&#9733;", tone = "do", settings = {}, fallbackImage = "") {
+  const rows = normalizeArray(items).map((item) => {
+    if (item && typeof item === "object") {
+      return {
+        text: String(item.text || item.name || item.title || "").trim(),
+        imageUrl: String(item.imageUrl || item.image_url || item.image || "").trim(),
+        strikeThrough: Object.prototype.hasOwnProperty.call(item, "strikeThrough") || Object.prototype.hasOwnProperty.call(item, "strike_through")
+          ? booleanValue(item.strikeThrough ?? item.strike_through, false)
+          : null
+      };
+    }
+    return { text: String(item || "").trim(), imageUrl: "", strikeThrough: null };
+  }).filter((item) => item.text);
   if (!rows.length) return `<p class="customer-home-category-empty">No details added yet.</p>`;
-  return `<ul class="customer-home-category-guidance-list ${escapeHtml(tone)}">
-    ${rows.map((item) => `<li><span>${icon}</span><p>${escapeHtml(item)}</p></li>`).join("")}
+  const mode = settings.displayMode === "grid" ? "grid" : "list";
+  const iconHtml = customerGuidanceIconHtml(icon);
+  const rowTextStyle = ` style="text-align:${escapeHtml(settings.rowTextAlign || "left")};"`;
+  const listStyle = `--category-guidance-grid-columns:${escapeHtml(settings.gridColumns || 3)};--category-guidance-font-family:${escapeHtml(settings.fontFamily || "Inter")};--category-guidance-font-size:${escapeHtml(settings.fontSize || 10)}px;--category-guidance-text-color:${escapeHtml(settings.textColor || "#2b2f38")};--category-guidance-row-image-size:${escapeHtml(settings.rowImageSize || 44)}px;--category-guidance-row-radius:${escapeHtml(settings.rowRadius ?? 8)}px;--category-guidance-row-text-align:${escapeHtml(settings.rowTextAlign || "left")};--category-guidance-row-overlay-color:${escapeHtml(settings.rowOverlayColor || "#111936")};--category-guidance-row-overlay-height:${escapeHtml(settings.rowOverlayHeight ?? 100)}%;--category-guidance-row-overlay-opacity:${escapeHtml(settings.rowOverlayOpacity ?? 0.45)};--category-guidance-row-overlay-gradient-opacity:${escapeHtml(settings.rowOverlayGradientOpacity ?? 0.35)};`;
+  return `<ul class="customer-home-category-guidance-list ${escapeHtml(tone)} mode-${mode}${settings.showImage ? " has-images" : ""}" style="${listStyle}">
+    ${rows.map((row) => {
+      const imageUrl = row.imageUrl || fallbackImage;
+      const hasImage = Boolean(settings.showImage && imageUrl);
+      const strikeThrough = row.strikeThrough == null ? tone === "dont" : row.strikeThrough === true;
+      const textInsideImage = hasImage && settings.rowTextPosition === "inside";
+      const overlayClass = settings.rowOverlayEnabled ? " has-overlay" : " overlay-disabled";
+      const gradientClass = settings.rowOverlayEnabled && settings.rowOverlayGradientEnabled ? " has-gradient-overlay" : "";
+      const visual = hasImage
+        ? `<div class="customer-home-category-guidance-visual${overlayClass}${gradientClass}"><img class="customer-home-category-guidance-image" src="${escapeHtml(assetUrl(imageUrl))}" alt="">${textInsideImage ? `<p class="customer-home-category-guidance-overlay-text${strikeThrough ? " strike-through" : ""}"${rowTextStyle}>${escapeHtml(row.text)}</p>` : ""}</div>`
+        : (iconHtml ? `<span>${iconHtml}</span>` : "");
+      const rowClasses = [hasImage ? "has-row-image" : visual ? "" : "no-icon", textInsideImage ? "text-inside-image" : "text-outside-image"].filter(Boolean).join(" ");
+      return `<li class="${rowClasses}">${visual}${textInsideImage ? "" : `<p class="${strikeThrough ? "strike-through" : ""}"${rowTextStyle}>${escapeHtml(row.text)}</p>`}</li>`;
+    }).join("")}
   </ul>`;
 }
 
 function customerHomeCategorySheetBodyHtml(selected = {}) {
-  const note = String(selected.note || selected.description || "").trim();
-  return `<section>
-    <h3>${escapeHtml(selected.taskListTitle || "Tasks related to category")}</h3>
-    ${customerHomeGuidanceList(selected.taskList, "&#9733;", "task")}
-  </section>
-  <section>
-    <h3>${escapeHtml(selected.canDoTitle || "What Assistant can do")}</h3>
-    ${customerHomeGuidanceList(selected.canDoList, "&#10003;", "do")}
-  </section>
-  <section>
-    <h3>${escapeHtml(selected.cantDoTitle || "What Assistant can't do")}</h3>
-    ${customerHomeGuidanceList(selected.cantDoList, "&#10005;", "dont")}
-  </section>
-  ${note ? `<div class="customer-home-category-note"><span>${customerIcon("info")}</span><p>${escapeHtml(note)}</p></div>` : ""}`;
+  const note = String(selected.note || (customerCategoryDescriptionVisible(selected) ? selected.description : "") || "").trim();
+  const settings = customerCategoryGuidanceSettings(selected);
+  const categoryImage = customerCategoryImageUrls(selected).find((url) => !/\.(?:mp4|webm|mov|m4v|ogv)(?:[?#].*)?$/i.test(String(url || ""))) || "";
+  const sections = [];
+  if (settings.showTaskList) {
+    sections.push(`<section class="customer-home-category-guidance-section">
+      ${customerHomeCategoryGuidanceHeading(selected.taskListTitle || "Tasks related to category", settings.icons.task, "task", settings)}
+      ${customerHomeGuidanceList(selected.taskList, customerGuidanceIconIsImage(settings.icons.task) ? "" : settings.icons.task, "task", settings, categoryImage)}
+    </section>`);
+  }
+  if (settings.showCanDoList) {
+    sections.push(`<section class="customer-home-category-guidance-section">
+      ${customerHomeCategoryGuidanceHeading(selected.canDoTitle || "What Assistant can do", settings.icons.canDo, "do", settings)}
+      ${customerHomeGuidanceList(selected.canDoList, customerGuidanceIconIsImage(settings.icons.canDo) ? "" : settings.icons.canDo, "do", settings, categoryImage)}
+    </section>`);
+  }
+  if (settings.showCantDoList) {
+    sections.push(`<section class="customer-home-category-guidance-section">
+      ${customerHomeCategoryGuidanceHeading(selected.cantDoTitle || "What Assistant can't do", settings.icons.cantDo, "dont", settings)}
+      ${customerHomeGuidanceList(selected.cantDoList, customerGuidanceIconIsImage(settings.icons.cantDo) ? "" : settings.icons.cantDo, "dont", settings, categoryImage)}
+    </section>`);
+  }
+  return `${sections.join("")}${note ? `<div class="customer-home-category-note"><span>${customerIcon("info")}</span><p>${escapeHtml(note)}</p></div>` : ""}`;
 }
 
 function customerHomeCategorySheetActionsHtml(selected = {}) {
@@ -9289,9 +9892,14 @@ function customerHomeCategorySheetValidatedContentHtml(selected = {}, categories
   return `<div class="customer-home-category-strip">
     ${categories.map((category) => {
       const active = String(category.id || "") === String(selected.id || "");
+      const categoryName = customerCategoryDisplayName(category, "");
+      const tabImage = customerCategoryTabImageUrl(category);
+      const tabVisual = tabImage
+        ? `<img src="${escapeHtml(assetUrl(tabImage))}" alt="${escapeHtml(categoryName || "Category")}">`
+        : customerHomeTileVisual(category, "Category");
       return `<button class="${active ? "active" : ""}" data-select-home-category-detail="${escapeHtml(category.id || "")}" type="button" aria-selected="${active ? "true" : "false"}">
-        <span>${customerHomeTileVisual(category, "Category")}</span>
-        <b>${escapeHtml(category.name || "Category")}</b>
+        <span>${tabVisual}</span>
+        ${categoryName ? `<b>${escapeHtml(categoryName)}</b>` : ""}
       </button>`;
     }).join("")}
   </div>
@@ -9592,6 +10200,8 @@ function customerHomeExpandedDurationOptions(categories = customerHomeCategories
           serviceMasterSubtitleFontSize: serviceMaster.serviceSubtitleFontSize,
           serviceMasterSubtitleFontWeight: serviceMaster.serviceSubtitleFontWeight,
           serviceMasterSubtitleColor: serviceMaster.serviceSubtitleColor,
+          serviceMasterShowCategoryName: serviceMaster.showCategoryName !== false,
+          serviceMasterShowCategoryDescription: serviceMaster.showCategoryDescription !== false,
           serviceMasterBookingType: normalizeServiceMasterBookingType(serviceMaster.bookingType),
           serviceMasterShowEta: Boolean(serviceMaster.showEta),
           serviceMasterInstantEtaMinutes: numberValue(serviceMaster.instantEtaMinutes ?? serviceMaster.instant_eta_minutes ?? serviceMaster.etaMinutes ?? serviceMaster.eta_minutes ?? serviceMaster.metadata?.instantEtaMinutes ?? serviceMaster.metadata?.etaMinutes, 0),
@@ -10046,6 +10656,8 @@ function customerHomeExpandedDurationGroups(categories = customerHomeDurationCat
           serviceSubtitleFontSize: row.serviceMasterSubtitleFontSize,
           serviceSubtitleFontWeight: row.serviceMasterSubtitleFontWeight,
           serviceSubtitleColor: row.serviceMasterSubtitleColor,
+          showCategoryName: row.serviceMasterShowCategoryName !== false,
+          showCategoryDescription: row.serviceMasterShowCategoryDescription !== false,
           bookingType: normalizeServiceMasterBookingType(row.serviceMasterBookingType),
           showEta: Boolean(row.serviceMasterShowEta),
           instantEtaMinutes: numberValue(row.serviceMasterInstantEtaMinutes, 0),
@@ -12668,6 +13280,7 @@ function renderServiceDetail() {
     ${bottomCartBar()}
     ${bottomNav("service")}
   </section>`;
+  startCustomerHomeCategoryImageSequence();
 }
 
 function customerReviewEmailReminderHtml() {
@@ -12680,11 +13293,9 @@ function customerReviewEmailReminderHtml() {
 
 function customerReviewNotificationsHtml() {
   const bookingNotice = customerReviewBookingNoticeHtml();
-  const emailNotice = customerReviewEmailReminderHtml();
-  if (!bookingNotice && !emailNotice) return "";
+  if (!bookingNotice) return "";
   return `<section class="customer-review-notification-stack" aria-label="Booking notifications">
     ${bookingNotice}
-    ${emailNotice}
   </section>`;
 }
 
@@ -12692,6 +13303,21 @@ function customerCartBillDetailsHtml(totals = cartTotals()) {
   const expanded = Boolean(state.customerCartBillExpanded);
   const taxRows = normalizeArray(totals.taxRows);
   const addOns = normalizeArray(totals.addOns);
+  const cartItems = normalizeArray(state.cart);
+  const serviceSellingTotal = cartItems.reduce((sum, item) => sum + Math.max(0, Number(item.price ?? item.sellingPrice ?? 0)), 0);
+  const serviceRows = cartItems.map((item) => {
+    const selling = Math.max(0, Number(item.price ?? item.sellingPrice ?? 0));
+    const base = Math.max(Number(item.basePrice || 0), selling + Number(item.saveAmount || 0), selling);
+    const serviceName = String(item.categoryName || item.name || "Selected service").trim();
+    const duration = customerDurationText(item.cartDurationMinutes ?? item.durationMinutes ?? 0);
+    const serviceNetBeforeTax = serviceSellingTotal > 0
+      ? Math.max(0, Number(totals.itemTotal || 0) * (selling / serviceSellingTotal))
+      : 0;
+    return `<div class="customer-cart-bill-row customer-cart-bill-service-row">
+      <span><strong>${escapeHtml(serviceName)}</strong><small>${escapeHtml(duration)}</small></span>
+      <b>${base > selling ? `<del>${money(base)}</del>` : ""}${money(serviceNetBeforeTax)}</b>
+    </div>`;
+  }).join("");
   const singleAddOn = addOns.length === 1 ? addOns[0] : null;
   const singleAddOnDiscount = Math.max(0, Number(singleAddOn?.discountAmount || 0));
   const singleAddOnHasDiscount = singleAddOnDiscount > 0;
@@ -12714,24 +13340,46 @@ function customerCartBillDetailsHtml(totals = cartTotals()) {
       : "";
   const taxTotal = Math.max(0, Number(totals.fees || 0));
   const hasTax = taxTotal > 0 || taxRows.some((row) => Number(row?.amount || 0) > 0);
+  const savedAmount = Math.max(0, Number(totals.discountAmount || totals.discount || 0));
   return `<section class="content-section compact-section customer-cart-bill-section">
-    <h2>Bill details</h2>
     <div class="customer-cart-bill-card ${expanded ? "" : "is-collapsed"}">
       <div class="customer-cart-bill-summary">
         <div>
-          <strong>To pay ${customerReviewMoney(totals.toPay)}</strong>
-          ${totals.discountAmount > 0 ? `<small>${customerReviewMoney(totals.discountAmount)} saved on the total!</small>` : ""}
+          <strong>Bill Summary</strong>
         </div>
         <button type="button" data-customer-cart-bill-toggle aria-expanded="${expanded ? "true" : "false"}" aria-label="${expanded ? "Collapse" : "Expand"} bill details">${customerIcon(expanded ? "chevronUp" : "chevronDown")}</button>
       </div>
       <div class="customer-cart-bill-rows">
-        <div class="customer-cart-bill-row"><span>Item total</span><b>${customerReviewMoney(totals.itemTotal)}</b></div>
+        ${serviceRows}
         ${addOnBillRow}
         ${hasTax ? `<div class="customer-cart-bill-row">
           <span>GST (govt. taxes)<button class="customer-cart-tax-info-btn" type="button" data-customer-cart-tax-info aria-label="View tax details">${customerIcon("info")}</button></span>
           <b>${customerReviewMoney(taxTotal)}</b>
         </div>` : ""}
         <div class="customer-cart-bill-row customer-cart-bill-total"><strong>To pay</strong><b>${customerReviewMoney(totals.toPay)}</b></div>
+      </div>
+      ${savedAmount > 0 ? `<div class="customer-cart-savings-band"><span aria-hidden="true">&#10024;</span><strong>Saving ${customerReviewMoney(savedAmount)} on this order</strong></div>` : ""}
+    </div>
+  </section>`;
+}
+
+function customerCartBookingPolicyHtml() {
+  const expanded = state.customerCartPolicyExpanded !== false;
+  return `<section class="content-section compact-section customer-cart-policy-section">
+    <div class="customer-cart-policy-card ${expanded ? "is-expanded" : "is-collapsed"}">
+      <button class="customer-cart-policy-toggle" type="button" data-customer-cart-policy-toggle aria-expanded="${expanded ? "true" : "false"}">
+        <span><strong>Booking Policy</strong><small>for Cancellation and Reschedule</small></span>
+        ${customerIcon(expanded ? "chevronUp" : "chevronDown")}
+      </button>
+      <div class="customer-cart-policy-body">
+        <article class="customer-cart-policy-row">
+          <span class="customer-cart-policy-icon cancellation" aria-hidden="true">${customerIcon("x")}</span>
+          <div><h3>Cancellation</h3><p>Cancellation availability depends on the booking status and start time.</p></div>
+        </article>
+        <article class="customer-cart-policy-row">
+          <span class="customer-cart-policy-icon reschedule" aria-hidden="true">${customerIcon("calendar")}</span>
+          <div><h3>Reschedule</h3><p>You can reschedule before the booking starts, subject to available slots.</p></div>
+        </article>
       </div>
     </div>
   </section>`;
@@ -12792,7 +13440,7 @@ function renderCart() {
   ensureCustomerBookingTypeAllowed();
   if (!state.cart.length) {
     setCustomerViewHtmlPreservingLocationPicker(`<section class="mobile-app home-screen customer-flow-screen customer-cart-screen">
-      <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-review-booking-back aria-label="Back">${customerIcon("back")}</button><h1>Review Booking</h1></header>
+      <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-review-booking-back aria-label="Back">${customerIcon("arrowLeft")}</button><h1>Review Booking</h1></header>
       <section class="content-section compact-section">
         ${cartRows()}
       </section>
@@ -12806,7 +13454,7 @@ function renderCart() {
   const activeBookingType = customerEffectiveBookingType(state.bookingType);
   const confirmLabel = state.bookingType === "schedule" ? "Schedule & Confirm" : "Confirm Booking";
   setCustomerViewHtmlPreservingLocationPicker(`<section class="mobile-app home-screen customer-flow-screen customer-cart-screen">
-    <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-review-booking-back aria-label="Back">${customerIcon("back")}</button><h1>Review Booking</h1></header>
+    <header class="customer-page-header"><button class="customer-back-icon customer-back-icon-plain" type="button" data-review-booking-back aria-label="Back">${customerIcon("arrowLeft")}</button><h1>Review Booking</h1></header>
     ${customerReviewNotificationsHtml()}
     <section class="content-section compact-section">
       <div class="cart-list">${cartRows()}</div>
@@ -12815,17 +13463,27 @@ function renderCart() {
       ${customerCartLocationsHtml()}
     </section>
     ${customerCartBillDetailsHtml(totals)}
+    ${customerCartBookingPolicyHtml()}
     ${customerCartTaxInfoModalHtml(totals)}${customerCartAddOnInfoModalHtml(totals)}
     <section class="content-section compact-section">
       <h2 class="customer-cart-minor-heading">Uploads</h2>
-      <label class="customer-upload-drop">
-        <input data-cart-upload type="file" multiple accept="image/*,video/*,.pdf,.doc,.docx" aria-label="Add booking attachments">
-        <span>Upload images, videos, docs or PDF</span>
-        <b aria-hidden="true">${customerIcon("plus")}</b>
-      </label>
+      <div class="customer-upload-drop">
+        <div class="customer-upload-options">
+          <label class="customer-upload-file-control">
+            <input data-cart-upload type="file" multiple accept="image/*,video/*,.pdf,.doc,.docx" aria-label="Select booking files">
+            <span class="customer-upload-plus-icon" aria-hidden="true">${customerIcon("plus")}</span>
+            <small>Select file</small>
+          </label>
+          <div class="customer-upload-or" aria-hidden="true"><span></span><small>or</small><span></span></div>
+          <label class="customer-upload-camera-control">
+            <input data-cart-camera-upload type="file" accept="image/*" capture="environment" aria-label="Open camera and take photo">
+            ${customerIcon("camera")}<span>Open Camera &amp; Take Photo</span>
+          </label>
+        </div>
+        ${cartUploadPreviewHtml()}
+      </div>
       <small class="customer-upload-size-note">Maximum 2 MB per attachment.</small>
       ${state.cartUploadMessage ? `<small class="customer-upload-error" role="alert">${escapeHtml(state.cartUploadMessage)}</small>` : ""}
-      ${cartUploadPreviewHtml()}
     </section>
     ${customerCartNoteHtml()}
     ${customerCartDeleteModalHtml()}
@@ -12850,6 +13508,9 @@ function refreshCustomerCartLocationSection() {
 function closeCustomerCartStopPickerToReview() {
   state.locationMessage = "";
   state.locationBusy = false;
+  if (["cart-stop", "cart-edit"].includes(state.customerLocationPickerPurpose)) {
+    state.customerCartRouteExpanded = true;
+  }
   customerCartStopPickerClosedAfterPick = true;
   suppressCustomerLocationPickerForReview();
   refreshCustomerCartLocationSection();
@@ -12870,6 +13531,7 @@ function closeCustomerCartStopPickerToReview() {
 function openCustomerCartStopPicker({ editIndex = -1 } = {}) {
   customerCartStopPickerClosedAfterPick = false;
   customerLocationPickerSuppressUntil = 0;
+  state.customerCartRouteExpanded = true;
   state.customerView = "cart";
   state.customerLocationPickerPurpose = "cart-stop";
   state.customerCartRouteEditIndex = Number.isInteger(Number(editIndex)) ? Number(editIndex) : -1;
@@ -12890,6 +13552,7 @@ function openCustomerCartLocationEdit(index) {
   const editIndex = Number(index);
   const stop = Number.isInteger(editIndex) && editIndex >= 0 && editIndex < stops.length ? stops[editIndex] : null;
   if (!stop) return false;
+  state.customerCartRouteExpanded = true;
   state.customerLocationPickerPurpose = "cart-edit";
   state.customerCartRouteEditIndex = editIndex;
   state.customerCartRouteDeleteIndex = -1;
@@ -22609,7 +23272,7 @@ document.addEventListener("change", (event) => {
     const label = paymentProofInput.closest(".customer-payment-upload-control")?.querySelector("[data-customer-payment-proof-name]");
     if (label) label.textContent = fileName;
   }
-  const uploadInput = event.target instanceof HTMLInputElement ? event.target.closest("[data-cart-upload]") : null;
+  const uploadInput = event.target instanceof HTMLInputElement ? event.target.closest("[data-cart-upload], [data-cart-camera-upload]") : null;
   if (uploadInput) {
     const files = Array.from(uploadInput.files || []);
     const maxBytes = 2 * 1024 * 1024;
@@ -23322,6 +23985,20 @@ document.addEventListener("click", async (event) => {
     customerCartBillToggle.setAttribute("aria-expanded", state.customerCartBillExpanded ? "true" : "false");
     customerCartBillToggle.setAttribute("aria-label", `${state.customerCartBillExpanded ? "Collapse" : "Expand"} bill details`);
     customerCartBillToggle.innerHTML = customerIcon(state.customerCartBillExpanded ? "chevronUp" : "chevronDown");
+    return;
+  }
+
+  const customerCartPolicyToggle = event.target.closest("[data-customer-cart-policy-toggle]");
+  if (customerCartPolicyToggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    const policyCard = customerCartPolicyToggle.closest(".customer-cart-policy-card");
+    if (!policyCard) return;
+    state.customerCartPolicyExpanded = !policyCard.classList.contains("is-expanded");
+    policyCard.classList.toggle("is-expanded", state.customerCartPolicyExpanded);
+    policyCard.classList.toggle("is-collapsed", !state.customerCartPolicyExpanded);
+    customerCartPolicyToggle.setAttribute("aria-expanded", state.customerCartPolicyExpanded ? "true" : "false");
+    customerCartPolicyToggle.innerHTML = `<span><strong>Booking Policy</strong><small>for Cancellation and Reschedule</small></span>${customerIcon(state.customerCartPolicyExpanded ? "chevronUp" : "chevronDown")}`;
     return;
   }
 
@@ -25231,12 +25908,21 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  const toggleCartRouteDetailsButton = event.target.closest("[data-toggle-cart-route-details]");
-  if (toggleCartRouteDetailsButton) {
+  const customerCartLocationsToggle = event.target.closest("[data-toggle-customer-cart-locations]");
+  if (customerCartLocationsToggle) {
     event.preventDefault();
     event.stopPropagation();
-    state.customerCartRouteExpanded = !state.customerCartRouteExpanded;
-    refreshCustomerCartLocationSection();
+    const locationsCard = customerCartLocationsToggle.closest(".customer-cart-locations");
+    const locationBody = locationsCard?.querySelector(".customer-cart-location-body");
+    if (!locationsCard || !locationBody) return;
+    state.customerCartRouteExpanded = !locationsCard.classList.contains("is-expanded");
+    locationsCard.classList.toggle("is-expanded", state.customerCartRouteExpanded);
+    locationsCard.classList.toggle("is-collapsed", !state.customerCartRouteExpanded);
+    locationBody.classList.toggle("is-hidden", !state.customerCartRouteExpanded);
+    customerCartLocationsToggle.setAttribute("aria-expanded", state.customerCartRouteExpanded ? "true" : "false");
+    customerCartLocationsToggle.setAttribute("aria-label", `${state.customerCartRouteExpanded ? "Collapse" : "Expand"} locations`);
+    const locationChevron = customerCartLocationsToggle.querySelector(".customer-lucide");
+    if (locationChevron) locationChevron.outerHTML = customerIcon(state.customerCartRouteExpanded ? "chevronUp" : "chevronDown");
     return;
   }
 
@@ -25245,7 +25931,14 @@ document.addEventListener("click", async (event) => {
     if (Date.now() < customerCartRouteSuppressClickUntil) return;
     event.preventDefault();
     event.stopPropagation();
-    const index = Number(editCartLocationStopButton.dataset.editCustomerCartLocationStop);
+    const routeRow = editCartLocationStopButton.closest(".customer-route-detail-row");
+    const routeKey = String(editCartLocationStopButton.dataset.customerCartLocationKey || routeRow?.dataset.customerCartLocationKey || "").trim();
+    const stops = customerCartLocationStopsForPayload();
+    const keyedIndex = routeKey
+      ? stops.findIndex((stop) => customerCartLocationKey(stop) === routeKey)
+      : -1;
+    const index = keyedIndex >= 0 ? keyedIndex : Number(editCartLocationStopButton.dataset.editCustomerCartLocationStop);
+    state.customerCartRouteExpanded = true;
     if (!openCustomerCartLocationEdit(index)) notify("Unable to open this location.");
     return;
   }
@@ -25577,7 +26270,8 @@ document.addEventListener("click", async (event) => {
       if (!isAvailabilityConflict) console.error("Unable to confirm customer booking.", error);
       notify(error.message || "Unable to confirm booking.", isAvailabilityConflict ? "info" : "error", { show: isAvailabilityConflict });
       confirmButton.disabled = false;
-      confirmButton.innerHTML = `<span>Proceed to Pay</span>`;
+      const retryAmount = Math.max(0, Number(cartTotals().toPay || 0));
+      confirmButton.innerHTML = `<span>${retryAmount > 0 ? "Pay Now" : "Confirm"}</span>`;
     }
     return;
   }

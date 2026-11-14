@@ -16,7 +16,8 @@ import {
   attachRequestId,
   corsOrigin,
   rejectSuspiciousRequests,
-  requireJsonContentType
+  requireJsonContentType,
+  configuredWebViewOrigins
 } from "./http/security.js";
 import { adminRouter } from "./modules/admin/admin.routes.js";
 import { accessRouter } from "./modules/access/access.routes.js";
@@ -47,6 +48,7 @@ export function createApp() {
   const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
   const assetsFontsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../assets/fonts");
   const basePath = normalizeBasePath(env.APP_BASE_PATH);
+  const frameAncestors = ["'self'", ...configuredWebViewOrigins()];
   const globalLimiter = rateLimit({
     keyPrefix: "admin-api",
     windowMs: 60 * 1000,
@@ -63,6 +65,7 @@ export function createApp() {
       contentSecurityPolicy: {
         directives: {
           ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+          "frame-ancestors": frameAncestors,
           "style-src": ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net", "https://api.olamaps.io", "https://*.olamaps.io", "https://maps.olakrutrim.com", "https://*.olakrutrim.com"],
           "script-src": ["'self'", "https://www.unpkg.com", "https://unpkg.com", "https://cdn.jsdelivr.net", "https://checkout.razorpay.com", "https://cdn.razorpay.com"],
           "img-src": ["'self'", "data:", "blob:", "https://api.qrserver.com", "https://api.olamaps.io", "https://*.olamaps.io", "https://maps.olakrutrim.com", "https://*.olakrutrim.com", "https://a.tile.openstreetmap.org", "https://b.tile.openstreetmap.org", "https://c.tile.openstreetmap.org", "https://*.razorpay.com"],
@@ -190,7 +193,9 @@ function staticMediaMimeType(filePath: string) {
 
 function staticMediaHeaders(res: express.Response, filePath: string) {
   if (/\.(avif|gif|jpe?g|png|svg|webp|mp4|webm|mov|mp3|m4a|ogg|wav|pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) {
-    res.setHeader("Cache-Control", "public, max-age=86400");
+    const isStreamingMedia = /\.(mp4|webm|mov|mp3|m4a|ogg|wav)$/i.test(filePath);
+    res.setHeader("Cache-Control", isStreamingMedia ? "no-store" : "public, max-age=86400");
+    if (isStreamingMedia) res.setHeader("Accept-Ranges", "bytes");
     const detectedMimeType = staticMediaMimeType(filePath);
     if (detectedMimeType) res.type(detectedMimeType);
     if (detectedMimeType === "image/svg+xml") {

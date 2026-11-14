@@ -1,5 +1,6 @@
 import { pool } from "../../db/pool.js";
 import { sendTransactionalEmail } from "../users/users.repository.js";
+const INR_SYMBOL = "\u20B9";
 function record(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -17,7 +18,8 @@ function escapeHtml(value) {
 }
 function money(paise) {
     const amount = Number(paise || 0) / 100;
-    return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2 }).format(amount);
+    const formatted = new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+    return `${INR_SYMBOL}${formatted}`;
 }
 function indiaDateTime(value) {
     if (!value)

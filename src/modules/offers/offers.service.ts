@@ -3,6 +3,7 @@ import {
   getOffer,
   listAssistantReferralOffers,
   listEligibleOffersForCustomer,
+  listOfferRedemptionReport,
   listOfferRedemptions,
   listOffers,
   setOfferStatus,
@@ -75,6 +76,10 @@ export class RedemptionService {}
 export class OfferReportingService {
   redemptions(offerId: string) {
     return listOfferRedemptions(offerId);
+  }
+
+  redemptionReport(filters: Parameters<typeof listOfferRedemptionReport>[0]) {
+    return listOfferRedemptionReport(filters);
   }
 }
 

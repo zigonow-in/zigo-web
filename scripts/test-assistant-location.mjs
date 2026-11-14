@@ -109,9 +109,9 @@ await runTimeoutsThrough(2000);
 assert.equal(states.at(-1), "live");
 assert.equal(uploads.length, 4, "A failed upload is retried without waiting for a page refresh");
 
-now += 31000;
+now += 16000;
 tick();
-assert.equal(states.at(-1), "stale");
+assert.equal(states.at(-1), "stale", "GPS becomes stale before the assistant can remain visibly online");
 failure({ code: 3 });
 assert.equal(tracker.active, true, "GPS timeout is recoverable");
 
@@ -176,6 +176,23 @@ now += 1;
 assert.equal(tracker.receive(nativeSession, position(28.66)), true);
 await settle();
 assert.equal(tracker.latest.latitude, 28.66);
+tracker.stop();
+
+delete context.window.ZigoNativeLocation;
+const commonBridgeMessages = [];
+context.window.ZigoAndroid = {
+  postMessage: (json) => {
+    const message = JSON.parse(json);
+    commonBridgeMessages.push(message);
+    return message.type === "zigo.location.getCurrent" ? position(28.67) : undefined;
+  }
+};
+now += 1;
+tracker.start();
+await settle();
+assert.ok(commonBridgeMessages.some((message) => message.type === "zigo.location.start"), "Assistant start reaches the common mobile bridge");
+assert.ok(commonBridgeMessages.some((message) => message.type === "zigo.location.getCurrent"), "Assistant requests GPS through the common mobile bridge");
+assert.equal(tracker.latest.latitude, 28.67, "Assistant accepts a current fix from the customer-compatible mobile bridge");
 tracker.stop();
 
 console.log("Assistant GPS session, ordering, throttling, retry, stale state, permission recovery, native fallback and watch isolation tests passed.");

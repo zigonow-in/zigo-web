@@ -9,6 +9,7 @@ const envSchema = z.object({
     DATABASE_URL: z.string().url(),
     CORS_ORIGIN: z.string().default("*"),
     APP_BASE_PATH: z.string().default(""),
+    WEBVIEW_ALLOWED_ORIGINS: z.string().default("https://zigonow.in,https://www.zigonow.in,https://appassets.androidplatform.net,capacitor://localhost,ionic://localhost,http://localhost:*,https://localhost:*"),
     JWT_SECRET: z.string().min(16).default("zigo-development-secret"),
     REDIS_URL: z.string().url().optional(),
     TRACKING_GATEWAY_INTERNAL_TOKEN: z.string().min(32).optional(),

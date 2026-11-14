@@ -2,6 +2,7 @@ import { pool } from "../../db/pool.js";
 import { sendTransactionalEmail } from "../users/users.repository.js";
 
 type JsonRecord = Record<string, unknown>;
+const INR_SYMBOL = "\u20B9";
 
 type InvoiceBookingRow = {
   id: string;
@@ -51,7 +52,8 @@ function escapeHtml(value: unknown) {
 
 function money(paise: unknown) {
   const amount = Number(paise || 0) / 100;
-  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2 }).format(amount);
+  const formatted = new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+  return `${INR_SYMBOL}${formatted}`;
 }
 
 function indiaDateTime(value: Date | null) {

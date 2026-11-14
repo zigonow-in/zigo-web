@@ -12,9 +12,73 @@ let categoryPriceSchemaReady = null;
 let bookingTypeSchemaReady = null;
 let bookingEngineRuleSchemaReady = null;
 let bookingEngineQuickReplySchemaReady = null;
+const categoryFontFamilies = ["Inter", "Arial", "Roboto", "Poppins", "Georgia", "Verdana", "system-ui"];
+function normalizeCategoryFontFamily(value) {
+    const family = String(value || "").trim();
+    return categoryFontFamilies.includes(family) ? family : "Inter";
+}
+function normalizeCategoryDisplaySettings(input) {
+    const opacity = Number(input.categoryOverlayOpacity);
+    const gradientOpacity = Number(input.categoryOverlayGradientOpacity);
+    const width = Number(input.categoryOverlayWidth);
+    const transitionDuration = Number(input.categoryMediaTransitionDuration);
+    const displayDuration = Number(input.categoryMediaDisplayDuration);
+    const cardGridWidth = Number(input.categoryCardGridWidth ?? input.categoryCardSpaceUtilize);
+    const cardGridHeight = Number(input.categoryCardGridHeight);
+    const normalizedCardGridWidth = Number.isFinite(cardGridWidth) ? Math.max(1, Math.min(5, Math.round(cardGridWidth))) : 1;
+    const normalizedCardGridHeight = Number.isFinite(cardGridHeight) ? Math.max(1, Math.min(5, Math.round(cardGridHeight))) : 1;
+    const normalizedOpacity = Number.isFinite(opacity) ? opacity > 1 ? opacity / 100 : opacity : 0.45;
+    const normalizedGradientOpacity = Number.isFinite(gradientOpacity) ? gradientOpacity > 1 ? gradientOpacity / 100 : gradientOpacity : 0.35;
+    return {
+        categoryMediaFit: ["cover", "contain", "fill", "none", "scale-down"].includes(String(input.categoryMediaFit)) ? input.categoryMediaFit : "cover",
+        categoryCardSpaceUtilize: normalizedCardGridWidth,
+        categoryCardGridWidth: normalizedCardGridWidth,
+        categoryCardGridHeight: normalizedCardGridHeight,
+        categoryMediaTransition: ["none", "fade", "slide", "zoom"].includes(String(input.categoryMediaTransition)) ? input.categoryMediaTransition : "fade",
+        categoryMediaTransitionDuration: Number.isFinite(transitionDuration) ? Math.max(0, Math.min(3000, Math.round(transitionDuration))) : 500,
+        categoryMediaDisplayDuration: Number.isFinite(displayDuration) ? Math.max(500, Math.min(60000, Math.round(displayDuration))) : 3000,
+        categoryMediaSliderMode: input.categoryMediaSliderMode === "standalone" ? "standalone" : "queue",
+        categoryMediaRepeat: ["auto", "2", "3", "4"].includes(String(input.categoryMediaRepeat)) ? input.categoryMediaRepeat : "auto",
+        categoryNamePosition: input.categoryNamePosition === "outside" ? "outside" : "inside",
+        categoryNameColor: normalizeServiceTextColor(input.categoryNameColor) || "#ffffff",
+        categoryNameFontSize: normalizeServiceFontSize(input.categoryNameFontSize, 20),
+        categoryNameFontWeight: normalizeServiceFontWeight(input.categoryNameFontWeight, 700),
+        categoryNameFontFamily: normalizeCategoryFontFamily(input.categoryNameFontFamily),
+        categoryNameAlign: ["left", "center", "right"].includes(String(input.categoryNameAlign)) ? input.categoryNameAlign : "left",
+        categoryNameVerticalAlign: ["top", "center", "bottom"].includes(String(input.categoryNameVerticalAlign)) ? input.categoryNameVerticalAlign : "bottom",
+        categoryOverlayEnabled: input.categoryOverlayEnabled !== false,
+        categoryOverlayOpacity: Math.max(0, Math.min(1, normalizedOpacity)),
+        categoryOverlayGradientEnabled: input.categoryOverlayGradientEnabled !== false,
+        categoryOverlayGradientOpacity: Math.max(0, Math.min(1, normalizedGradientOpacity)),
+        categoryOverlayColor: normalizeServiceTextColor(input.categoryOverlayColor) || "#111936",
+        categoryOverlayFit: ["category", "10", "20", "30", "40", "50", "60"].includes(String(input.categoryOverlayFit)) ? input.categoryOverlayFit : "50",
+        categoryOverlayWidth: Number.isFinite(width) ? Math.max(10, Math.min(100, width)) : 100,
+        categoryOverlayPosition: ["left", "right", "auto"].includes(String(input.categoryOverlayPosition)) ? input.categoryOverlayPosition : "auto"
+    };
+}
+function normalizeCategoryMediaThumbnailUrl(value, imageUrls) {
+    const thumbnailUrl = String(value || "").trim().slice(0, 1000);
+    const videoOnly = imageUrls.length > 0 && imageUrls.every((url) => /\.(?:mp4|m4v|webm|mov|ogv)(?:[?#].*)?$/i.test(String(url || "")));
+    if (videoOnly && !thumbnailUrl) {
+        throw new Error("A thumbnail image is required when category media contains only videos.");
+    }
+    return thumbnailUrl || null;
+}
+function normalizeCategoryCardSize(height, width) {
+    const requested = Number(width) > 0 ? Number(width) : Number(height);
+    if (!Number.isFinite(requested) || requested <= 0)
+        return 0;
+    return Math.max(40, Math.min(600, Math.round(requested)));
+}
 function normalizeServiceCategoryGridSize(value) {
     const raw = String(value || "").trim().toLowerCase();
     return ["1x1", "2x2", "3x3", "4x4", "5x5"].includes(raw) ? raw : "3x3";
+}
+function normalizeServiceCategorySliderVisibleItems(value) {
+    const raw = Number(value);
+    if (!Number.isFinite(raw))
+        return 2;
+    return Math.max(1, Math.min(5, Math.round(raw * 10) / 10));
 }
 function normalizeServiceMasterBookingType(value) {
     const raw = String(value || "").trim().toLowerCase();
@@ -49,6 +113,8 @@ export async function ensureCategoryServiceMasterSchema() {
         id uuid primary key default gen_random_uuid(),
         service_title text not null,
         service_subtitle text,
+        show_category_name boolean not null default true,
+        show_category_description boolean not null default true,
         static_value text,
         show_static_value boolean not null default true,
         icons jsonb not null default '[]'::jsonb,
@@ -62,6 +128,11 @@ export async function ensureCategoryServiceMasterSchema() {
         show_eta boolean not null default false,
         service_position integer not null default 0,
         service_category_grid_size text not null default '3x3',
+        service_category_slider_item_count integer not null default 0,
+        service_category_slider_visible_items numeric(3, 1) not null default 2.0,
+        service_category_slider_show_range boolean not null default true,
+        service_category_slider_auto_play boolean not null default false,
+        service_category_slider_interval integer not null default 4000,
         is_enabled boolean not null default true,
         is_active boolean not null default true,
         created_by uuid references zigo.users(id),
@@ -75,6 +146,8 @@ export async function ensureCategoryServiceMasterSchema() {
       alter table zigo.category_service_masters
         add column if not exists service_title text not null default '',
         add column if not exists service_subtitle text,
+        add column if not exists show_category_name boolean not null default true,
+        add column if not exists show_category_description boolean not null default true,
         add column if not exists static_value text,
         add column if not exists show_static_value boolean not null default true,
         add column if not exists icons jsonb not null default '[]'::jsonb,
@@ -88,6 +161,11 @@ export async function ensureCategoryServiceMasterSchema() {
         add column if not exists show_eta boolean not null default false,
         add column if not exists service_position integer not null default 0,
         add column if not exists service_category_grid_size text not null default '3x3',
+        add column if not exists service_category_slider_item_count integer not null default 0,
+        add column if not exists service_category_slider_visible_items numeric(3, 1) not null default 2.0,
+        add column if not exists service_category_slider_show_range boolean not null default true,
+        add column if not exists service_category_slider_auto_play boolean not null default false,
+        add column if not exists service_category_slider_interval integer not null default 4000,
         add column if not exists is_enabled boolean not null default true,
         add column if not exists is_active boolean not null default true,
         add column if not exists created_by uuid references zigo.users(id),
@@ -97,6 +175,9 @@ export async function ensureCategoryServiceMasterSchema() {
         add column if not exists deleted_by uuid references zigo.users(id),
         add column if not exists deleted_at timestamptz,
         add column if not exists is_deleted boolean not null default false;
+      alter table zigo.category_service_masters
+        alter column service_category_slider_visible_items type numeric(3, 1)
+        using round(service_category_slider_visible_items::numeric, 1);
       create index if not exists idx_category_service_masters_active
         on zigo.category_service_masters(is_deleted, is_active, is_enabled, service_position);
     `).then(() => undefined).catch((error) => {
@@ -111,10 +192,11 @@ function normalizeBookingTypeConfig(input) {
     const waitWindowMinutes = 0;
     const waitWindowNote = "";
     const timeCategories = normalizeBookingTimeCategories(input.timeCategories || []);
-    const categorySlots = timeCategories.filter((category) => category.isActive).flatMap((category) => category.timeSlots);
+    const categorySlots = timeCategories
+        .filter((category) => category.isActive)
+        .flatMap((category) => category.timeSlots.filter((time) => !category.inactiveTimeSlots.includes(time)));
     const timeSlots = [...new Set([...(input.timeSlots || []), ...categorySlots])]
-        .filter((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time))
-        .sort();
+        .filter((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time));
     return {
         instantMode: "manual",
         waitWindowMinutes,
@@ -133,9 +215,10 @@ function normalizeBookingTimeCategories(categories) {
         const sortOrder = Math.max(1, Math.round(Number(category.sortOrder || index + 1)));
         const isActive = category.isActive !== false;
         const timeSlots = [...new Set(category.timeSlots || [])]
-            .filter((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time))
-            .sort();
-        return { id: id || `category_${index + 1}`, name, sortOrder, isActive, timeSlots };
+            .filter((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time));
+        const inactiveTimeSlots = [...new Set(category.inactiveTimeSlots || [])]
+            .filter((time) => timeSlots.includes(time));
+        return { id: id || `category_${index + 1}`, name, sortOrder, isActive, timeSlots, inactiveTimeSlots };
     })
         .filter((category) => category.name)
         .sort((left, right) => left.sortOrder - right.sortOrder || left.name.localeCompare(right.name));
@@ -1151,7 +1234,6 @@ async function generateUniqueCategoryCode(requestedCode, name, excludeId) {
         select id
         from zigo.categories
         where lower(code) = lower($1)
-          and coalesce(is_deleted, false) = false
           and ($2::uuid is null or id <> $2::uuid)
         limit 1
       `, [candidate, excludeId ?? null]);
@@ -1161,17 +1243,75 @@ async function generateUniqueCategoryCode(requestedCode, name, excludeId) {
     }
     throw new HttpError(409, `Could not generate a unique code for "${name}". Please enter a user-defined code.`);
 }
-function normalizeTextList(values) {
-    return [...new Set((values || []).map((value) => String(value || "").trim()).filter(Boolean))];
+function normalizeCategoryGuidanceList(values) {
+    const seen = new Set();
+    return (values || [])
+        .map((value) => {
+        const row = value && typeof value === "object" ? value : { text: value };
+        return {
+            text: String(row.text || "").trim(),
+            imageUrl: String(row.imageUrl || row.image_url || "").trim().slice(0, 1000),
+            strikeThrough: row.strikeThrough === true || row.strike_through === true
+        };
+    })
+        .filter((row) => {
+        if (!row.text || seen.has(`${row.text}\u0000${row.imageUrl}`))
+            return false;
+        seen.add(`${row.text}\u0000${row.imageUrl}`);
+        return true;
+    });
+}
+function normalizeCategoryGuidanceIcon(value, fallback) {
+    return value == null ? fallback : String(value).trim().slice(0, 1000);
 }
 function buildCategoryGuidance(input) {
+    const gridColumns = Number(input.categoryGuidanceGridColumns);
+    const titleFontSize = Number(input.categoryGuidanceTitleFontSize);
+    const titleFontWeight = Number(input.categoryGuidanceTitleFontWeight);
+    const titleIconSize = Number(input.categoryGuidanceTitleIconSize);
+    const rowImageSize = Number(input.categoryGuidanceRowImageSize);
+    const rowRadius = Number(input.categoryGuidanceRowRadius);
+    const rowOverlayHeight = Number(input.categoryGuidanceRowOverlayHeight);
+    const rowOverlayOpacity = Number(input.categoryGuidanceRowOverlayOpacity);
+    const rowOverlayGradientOpacity = Number(input.categoryGuidanceRowOverlayGradientOpacity);
+    const normalizeGuidanceOpacity = (value, fallback) => {
+        const normalized = value > 1 ? value / 100 : value;
+        return Number.isFinite(normalized) ? Math.max(0, Math.min(1, normalized)) : fallback;
+    };
     return {
         taskListTitle: String(input.taskListTitle || "Tasks related to category").trim() || "Tasks related to category",
-        taskList: normalizeTextList(input.taskList),
+        taskList: normalizeCategoryGuidanceList(input.taskList),
+        taskIcon: normalizeCategoryGuidanceIcon(input.taskIcon, "&#9733;"),
+        showTaskList: input.showTaskList !== false,
         canDoTitle: String(input.canDoTitle || "What Assistant can do").trim() || "What Assistant can do",
-        canDoList: normalizeTextList(input.canDoList),
+        canDoList: normalizeCategoryGuidanceList(input.canDoList),
+        canDoIcon: normalizeCategoryGuidanceIcon(input.canDoIcon, "&#10003;"),
+        showCanDoList: input.showCanDoList !== false,
         cantDoTitle: String(input.cantDoTitle || "What Assistant can't do").trim() || "What Assistant can't do",
-        cantDoList: normalizeTextList(input.cantDoList)
+        cantDoList: normalizeCategoryGuidanceList(input.cantDoList),
+        cantDoIcon: normalizeCategoryGuidanceIcon(input.cantDoIcon, "&#10005;"),
+        showCantDoList: input.showCantDoList !== false,
+        categoryGuidanceDisplayMode: input.categoryGuidanceDisplayMode === "grid" ? "grid" : "list",
+        categoryGuidanceGridColumns: Number.isFinite(gridColumns) ? Math.max(1, Math.min(4, Math.round(gridColumns))) : 3,
+        categoryGuidanceShowImage: input.categoryGuidanceShowImage === true,
+        categoryGuidanceFontFamily: normalizeCategoryFontFamily(input.categoryGuidanceFontFamily),
+        categoryGuidanceFontSize: normalizeServiceFontSize(input.categoryGuidanceFontSize, 10),
+        categoryGuidanceTextColor: normalizeServiceTextColor(input.categoryGuidanceTextColor) || "#2b2f38",
+        categoryGuidanceTitleFontFamily: normalizeCategoryFontFamily(input.categoryGuidanceTitleFontFamily),
+        categoryGuidanceTitleFontSize: Number.isFinite(titleFontSize) ? Math.max(8, Math.min(40, Math.round(titleFontSize))) : 12,
+        categoryGuidanceTitleFontWeight: Number.isFinite(titleFontWeight) ? Math.max(100, Math.min(900, Math.round(titleFontWeight / 100) * 100)) : 700,
+        categoryGuidanceTitleTextColor: normalizeServiceTextColor(input.categoryGuidanceTitleTextColor) || "#2b2f38",
+        categoryGuidanceTitleIconSize: Number.isFinite(titleIconSize) ? Math.max(12, Math.min(64, Math.round(titleIconSize))) : 24,
+        categoryGuidanceRowImageSize: Number.isFinite(rowImageSize) ? Math.max(24, Math.min(240, Math.round(rowImageSize))) : 44,
+        categoryGuidanceRowRadius: Number.isFinite(rowRadius) ? Math.max(0, Math.min(40, Math.round(rowRadius))) : 8,
+        categoryGuidanceRowTextPosition: input.categoryGuidanceRowTextPosition === "inside" ? "inside" : "outside",
+        categoryGuidanceRowTextAlign: input.categoryGuidanceRowTextAlign === "center" ? "center" : input.categoryGuidanceRowTextAlign === "right" ? "right" : "left",
+        categoryGuidanceRowOverlayEnabled: input.categoryGuidanceRowOverlayEnabled !== false,
+        categoryGuidanceRowOverlayColor: normalizeServiceTextColor(input.categoryGuidanceRowOverlayColor) || "#111936",
+        categoryGuidanceRowOverlayHeight: Number.isFinite(rowOverlayHeight) ? Math.max(0, Math.min(100, Math.round(rowOverlayHeight))) : 100,
+        categoryGuidanceRowOverlayOpacity: normalizeGuidanceOpacity(rowOverlayOpacity, 0.45),
+        categoryGuidanceRowOverlayGradientEnabled: input.categoryGuidanceRowOverlayGradientEnabled !== false,
+        categoryGuidanceRowOverlayGradientOpacity: normalizeGuidanceOpacity(rowOverlayGradientOpacity, 0.35)
     };
 }
 function normalizeCategoryImageUrls(values, primary) {
@@ -1192,18 +1332,45 @@ export async function listCategories() {
       c.code,
       c.name,
       c.description,
-      c.image_url as "imageUrl",
-      coalesce(c.config->'categorySettings'->'imageUrls', '[]'::jsonb) as "imageUrls",
-      c.priority,
+         c.image_url as "imageUrl",
+         coalesce(c.config->'categorySettings'->'imageUrls', '[]'::jsonb) as "imageUrls",
+         coalesce(c.config->'categorySettings'->>'categoryMediaThumbnailUrl', '') as "categoryMediaThumbnailUrl",
+         c.priority,
       c.is_recommended as "isRecommended",
       c.is_enabled as "isEnabled",
       c.config->'categorySettings'->>'note' as "note",
       coalesce(c.config->'categorySettings'->>'locationMode', 'current') as "locationMode",
       coalesce(nullif(c.config->'categorySettings'->>'maxLocationsLimit', '')::int, 1) as "maxLocationsLimit",
       coalesce((c.config->'categorySettings'->>'showInHomePage')::boolean, true) as "showInHomePage",
+      coalesce((c.config->'categorySettings'->>'showSubCategoryName')::boolean, true) as "showSubCategoryName",
+      coalesce((c.config->'categorySettings'->>'showSubCategoryDescription')::boolean, true) as "showSubCategoryDescription",
       coalesce(c.config->'categorySettings'->>'homeDisplayMode', case when coalesce((c.config->'categorySettings'->>'showInHomePage')::boolean, true) then 'category' else 'categoryPrice' end) as "homeDisplayMode",
       coalesce(nullif(c.config->'categorySettings'->>'categoryImageHeight', '')::int, 0) as "categoryImageHeight",
       coalesce(nullif(c.config->'categorySettings'->>'categoryImageWidth', '')::int, 0) as "categoryImageWidth",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1) as "categoryCardSpaceUtilize",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridWidth', '')::int, coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1)) as "categoryCardGridWidth",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridHeight', '')::int, 1) as "categoryCardGridHeight",
+      coalesce(c.config->'categorySettings'->>'categoryMediaFit', 'cover') as "categoryMediaFit",
+      coalesce(c.config->'categorySettings'->>'categoryMediaTransition', 'fade') as "categoryMediaTransition",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryMediaTransitionDuration', '')::int, 500) as "categoryMediaTransitionDuration",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryMediaDisplayDuration', '')::int, 3000) as "categoryMediaDisplayDuration",
+      coalesce(c.config->'categorySettings'->>'categoryMediaSliderMode', 'queue') as "categoryMediaSliderMode",
+      coalesce(c.config->'categorySettings'->>'categoryMediaRepeat', 'auto') as "categoryMediaRepeat",
+      coalesce(c.config->'categorySettings'->>'categoryNamePosition', 'inside') as "categoryNamePosition",
+      coalesce(c.config->'categorySettings'->>'categoryNameColor', '#ffffff') as "categoryNameColor",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontSize', '')::int, 20) as "categoryNameFontSize",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontWeight', '')::int, 700) as "categoryNameFontWeight",
+      coalesce(c.config->'categorySettings'->>'categoryNameFontFamily', 'Inter') as "categoryNameFontFamily",
+      coalesce(c.config->'categorySettings'->>'categoryNameAlign', 'left') as "categoryNameAlign",
+      coalesce(c.config->'categorySettings'->>'categoryNameVerticalAlign', 'bottom') as "categoryNameVerticalAlign",
+      coalesce((c.config->'categorySettings'->>'categoryOverlayEnabled')::boolean, true) as "categoryOverlayEnabled",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayOpacity', '')::numeric, 0.45) as "categoryOverlayOpacity",
+      coalesce((c.config->'categorySettings'->>'categoryOverlayGradientEnabled')::boolean, true) as "categoryOverlayGradientEnabled",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayGradientOpacity', '')::numeric, 0.35) as "categoryOverlayGradientOpacity",
+      coalesce(c.config->'categorySettings'->>'categoryOverlayColor', '#111936') as "categoryOverlayColor",
+      coalesce(c.config->'categorySettings'->>'categoryOverlayFit', '50') as "categoryOverlayFit",
+      coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayWidth', '')::numeric, 100) as "categoryOverlayWidth",
+      coalesce(c.config->'categorySettings'->>'categoryOverlayPosition', 'auto') as "categoryOverlayPosition",
       coalesce(c.config->'categorySettings'->>'priceDisplayMode', 'row') as "priceDisplayMode",
       coalesce(nullif(c.config->'categorySettings'->>'priceGridRows', '')::int, 3) as "priceGridRows",
       coalesce(nullif(c.config->'categorySettings'->>'priceGridColumns', '')::int, 3) as "priceGridColumns",
@@ -1216,10 +1383,37 @@ export async function listCategories() {
       c.config->'categorySettings'->>'expandDescription' as "expandDescription",
       coalesce(c.config->'categoryGuidance'->>'taskListTitle', 'Tasks related to category') as "taskListTitle",
       coalesce(c.config->'categoryGuidance'->'taskList', '[]'::jsonb) as "taskList",
+      coalesce(c.config->'categoryGuidance'->>'taskIcon', '&#9733;') as "taskIcon",
+      coalesce((c.config->'categoryGuidance'->>'showTaskList')::boolean, true) as "showTaskList",
       coalesce(c.config->'categoryGuidance'->>'canDoTitle', 'What Assistant can do') as "canDoTitle",
       coalesce(c.config->'categoryGuidance'->'canDoList', '[]'::jsonb) as "canDoList",
+      coalesce(c.config->'categoryGuidance'->>'canDoIcon', '&#10003;') as "canDoIcon",
+      coalesce((c.config->'categoryGuidance'->>'showCanDoList')::boolean, true) as "showCanDoList",
       coalesce(c.config->'categoryGuidance'->>'cantDoTitle', 'What Assistant can''t do') as "cantDoTitle",
       coalesce(c.config->'categoryGuidance'->'cantDoList', '[]'::jsonb) as "cantDoList",
+      coalesce(c.config->'categoryGuidance'->>'cantDoIcon', '&#10005;') as "cantDoIcon",
+      coalesce((c.config->'categoryGuidance'->>'showCantDoList')::boolean, true) as "showCantDoList",
+      coalesce(c.config->'categoryGuidance'->>'categoryGuidanceDisplayMode', 'list') as "categoryGuidanceDisplayMode",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceGridColumns', '')::int, 3) as "categoryGuidanceGridColumns",
+      coalesce((c.config->'categoryGuidance'->>'categoryGuidanceShowImage')::boolean, false) as "categoryGuidanceShowImage",
+      coalesce(c.config->'categoryGuidance'->>'categoryGuidanceFontFamily', 'Inter') as "categoryGuidanceFontFamily",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceFontSize', '')::int, 10) as "categoryGuidanceFontSize",
+      coalesce(c.config->'categoryGuidance'->>'categoryGuidanceTextColor', '#2b2f38') as "categoryGuidanceTextColor",
+      coalesce(c.config->'categoryGuidance'->>'categoryGuidanceTitleFontFamily', 'Inter') as "categoryGuidanceTitleFontFamily",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceTitleFontSize', '')::int, 12) as "categoryGuidanceTitleFontSize",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceTitleFontWeight', '')::int, 700) as "categoryGuidanceTitleFontWeight",
+      coalesce(c.config->'categoryGuidance'->>'categoryGuidanceTitleTextColor', '#2b2f38') as "categoryGuidanceTitleTextColor",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceTitleIconSize', '')::int, 24) as "categoryGuidanceTitleIconSize",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowImageSize', '')::int, 44) as "categoryGuidanceRowImageSize",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowRadius', '')::int, 8) as "categoryGuidanceRowRadius",
+      coalesce(c.config->'categoryGuidance'->>'categoryGuidanceRowTextPosition', 'outside') as "categoryGuidanceRowTextPosition",
+      coalesce(c.config->'categoryGuidance'->>'categoryGuidanceRowTextAlign', 'left') as "categoryGuidanceRowTextAlign",
+      coalesce((c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayEnabled')::boolean, true) as "categoryGuidanceRowOverlayEnabled",
+      coalesce(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayColor', '#111936') as "categoryGuidanceRowOverlayColor",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayHeight', '')::int, 100) as "categoryGuidanceRowOverlayHeight",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayOpacity', '')::numeric, 0.45) as "categoryGuidanceRowOverlayOpacity",
+      coalesce((c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayGradientEnabled')::boolean, true) as "categoryGuidanceRowOverlayGradientEnabled",
+      coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayGradientOpacity', '')::numeric, 0.35) as "categoryGuidanceRowOverlayGradientOpacity",
       c.is_active as "isActive",
       (
         c.is_active = true
@@ -1271,51 +1465,67 @@ export async function createCategory(input) {
     const name = String(input.name || "").trim();
     const code = await generateUniqueCategoryCode(input.code, name);
     const imageUrls = normalizeCategoryImageUrls(input.imageUrls, input.imageUrl);
-    const result = await pool.query(`
-      insert into zigo.categories
-        (service_id, parent_category_id, code, name, description, image_url, priority, is_recommended, is_enabled, sort_order, is_active, config, created_by, updated_by)
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $13)
-      returning id
-    `, [
-        input.serviceId ?? null,
-        input.parentCategoryId ?? null,
-        code,
-        name,
-        input.description ?? null,
-        imageUrls[0] ?? input.imageUrl ?? null,
-        input.priority ?? input.sortOrder ?? 0,
-        input.isRecommended ?? false,
-        input.isEnabled ?? true,
-        input.sortOrder ?? input.priority ?? 0,
-        input.isActive ?? true,
-        JSON.stringify({
-            pricing: buildCategoryPricing(input),
-            categorySettings: {
-                serviceMasterId: input.serviceMasterId ?? null,
-                imageUrls,
-                note: input.note ?? null,
-                locationMode: input.locationMode === "multi" ? "multi" : "current",
-                maxLocationsLimit: input.locationMode === "multi" ? Math.max(1, Number(input.maxLocationsLimit ?? 1)) : 1,
-                showInHomePage: (input.homeDisplayMode || (input.showInHomePage === false ? "categoryPrice" : "category")) === "category",
-                homeDisplayMode: input.homeDisplayMode === "categoryPrice" ? "categoryPrice" : "category",
-                categoryImageHeight: input.homeDisplayMode === "categoryPrice" ? 0 : Math.max(0, Math.min(600, Math.round(Number(input.categoryImageHeight ?? 0)))),
-                categoryImageWidth: input.homeDisplayMode === "categoryPrice" ? 0 : Math.max(0, Math.min(600, Math.round(Number(input.categoryImageWidth ?? 0)))),
-                priceDisplayMode: input.priceDisplayMode === "grid" ? "grid" : "row",
-                priceGridRows: Math.max(1, Math.min(10, Math.round(Number(input.priceGridRows ?? 3)))),
-                priceGridColumns: Math.max(1, Math.min(10, Math.round(Number(input.priceGridColumns ?? 3)))),
-                supplyUnavailableAction: input.homeDisplayMode === "categoryPrice" ? (["auto_hide", "show_popup", "redirect_schedule"].includes(String(input.supplyUnavailableAction || "")) ? input.supplyUnavailableAction : "") : "",
-                supplyUnavailableMessage: input.homeDisplayMode === "categoryPrice" && input.supplyUnavailableAction === "show_popup" ? input.supplyUnavailableMessage ?? null : null,
-                addWithOtherCategory: Boolean(input.addWithOtherCategory),
-                expandPriority: Math.max(0, Number(input.expandPriority ?? 0)),
-                expandTitle: input.expandTitle ?? null,
-                expandDuration: input.expandDuration ?? input.expandDescription ?? null,
-                expandDescription: input.expandDescription ?? input.expandDuration ?? null
-            },
-            categoryGuidance: buildCategoryGuidance(input)
-        }),
-        input.userId
-    ]);
-    return result.rows[0];
+    const categoryMediaThumbnailUrl = normalizeCategoryMediaThumbnailUrl(input.categoryMediaThumbnailUrl, imageUrls);
+    const categoryCardSize = input.homeDisplayMode === "categoryPrice"
+        ? 0
+        : normalizeCategoryCardSize(input.categoryImageHeight, input.categoryImageWidth);
+    try {
+        const result = await pool.query(`
+        insert into zigo.categories
+          (service_id, parent_category_id, code, name, description, image_url, priority, is_recommended, is_enabled, sort_order, is_active, config, created_by, updated_by)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $13)
+        returning id
+      `, [
+            input.serviceId ?? null,
+            input.parentCategoryId ?? null,
+            code,
+            name,
+            input.description ?? null,
+            imageUrls[0] ?? input.imageUrl ?? null,
+            input.priority ?? input.sortOrder ?? 0,
+            input.isRecommended ?? false,
+            input.isEnabled ?? true,
+            input.sortOrder ?? input.priority ?? 0,
+            input.isActive ?? true,
+            JSON.stringify({
+                pricing: buildCategoryPricing(input),
+                categorySettings: {
+                    serviceMasterId: input.serviceMasterId ?? null,
+                    imageUrls,
+                    categoryMediaThumbnailUrl,
+                    note: input.note ?? null,
+                    locationMode: input.locationMode === "multi" ? "multi" : "current",
+                    maxLocationsLimit: input.locationMode === "multi" ? Math.max(1, Number(input.maxLocationsLimit ?? 1)) : 1,
+                    showInHomePage: (input.homeDisplayMode || (input.showInHomePage === false ? "categoryPrice" : "category")) === "category",
+                    showSubCategoryName: input.showSubCategoryName !== false,
+                    showSubCategoryDescription: input.showSubCategoryDescription !== false,
+                    homeDisplayMode: input.homeDisplayMode === "categoryPrice" ? "categoryPrice" : "category",
+                    categoryImageHeight: categoryCardSize,
+                    categoryImageWidth: categoryCardSize,
+                    priceDisplayMode: input.priceDisplayMode === "grid" ? "grid" : "row",
+                    priceGridRows: Math.max(1, Math.min(10, Math.round(Number(input.priceGridRows ?? 3)))),
+                    priceGridColumns: Math.max(1, Math.min(10, Math.round(Number(input.priceGridColumns ?? 3)))),
+                    supplyUnavailableAction: input.homeDisplayMode === "categoryPrice" ? (["auto_hide", "show_popup", "redirect_schedule"].includes(String(input.supplyUnavailableAction || "")) ? input.supplyUnavailableAction : "") : "",
+                    supplyUnavailableMessage: input.homeDisplayMode === "categoryPrice" && input.supplyUnavailableAction === "show_popup" ? input.supplyUnavailableMessage ?? null : null,
+                    addWithOtherCategory: Boolean(input.addWithOtherCategory),
+                    expandPriority: Math.max(0, Number(input.expandPriority ?? 0)),
+                    expandTitle: input.expandTitle ?? null,
+                    expandDuration: input.expandDuration ?? input.expandDescription ?? null,
+                    expandDescription: input.expandDescription ?? input.expandDuration ?? null,
+                    ...normalizeCategoryDisplaySettings(input)
+                },
+                categoryGuidance: buildCategoryGuidance(input)
+            }),
+            input.userId
+        ]);
+        return result.rows[0];
+    }
+    catch (error) {
+        if (error.code === "23505") {
+            throw new HttpError(409, "A category with this code already exists. Please use a different code.");
+        }
+        throw error;
+    }
 }
 export async function updateCategory(id, input) {
     if (input.serviceId)
@@ -1327,40 +1537,53 @@ export async function updateCategory(id, input) {
     const name = String(input.name || "").trim();
     const code = await generateUniqueCategoryCode(input.code, name, id);
     const imageUrls = normalizeCategoryImageUrls(input.imageUrls, input.imageUrl);
-    const result = await pool.query(`
-      update zigo.categories
-      set service_id = $2,
-          parent_category_id = $3,
-          code = $4,
-          name = $5,
-          description = $6,
-          image_url = $7,
-          priority = $8,
-          is_recommended = $9,
-          is_enabled = $10,
-          sort_order = $11,
-          is_active = $12,
-          config = jsonb_set(coalesce(config, '{}'::jsonb), '{pricing}', $13::jsonb, true),
-          updated_by = $14,
-          updated_at = now()
-      where id = $1 and coalesce(is_deleted, false) = false
-      returning id
-    `, [
-        id,
-        input.serviceId ?? null,
-        input.parentCategoryId ?? null,
-        code,
-        name,
-        input.description ?? null,
-        imageUrls[0] ?? input.imageUrl ?? null,
-        input.priority ?? input.sortOrder ?? 0,
-        input.isRecommended ?? false,
-        input.isEnabled ?? true,
-        input.sortOrder ?? input.priority ?? 0,
-        input.isActive ?? true,
-        JSON.stringify(buildCategoryPricing(input)),
-        input.userId
-    ]);
+    const categoryMediaThumbnailUrl = normalizeCategoryMediaThumbnailUrl(input.categoryMediaThumbnailUrl, imageUrls);
+    const categoryCardSize = input.homeDisplayMode === "categoryPrice"
+        ? 0
+        : normalizeCategoryCardSize(input.categoryImageHeight, input.categoryImageWidth);
+    let result;
+    try {
+        result = await pool.query(`
+        update zigo.categories
+        set service_id = $2,
+            parent_category_id = $3,
+            code = $4,
+            name = $5,
+            description = $6,
+            image_url = $7,
+            priority = $8,
+            is_recommended = $9,
+            is_enabled = $10,
+            sort_order = $11,
+            is_active = $12,
+            config = jsonb_set(coalesce(config, '{}'::jsonb), '{pricing}', $13::jsonb, true),
+            updated_by = $14,
+            updated_at = now()
+        where id = $1 and coalesce(is_deleted, false) = false
+        returning id
+      `, [
+            id,
+            input.serviceId ?? null,
+            input.parentCategoryId ?? null,
+            code,
+            name,
+            input.description ?? null,
+            imageUrls[0] ?? input.imageUrl ?? null,
+            input.priority ?? input.sortOrder ?? 0,
+            input.isRecommended ?? false,
+            input.isEnabled ?? true,
+            input.sortOrder ?? input.priority ?? 0,
+            input.isActive ?? true,
+            JSON.stringify(buildCategoryPricing(input)),
+            input.userId
+        ]);
+    }
+    catch (error) {
+        if (error.code === "23505") {
+            throw new HttpError(409, "A category with this code already exists. Please use a different code.");
+        }
+        throw error;
+    }
     if (result.rows[0]) {
         await pool.query(`
         update zigo.categories
@@ -1376,13 +1599,16 @@ export async function updateCategory(id, input) {
             JSON.stringify({
                 serviceMasterId: input.serviceMasterId ?? null,
                 imageUrls,
+                categoryMediaThumbnailUrl,
                 note: input.note ?? null,
                 locationMode: input.locationMode === "multi" ? "multi" : "current",
                 maxLocationsLimit: input.locationMode === "multi" ? Math.max(1, Number(input.maxLocationsLimit ?? 1)) : 1,
                 showInHomePage: (input.homeDisplayMode || (input.showInHomePage === false ? "categoryPrice" : "category")) === "category",
+                showSubCategoryName: input.showSubCategoryName !== false,
+                showSubCategoryDescription: input.showSubCategoryDescription !== false,
                 homeDisplayMode: input.homeDisplayMode === "categoryPrice" ? "categoryPrice" : "category",
-                categoryImageHeight: input.homeDisplayMode === "categoryPrice" ? 0 : Math.max(0, Math.min(600, Math.round(Number(input.categoryImageHeight ?? 0)))),
-                categoryImageWidth: input.homeDisplayMode === "categoryPrice" ? 0 : Math.max(0, Math.min(600, Math.round(Number(input.categoryImageWidth ?? 0)))),
+                categoryImageHeight: categoryCardSize,
+                categoryImageWidth: categoryCardSize,
                 priceDisplayMode: input.priceDisplayMode === "grid" ? "grid" : "row",
                 priceGridRows: Math.max(1, Math.min(10, Math.round(Number(input.priceGridRows ?? 3)))),
                 priceGridColumns: Math.max(1, Math.min(10, Math.round(Number(input.priceGridColumns ?? 3)))),
@@ -1392,7 +1618,8 @@ export async function updateCategory(id, input) {
                 expandPriority: Math.max(0, Number(input.expandPriority ?? 0)),
                 expandTitle: input.expandTitle ?? null,
                 expandDuration: input.expandDuration ?? input.expandDescription ?? null,
-                expandDescription: input.expandDescription ?? input.expandDuration ?? null
+                expandDescription: input.expandDescription ?? input.expandDuration ?? null,
+                ...normalizeCategoryDisplaySettings(input)
             })
         ]);
         await pool.query(`
@@ -1418,6 +1645,8 @@ export async function listCategoryServiceMasters() {
       id,
       service_title as "serviceTitle",
       service_subtitle as "serviceSubtitle",
+      coalesce(show_category_name, true) as "showCategoryName",
+      coalesce(show_category_description, true) as "showCategoryDescription",
       coalesce(icons, '[]'::jsonb) as "icons",
       coalesce(service_title_font_size, 18) as "serviceTitleFontSize",
       coalesce(service_title_font_weight, 400) as "serviceTitleFontWeight",
@@ -1429,6 +1658,11 @@ export async function listCategoryServiceMasters() {
       coalesce(show_eta, false) as "showEta",
       service_position as "servicePosition",
       coalesce(service_category_grid_size, '3x3') as "serviceCategoryGridSize",
+      coalesce(service_category_slider_item_count, 0) as "serviceCategorySliderItemCount",
+      coalesce(service_category_slider_visible_items, 2) as "serviceCategorySliderVisibleItems",
+      coalesce(service_category_slider_show_range, true) as "serviceCategorySliderShowRange",
+      coalesce(service_category_slider_auto_play, false) as "serviceCategorySliderAutoPlay",
+      coalesce(service_category_slider_interval, 4000) as "serviceCategorySliderInterval",
       is_enabled as "isEnabled",
       is_active as "isActive",
       created_at as "createdAt",
@@ -1443,12 +1677,14 @@ export async function createCategoryServiceMaster(input) {
     await ensureCategoryServiceMasterSchema();
     const result = await pool.query(`
       insert into zigo.category_service_masters
-        (service_title, service_subtitle, static_value, show_static_value, icons, service_title_font_size, service_title_font_weight, service_title_color, service_subtitle_font_size, service_subtitle_font_weight, service_subtitle_color, booking_type, show_eta, service_position, service_category_grid_size, is_enabled, is_active, created_by, updated_by)
-      values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
+        (service_title, service_subtitle, show_category_name, show_category_description, static_value, show_static_value, icons, service_title_font_size, service_title_font_weight, service_title_color, service_subtitle_font_size, service_subtitle_font_weight, service_subtitle_color, booking_type, show_eta, service_position, service_category_grid_size, service_category_slider_item_count, service_category_slider_visible_items, service_category_slider_show_range, service_category_slider_auto_play, service_category_slider_interval, is_enabled, is_active, created_by, updated_by)
+      values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $25)
       returning id
     `, [
         String(input.serviceTitle || "").trim(),
         input.serviceSubtitle ?? null,
+        input.showCategoryName !== false,
+        input.showCategoryDescription !== false,
         null,
         false,
         JSON.stringify(normalizeCategoryServiceMasterIcons(input.icons)),
@@ -1462,6 +1698,11 @@ export async function createCategoryServiceMaster(input) {
         Boolean(input.showEta),
         Math.max(0, Math.round(Number(input.servicePosition || 0))),
         normalizeServiceCategoryGridSize(input.serviceCategoryGridSize),
+        Math.max(0, Math.min(50, Math.round(Number(input.serviceCategorySliderItemCount || 0)))),
+        normalizeServiceCategorySliderVisibleItems(input.serviceCategorySliderVisibleItems),
+        input.serviceCategorySliderShowRange !== false,
+        Boolean(input.serviceCategorySliderAutoPlay),
+        Math.max(1500, Math.min(30000, Math.round(Number(input.serviceCategorySliderInterval || 4000)))),
         input.isEnabled !== false,
         input.isActive !== false,
         input.userId
@@ -1474,22 +1715,29 @@ export async function updateCategoryServiceMaster(id, input) {
       update zigo.category_service_masters
       set service_title = $2,
           service_subtitle = $3,
-          static_value = $4,
-          show_static_value = $5,
-          icons = $6::jsonb,
-          service_title_font_size = $7,
-          service_title_font_weight = $8,
-          service_title_color = $9,
-          service_subtitle_font_size = $10,
-          service_subtitle_font_weight = $11,
-          service_subtitle_color = $12,
-          booking_type = $13,
-          show_eta = $14,
-          service_position = $15,
-          service_category_grid_size = $16,
-          is_enabled = $17,
-          is_active = $18,
-          updated_by = $19,
+          show_category_name = $4,
+          show_category_description = $5,
+          static_value = $6,
+          show_static_value = $7,
+          icons = $8::jsonb,
+          service_title_font_size = $9,
+          service_title_font_weight = $10,
+          service_title_color = $11,
+          service_subtitle_font_size = $12,
+          service_subtitle_font_weight = $13,
+          service_subtitle_color = $14,
+          booking_type = $15,
+          show_eta = $16,
+          service_position = $17,
+          service_category_grid_size = $18,
+          service_category_slider_item_count = $19,
+          service_category_slider_visible_items = $20,
+          service_category_slider_show_range = $21,
+          service_category_slider_auto_play = $22,
+          service_category_slider_interval = $23,
+          is_enabled = $24,
+          is_active = $25,
+          updated_by = $26,
           updated_at = now()
       where id = $1 and coalesce(is_deleted, false) = false
       returning id
@@ -1497,6 +1745,8 @@ export async function updateCategoryServiceMaster(id, input) {
         id,
         String(input.serviceTitle || "").trim(),
         input.serviceSubtitle ?? null,
+        input.showCategoryName !== false,
+        input.showCategoryDescription !== false,
         null,
         false,
         JSON.stringify(normalizeCategoryServiceMasterIcons(input.icons)),
@@ -1510,6 +1760,11 @@ export async function updateCategoryServiceMaster(id, input) {
         Boolean(input.showEta),
         Math.max(0, Math.round(Number(input.servicePosition || 0))),
         normalizeServiceCategoryGridSize(input.serviceCategoryGridSize),
+        Math.max(0, Math.min(50, Math.round(Number(input.serviceCategorySliderItemCount || 0)))),
+        normalizeServiceCategorySliderVisibleItems(input.serviceCategorySliderVisibleItems),
+        input.serviceCategorySliderShowRange !== false,
+        Boolean(input.serviceCategorySliderAutoPlay),
+        Math.max(1500, Math.min(30000, Math.round(Number(input.serviceCategorySliderInterval || 4000)))),
         input.isEnabled !== false,
         input.isActive !== false,
         input.userId
@@ -2165,6 +2420,34 @@ export async function getBookingCatalog(filters) {
         c.code as "categoryCode",
         c.description as "categoryDescription",
         c.image_url as "categoryImageUrl",
+         coalesce(c.config->'categorySettings'->'imageUrls', '[]'::jsonb) as "imageUrls",
+         coalesce(c.config->'categorySettings'->>'categoryMediaThumbnailUrl', '') as "categoryMediaThumbnailUrl",
+         coalesce(c.config->'categorySettings'->>'categoryNamePosition', 'inside') as "categoryNamePosition",
+         coalesce(c.config->'categorySettings'->>'categoryNameColor', '#ffffff') as "categoryNameColor",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontSize', '')::int, 20) as "categoryNameFontSize",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontWeight', '')::int, 700) as "categoryNameFontWeight",
+         coalesce(c.config->'categorySettings'->>'categoryNameFontFamily', 'Inter') as "categoryNameFontFamily",
+         coalesce(c.config->'categorySettings'->>'categoryNameAlign', 'left') as "categoryNameAlign",
+         coalesce(c.config->'categorySettings'->>'categoryNameVerticalAlign', 'bottom') as "categoryNameVerticalAlign",
+         coalesce((c.config->'categorySettings'->>'categoryOverlayEnabled')::boolean, true) as "categoryOverlayEnabled",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayOpacity', '')::numeric, 0.45) as "categoryOverlayOpacity",
+         coalesce((c.config->'categorySettings'->>'categoryOverlayGradientEnabled')::boolean, true) as "categoryOverlayGradientEnabled",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayGradientOpacity', '')::numeric, 0.35) as "categoryOverlayGradientOpacity",
+         coalesce(c.config->'categorySettings'->>'categoryOverlayColor', '#111936') as "categoryOverlayColor",
+         coalesce(c.config->'categorySettings'->>'categoryOverlayFit', '50') as "categoryOverlayFit",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayWidth', '')::numeric, 100) as "categoryOverlayWidth",
+         coalesce(c.config->'categorySettings'->>'categoryOverlayPosition', 'auto') as "categoryOverlayPosition",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryImageHeight', '')::int, 0) as "categoryImageHeight",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryImageWidth', '')::int, 0) as "categoryImageWidth",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1) as "categoryCardSpaceUtilize",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridWidth', '')::int, coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1)) as "categoryCardGridWidth",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridHeight', '')::int, 1) as "categoryCardGridHeight",
+         coalesce(c.config->'categorySettings'->>'categoryMediaFit', 'cover') as "categoryMediaFit",
+         coalesce(c.config->'categorySettings'->>'categoryMediaTransition', 'fade') as "categoryMediaTransition",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryMediaTransitionDuration', '')::int, 500) as "categoryMediaTransitionDuration",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryMediaDisplayDuration', '')::int, 3000) as "categoryMediaDisplayDuration",
+          coalesce(c.config->'categorySettings'->>'categoryMediaSliderMode', 'queue') as "categoryMediaSliderMode",
+          coalesce(c.config->'categorySettings'->>'categoryMediaRepeat', 'auto') as "categoryMediaRepeat",
         coalesce(c.service_id, parent.service_id) as "serviceId",
         s.name as "serviceName",
         coalesce(m.is_visible, true) as "isVisible",
@@ -2361,6 +2644,11 @@ export async function getBookingCatalog(filters) {
         $1::int as "instantEtaMinutes",
         service_position as "servicePosition",
         coalesce(service_category_grid_size, '3x3') as "serviceCategoryGridSize",
+          coalesce(service_category_slider_item_count, 0) as "serviceCategorySliderItemCount",
+          coalesce(service_category_slider_visible_items, 2) as "serviceCategorySliderVisibleItems",
+          coalesce(service_category_slider_show_range, true) as "serviceCategorySliderShowRange",
+          coalesce(service_category_slider_auto_play, false) as "serviceCategorySliderAutoPlay",
+          coalesce(service_category_slider_interval, 4000) as "serviceCategorySliderInterval",
         is_enabled as "isEnabled",
         is_active as "isActive"
       from zigo.category_service_masters
@@ -2373,22 +2661,49 @@ export async function getBookingCatalog(filters) {
       select
         c.id,
         nullif(c.config->'categorySettings'->>'serviceMasterId', '') as "serviceMasterId",
-        csm.service_title as "serviceMasterName",
-        c.code,
+         csm.service_title as "serviceMasterName",
+         c.code,
         c.name,
         c.description,
         c.image_url as "imageUrl",
         coalesce(c.config->'categorySettings'->'imageUrls', '[]'::jsonb) as "imageUrls",
-        c.priority,
+        coalesce(c.config->'categorySettings'->>'categoryMediaThumbnailUrl', '') as "categoryMediaThumbnailUrl",
+         coalesce(c.config->'categorySettings'->>'categoryNamePosition', 'inside') as "categoryNamePosition",
+         coalesce(c.config->'categorySettings'->>'categoryNameColor', '#ffffff') as "categoryNameColor",
+        coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontSize', '')::int, 20) as "categoryNameFontSize",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontWeight', '')::int, 700) as "categoryNameFontWeight",
+         coalesce(c.config->'categorySettings'->>'categoryNameFontFamily', 'Inter') as "categoryNameFontFamily",
+         coalesce(c.config->'categorySettings'->>'categoryNameAlign', 'left') as "categoryNameAlign",
+         coalesce(c.config->'categorySettings'->>'categoryNameVerticalAlign', 'bottom') as "categoryNameVerticalAlign",
+         coalesce((c.config->'categorySettings'->>'categoryOverlayEnabled')::boolean, true) as "categoryOverlayEnabled",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayOpacity', '')::numeric, 0.45) as "categoryOverlayOpacity",
+         coalesce((c.config->'categorySettings'->>'categoryOverlayGradientEnabled')::boolean, true) as "categoryOverlayGradientEnabled",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayGradientOpacity', '')::numeric, 0.35) as "categoryOverlayGradientOpacity",
+         coalesce(c.config->'categorySettings'->>'categoryOverlayColor', '#111936') as "categoryOverlayColor",
+         coalesce(c.config->'categorySettings'->>'categoryOverlayFit', '50') as "categoryOverlayFit",
+         coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayWidth', '')::numeric, 100) as "categoryOverlayWidth",
+         coalesce(c.config->'categorySettings'->>'categoryOverlayPosition', 'auto') as "categoryOverlayPosition",
+         c.priority,
         c.sort_order as "sortOrder",
         c.is_recommended as "isRecommended",
         c.config->'categorySettings'->>'note' as "note",
         coalesce(c.config->'categorySettings'->>'locationMode', 'current') as "locationMode",
         coalesce(nullif(c.config->'categorySettings'->>'maxLocationsLimit', '')::int, 1) as "maxLocationsLimit",
         coalesce((c.config->'categorySettings'->>'showInHomePage')::boolean, true) as "showInHomePage",
+        coalesce((c.config->'categorySettings'->>'showSubCategoryName')::boolean, true) as "showSubCategoryName",
+        coalesce((c.config->'categorySettings'->>'showSubCategoryDescription')::boolean, true) as "showSubCategoryDescription",
         coalesce(c.config->'categorySettings'->>'homeDisplayMode', case when coalesce((c.config->'categorySettings'->>'showInHomePage')::boolean, true) then 'category' else 'categoryPrice' end) as "homeDisplayMode",
         coalesce(nullif(c.config->'categorySettings'->>'categoryImageHeight', '')::int, 0) as "categoryImageHeight",
         coalesce(nullif(c.config->'categorySettings'->>'categoryImageWidth', '')::int, 0) as "categoryImageWidth",
+        coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1) as "categoryCardSpaceUtilize",
+        coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridWidth', '')::int, coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1)) as "categoryCardGridWidth",
+        coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridHeight', '')::int, 1) as "categoryCardGridHeight",
+        coalesce(c.config->'categorySettings'->>'categoryMediaFit', 'cover') as "categoryMediaFit",
+        coalesce(c.config->'categorySettings'->>'categoryMediaTransition', 'fade') as "categoryMediaTransition",
+        coalesce(nullif(c.config->'categorySettings'->>'categoryMediaTransitionDuration', '')::int, 500) as "categoryMediaTransitionDuration",
+        coalesce(nullif(c.config->'categorySettings'->>'categoryMediaDisplayDuration', '')::int, 3000) as "categoryMediaDisplayDuration",
+        coalesce(c.config->'categorySettings'->>'categoryMediaSliderMode', 'queue') as "categoryMediaSliderMode",
+        coalesce(c.config->'categorySettings'->>'categoryMediaRepeat', 'auto') as "categoryMediaRepeat",
         coalesce(c.config->'categorySettings'->>'priceDisplayMode', 'row') as "priceDisplayMode",
         coalesce(nullif(c.config->'categorySettings'->>'priceGridRows', '')::int, 3) as "priceGridRows",
         coalesce(nullif(c.config->'categorySettings'->>'priceGridColumns', '')::int, 3) as "priceGridColumns",
@@ -2401,10 +2716,37 @@ export async function getBookingCatalog(filters) {
         c.config->'categorySettings'->>'expandDescription' as "expandDescription",
         coalesce(c.config->'categoryGuidance'->>'taskListTitle', 'Tasks related to category') as "taskListTitle",
         coalesce(c.config->'categoryGuidance'->'taskList', '[]'::jsonb) as "taskList",
+        coalesce(c.config->'categoryGuidance'->>'taskIcon', '&#9733;') as "taskIcon",
+        coalesce((c.config->'categoryGuidance'->>'showTaskList')::boolean, true) as "showTaskList",
         coalesce(c.config->'categoryGuidance'->>'canDoTitle', 'What Assistant can do') as "canDoTitle",
         coalesce(c.config->'categoryGuidance'->'canDoList', '[]'::jsonb) as "canDoList",
+        coalesce(c.config->'categoryGuidance'->>'canDoIcon', '&#10003;') as "canDoIcon",
+        coalesce((c.config->'categoryGuidance'->>'showCanDoList')::boolean, true) as "showCanDoList",
         coalesce(c.config->'categoryGuidance'->>'cantDoTitle', 'What Assistant can''t do') as "cantDoTitle",
         coalesce(c.config->'categoryGuidance'->'cantDoList', '[]'::jsonb) as "cantDoList",
+        coalesce(c.config->'categoryGuidance'->>'cantDoIcon', '&#10005;') as "cantDoIcon",
+        coalesce((c.config->'categoryGuidance'->>'showCantDoList')::boolean, true) as "showCantDoList",
+        coalesce(c.config->'categoryGuidance'->>'categoryGuidanceDisplayMode', 'list') as "categoryGuidanceDisplayMode",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceGridColumns', '')::int, 3) as "categoryGuidanceGridColumns",
+        coalesce((c.config->'categoryGuidance'->>'categoryGuidanceShowImage')::boolean, false) as "categoryGuidanceShowImage",
+        coalesce(c.config->'categoryGuidance'->>'categoryGuidanceFontFamily', 'Inter') as "categoryGuidanceFontFamily",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceFontSize', '')::int, 10) as "categoryGuidanceFontSize",
+        coalesce(c.config->'categoryGuidance'->>'categoryGuidanceTextColor', '#2b2f38') as "categoryGuidanceTextColor",
+        coalesce(c.config->'categoryGuidance'->>'categoryGuidanceTitleFontFamily', 'Inter') as "categoryGuidanceTitleFontFamily",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceTitleFontSize', '')::int, 12) as "categoryGuidanceTitleFontSize",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceTitleFontWeight', '')::int, 700) as "categoryGuidanceTitleFontWeight",
+        coalesce(c.config->'categoryGuidance'->>'categoryGuidanceTitleTextColor', '#2b2f38') as "categoryGuidanceTitleTextColor",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceTitleIconSize', '')::int, 24) as "categoryGuidanceTitleIconSize",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowImageSize', '')::int, 44) as "categoryGuidanceRowImageSize",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowRadius', '')::int, 8) as "categoryGuidanceRowRadius",
+        coalesce(c.config->'categoryGuidance'->>'categoryGuidanceRowTextPosition', 'outside') as "categoryGuidanceRowTextPosition",
+        coalesce(c.config->'categoryGuidance'->>'categoryGuidanceRowTextAlign', 'left') as "categoryGuidanceRowTextAlign",
+        coalesce((c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayEnabled')::boolean, true) as "categoryGuidanceRowOverlayEnabled",
+        coalesce(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayColor', '#111936') as "categoryGuidanceRowOverlayColor",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayHeight', '')::int, 100) as "categoryGuidanceRowOverlayHeight",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayOpacity', '')::numeric, 0.45) as "categoryGuidanceRowOverlayOpacity",
+        coalesce((c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayGradientEnabled')::boolean, true) as "categoryGuidanceRowOverlayGradientEnabled",
+        coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayGradientOpacity', '')::numeric, 0.35) as "categoryGuidanceRowOverlayGradientOpacity",
         c.is_active as "isActive",
         c.is_enabled as "isEnabled"
       from zigo.categories c
@@ -3211,6 +3553,7 @@ export async function listBookingEngineRules(filters = {}) {
         ber.schedule_wrap_up_minutes as "scheduleWrapUpMinutes",
         ber.schedule_travel_minutes as "scheduleTravelMinutes",
         ber.assistant_assignment_mode as "assistantAssignmentMode",
+        ber.metadata->'serviceCalendar'->>'bookingRestrictionMessage' as "bookingRestrictionMessage",
         ber.note,
         ber.image_url as "imageUrl",
         ber.metadata,
@@ -3646,6 +3989,7 @@ async function validateBookingEngineRule(input, excludeId) {
     if (scope.scopeType === "category")
         await assertUsableCategory(scope.categoryId);
     const timings = buildBookingEngineTiming(input);
+    normalizeBookingEngineBlockTodayMinutes(input.blockTodayMinutes);
     if (timings.serviceControlMode === "auto") {
         if (!timings.autoStartTime || !timings.autoEndTime)
             throw new HttpError(400, "Auto service mode requires Start and End time.");
@@ -3716,6 +4060,14 @@ function bookingEngineTimeToMinutes(value) {
         return null;
     return hours * 60 + minutes;
 }
+function normalizeBookingEngineBlockTodayMinutes(value) {
+    const minutes = Math.round(Number(value ?? 0));
+    const supported = new Set([0, 30, 60, 90, 120, 150, 180, 210, 240]);
+    if (!supported.has(minutes)) {
+        throw new HttpError(400, "Today's block duration must be 30 minutes, 1, 1.5, 2, 2.5, 3, 3.5, or 4 hours.");
+    }
+    return minutes;
+}
 function buildBookingEngineTiming(input) {
     const boundedMinutes = (value) => Math.max(0, Math.min(1440, Math.round(Number(value ?? 0))));
     const serviceControlMode = input.serviceControlMode === "auto" ? "auto" : "manual";
@@ -3738,6 +4090,11 @@ function buildBookingEngineTiming(input) {
     };
 }
 function buildBookingEngineMetadata(input, timings) {
+    const blockTodayMinutes = normalizeBookingEngineBlockTodayMinutes(input.blockTodayMinutes);
+    const blockTodayStartedAt = blockTodayMinutes > 0 ? new Date() : null;
+    const blockTodayUntil = blockTodayStartedAt
+        ? new Date(blockTodayStartedAt.getTime() + blockTodayMinutes * 60_000)
+        : null;
     return {
         serviceCalendar: {
             mode: timings.serviceControlMode,
@@ -3745,7 +4102,10 @@ function buildBookingEngineMetadata(input, timings) {
             autoStartAt: timings.autoStartAt,
             autoEndAt: timings.autoEndAt,
             autoStartTime: timings.autoStartTime,
-            autoEndTime: timings.autoEndTime
+            autoEndTime: timings.autoEndTime,
+            blockTodayMinutes,
+            blockTodayStartedAt: blockTodayStartedAt?.toISOString() ?? null,
+            blockTodayUntil: blockTodayUntil?.toISOString() ?? null
         },
         instant: {
             etaMinutes: timings.instantEtaMinutes,
@@ -3764,6 +4124,7 @@ function buildBookingEngineMetadata(input, timings) {
             manualNote: "Booking confirmed and assistant assigned manually by admin.",
             autoNote: "Booking confirmed and assistant assigned as per availability."
         },
+        bookingRestrictionMessage: input.bookingRestrictionMessage ?? "",
         note: input.note ?? "",
         imageUrl: input.imageUrl ?? ""
     };
@@ -3798,6 +4159,7 @@ function bookingEngineRuleSelectColumns(alias = "ber") {
     ${alias}.schedule_wrap_up_minutes as "scheduleWrapUpMinutes",
     ${alias}.schedule_travel_minutes as "scheduleTravelMinutes",
     ${alias}.assistant_assignment_mode as "assistantAssignmentMode",
+    ${alias}.metadata->'serviceCalendar'->>'bookingRestrictionMessage' as "bookingRestrictionMessage",
     ${alias}.note,
     ${alias}.image_url as "imageUrl",
     ${alias}.metadata,

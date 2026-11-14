@@ -1,5 +1,6 @@
 (() => {
   const MAX_FIX_AGE_MS = 30000;
+  const STALE_FIX_AGE_MS = 15000;
   const MAX_FUTURE_SKEW_MS = 10000;
   const MAX_ACCURACY_METERS = 500;
   const PUBLISH_INTERVAL_MS = 10000;
@@ -62,6 +63,7 @@
     let permissionListener = null;
     let wakeLock = null;
     let browserFallbackActive = false;
+    let parentMessageBound = false;
     const waiters = new Set();
     const options = { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 };
 
@@ -94,6 +96,88 @@
     };
 
     const nativeBridgeAvailable = () => typeof window.ZigoNativeLocation?.start === "function";
+    const commonNativeBridges = () => [window.ZigoAndroid, window.Android, window.ZigoNative].filter(Boolean);
+    const commonNativeBridgeAvailable = () => commonNativeBridges().some((bridge) =>
+      typeof bridge.postMessage === "function"
+      || typeof bridge.getCurrentLocation === "function"
+      || typeof bridge.requestCurrentLocation === "function"
+      || typeof bridge.requestLocationPermission === "function"
+      || typeof bridge.getLocation === "function"
+    ) || typeof window.ReactNativeWebView?.postMessage === "function";
+    const parentBridgeAvailable = () => Boolean(window.parent && window.parent !== window && typeof window.parent.postMessage === "function");
+    const frameTargetOrigin = () => {
+      try {
+        const origin = new URL(document.referrer || "", window.location.href).origin;
+        return origin && origin !== "null" ? origin : "*";
+      } catch {
+        return "*";
+      }
+    };
+    const sendParentMessage = (type, payload = {}) => {
+      if (!parentBridgeAvailable()) return false;
+      try {
+        window.parent.postMessage({ type, source: "zigo-portal", actor: "assistant", ...payload }, frameTargetOrigin());
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const parseNativeResult = (value) => {
+      if (!value) return null;
+      if (typeof value === "string") {
+        try { return JSON.parse(value); } catch { return null; }
+      }
+      return typeof value === "object" ? value : null;
+    };
+    const nativePositionPayload = (value) => {
+      const parsed = parseNativeResult(value);
+      if (!parsed) return null;
+      const data = parsed.data && typeof parsed.data === "object" ? { ...parsed.data, ...parsed } : parsed;
+      const coords = data.coords || data.location?.coords || data.location || data;
+      const latitude = Number(coords?.latitude ?? coords?.lat);
+      const longitude = Number(coords?.longitude ?? coords?.lng ?? coords?.lon);
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+      return {
+        ...data,
+        timestamp: data.timestamp ?? data.capturedAt ?? Date.now(),
+        coords: { ...coords, latitude, longitude }
+      };
+    };
+    const sendCommonNativeMessage = (type, payload = {}) => {
+      const message = { type, source: "zigo-portal", actor: "assistant", ...payload };
+      const json = JSON.stringify(message);
+      let sent = false;
+      commonNativeBridges().forEach((bridge) => {
+        try {
+          const method = type === "zigo.location.getCurrent"
+            ? (bridge.getCurrentLocation || bridge.requestCurrentLocation || bridge.requestLocationPermission || bridge.getLocation || bridge.postMessage)
+            : type === "zigo.location.start"
+              ? (bridge.startLocationTracking || bridge.startLocation || bridge.requestLocationPermission || bridge.postMessage)
+              : (bridge.stopLocationTracking || bridge.stopLocation || bridge.postMessage);
+          if (typeof method !== "function") return;
+          const result = method.call(bridge, json);
+          const position = nativePositionPayload(result);
+          if (position) accept(position, "native");
+          sent = true;
+        } catch {
+          // Try the next available WebView bridge.
+        }
+      });
+      try {
+        if (window.ReactNativeWebView?.postMessage) {
+          window.ReactNativeWebView.postMessage(json);
+          sent = true;
+        }
+      } catch {
+        // Optional bridge.
+      }
+      return sent;
+    };
+    const sendLocationBridgeMessage = (type, payload = {}) => {
+      if (commonNativeBridgeAvailable() && sendCommonNativeMessage(type, payload)) return true;
+      return sendParentMessage(type, payload);
+    };
+    const externalBridgeAvailable = () => nativeBridgeAvailable() || commonNativeBridgeAvailable() || parentBridgeAvailable();
 
     const clearNativeFallback = () => {
       if (nativeFallbackTimer) clearTimeout(nativeFallbackTimer);
@@ -119,8 +203,47 @@
       return true;
     };
 
+    const handleParentMessage = (event) => {
+      if (!running) return;
+      const fromParent = parentBridgeAvailable() && event.source === window.parent;
+      const fromNativeWindow = commonNativeBridgeAvailable() && event.source === window;
+      if (!fromParent && !fromNativeWindow) return;
+      const data = typeof event.data === "string" ? (() => {
+        try { return JSON.parse(event.data); } catch { return null; }
+      })() : event.data;
+      if (!data || typeof data !== "object") return;
+      const type = String(data.type || "");
+      if (!["zigo.location.result", "zigo.location.update", "zigo.location.position", "zigo.location.error"].includes(type)) return;
+      const payload = data.position || data.location || data.data || data;
+      const messageSessionId = String(data.sessionId || payload?.sessionId || data.requestId || payload?.requestId || "");
+      if (!messageSessionId || messageSessionId !== sessionId) return;
+      if (type === "zigo.location.error") {
+        failGps(data.error || payload || data, "native");
+        return;
+      }
+      accept(nativePositionPayload(payload), "native");
+    };
+
+    const bindParentBridge = () => {
+      if ((!parentBridgeAvailable() && !commonNativeBridgeAvailable()) || parentMessageBound) return;
+      window.addEventListener("message", handleParentMessage);
+      parentMessageBound = true;
+    };
+
+    const unbindParentBridge = () => {
+      if (!parentMessageBound) return;
+      window.removeEventListener("message", handleParentMessage);
+      parentMessageBound = false;
+    };
+
+    const requestExternalLocation = () => sendLocationBridgeMessage("zigo.location.getCurrent", {
+      requestId: sessionId,
+      sessionId,
+      highAccuracy: true
+    });
+
     const scheduleGpsRetry = () => {
-      if (!running || gpsRetryTimer || (nativeBridgeAvailable() && !browserFallbackActive)) return;
+      if (!running || gpsRetryTimer || (externalBridgeAvailable() && !browserFallbackActive)) return;
       const delay = Math.min(30000, 2000 * (2 ** Math.min(gpsRetryAttempt++, 4)));
       gpsRetryTimer = setTimeout(() => {
         gpsRetryTimer = null;
@@ -141,7 +264,7 @@
 
     const scheduleNativeFallback = () => {
       const latestAge = latest ? Date.now() - Date.parse(latest.capturedAt) : Infinity;
-      if (!running || browserFallbackActive || latestAge <= 15000 || nativeFallbackTimer || !nativeBridgeAvailable() || !navigator.geolocation) return;
+      if (!running || browserFallbackActive || latestAge <= 15000 || nativeFallbackTimer || !externalBridgeAvailable() || !navigator.geolocation) return;
       nativeFallbackTimer = setTimeout(() => {
         nativeFallbackTimer = null;
         enableBrowserFallback();
@@ -179,8 +302,19 @@
       }, delay);
     };
 
+    const handleNetworkOffline = () => {
+      if (!running) return;
+      setStatus("connection_lost");
+      scheduleUploadRetry();
+    };
+
     async function flush(force = false) {
       if (!running || publishBusy || !latest || !shouldPublish()) return;
+      if (navigator.onLine === false) {
+        setStatus("connection_lost");
+        scheduleUploadRetry();
+        return;
+      }
       const now = Date.now();
       if (now - Date.parse(latest.capturedAt) > MAX_FIX_AGE_MS) {
         setStatus("stale");
@@ -213,7 +347,7 @@
     }
 
     function ensureBrowserWatch() {
-      if (!running || watchId != null || (nativeBridgeAvailable() && !browserFallbackActive) || !navigator.geolocation) return;
+      if (!running || watchId != null || (externalBridgeAvailable() && !browserFallbackActive) || !navigator.geolocation) return;
       const currentGeneration = generation;
       const currentWatchToken = ++watchToken;
       try {
@@ -228,7 +362,10 @@
     }
 
     function read(force = false) {
-      if (!running || (nativeBridgeAvailable() && !browserFallbackActive)) return;
+      if (!running || (externalBridgeAvailable() && !browserFallbackActive)) {
+        if (running && !browserFallbackActive) requestExternalLocation();
+        return;
+      }
       if (!navigator.geolocation) {
         setStatus("location_unavailable");
         return;
@@ -257,6 +394,10 @@
       if (!running) return;
       if (document.visibilityState === "hidden") {
         releaseWakeLock();
+        return;
+      }
+      if (navigator.onLine === false) {
+        setStatus("connection_lost");
         return;
       }
       void acquireWakeLock();
@@ -316,6 +457,7 @@
       browserFallbackActive = false;
       clearNativeFallback();
       setStatus("acquiring");
+      bindParentBridge();
       if (nativeBridgeAvailable()) {
         try {
           window.ZigoNativeLocation.start(JSON.stringify({ sessionId, highAccuracy: true, minimumIntervalMs: PUBLISH_INTERVAL_MS }));
@@ -323,6 +465,10 @@
         } catch {
           enableBrowserFallback();
         }
+      } else if (externalBridgeAvailable()) {
+        sendLocationBridgeMessage("zigo.location.start", { sessionId, highAccuracy: true, minimumIntervalMs: PUBLISH_INTERVAL_MS });
+        requestExternalLocation();
+        scheduleNativeFallback();
       } else if (navigator.geolocation) {
         ensureBrowserWatch();
       } else {
@@ -332,14 +478,15 @@
       void acquireWakeLock();
       tickTimer = setInterval(() => {
         const age = latest ? Date.now() - Date.parse(latest.capturedAt) : Infinity;
-        if (age > 15000) {
+        if (age > STALE_FIX_AGE_MS) {
           scheduleNativeFallback();
           read();
         }
-        if (age > MAX_FIX_AGE_MS) setStatus("stale");
+        if (age > STALE_FIX_AGE_MS) setStatus("stale");
         void flush();
       }, TRACKER_TICK_MS);
       window.addEventListener("online", resume);
+      window.addEventListener("offline", handleNetworkOffline);
       document.addEventListener("visibilitychange", resume);
     }
 
@@ -355,6 +502,8 @@
       if (uploadRetryTimer) clearTimeout(uploadRetryTimer);
       if (gpsRetryTimer) clearTimeout(gpsRetryTimer);
       clearNativeFallback();
+      if (sessionId) sendLocationBridgeMessage("zigo.location.stop", { sessionId });
+      unbindParentBridge();
       try {
         window.ZigoNativeLocation?.stop?.(JSON.stringify({ sessionId }));
       } catch {
@@ -370,12 +519,13 @@
       unbindPermissionChanges();
       releaseWakeLock();
       window.removeEventListener("online", resume);
+      window.removeEventListener("offline", handleNetworkOffline);
       document.removeEventListener("visibilitychange", resume);
     }
 
-    function freshPosition() {
+    function freshPosition({ force = false } = {}) {
       start();
-      if (latest && Date.now() - Date.parse(latest.capturedAt) < 10000) return Promise.resolve(latest);
+      if (!force && latest && Date.now() - Date.parse(latest.capturedAt) < 10000) return Promise.resolve(latest);
       return new Promise((resolve, reject) => {
         const waiter = { resolve, reject, timeout: null };
         waiter.timeout = setTimeout(() => {

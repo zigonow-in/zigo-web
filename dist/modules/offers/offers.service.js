@@ -1,4 +1,4 @@
-import { createOffer, getOffer, listAssistantReferralOffers, listEligibleOffersForCustomer, listOfferRedemptions, listOffers, setOfferStatus, updateOffer, validateCustomerOfferCode, validateCustomerReferralCode, validateOfferById } from "./offers.repository.js";
+import { createOffer, getOffer, listAssistantReferralOffers, listEligibleOffersForCustomer, listOfferRedemptionReport, listOfferRedemptions, listOffers, setOfferStatus, updateOffer, validateCustomerOfferCode, validateCustomerReferralCode, validateOfferById } from "./offers.repository.js";
 export class OfferMasterService {
     list(filters) {
         return listOffers(filters);
@@ -53,6 +53,9 @@ export class RedemptionService {
 export class OfferReportingService {
     redemptions(offerId) {
         return listOfferRedemptions(offerId);
+    }
+    redemptionReport(filters) {
+        return listOfferRedemptionReport(filters);
     }
 }
 export class AssistantReferralOfferService {

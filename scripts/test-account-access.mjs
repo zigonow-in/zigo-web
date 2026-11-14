@@ -20,12 +20,17 @@ function user(){return {id,userId:id,customerId:id,assistantId:id,deletedAt:null
 const query=async(sql,args=[])=>{
   const text=sql.replace(/\s+/g,' ').trim();queries.push({text,args});
   if(text.startsWith('select value, updated_at')) return {rows:[]};
+  if(text.startsWith('select pg_advisory_xact_lock')) return {rows:[]};
   if(text.startsWith('select u.id as "userId"') && text.includes('u.deleted_at as "deletedAt"')) return {rows:[{...user(),deletedAt:deleted?new Date():null}]};
   if(text.startsWith('select u.id as "userId"')) return {rows:deleted||!roleActive?[]:[user()]};
   if(text.startsWith('select lower(r.code)')) return {rows:roleActive?[{code:role}]:[]};
   if(text.startsWith('select r.id, r.code, r.name')) return {rows:roleActive?[{id,code:role,name:role}]:[]};
+  if(text.startsWith('select id from zigo.roles')) return {rows:role==='customer'?[{id}]:[]};
   if(text.startsWith('select code from zigo.roles')) return {rows:roleActive?[{code:role}]:[]};
   if(text.startsWith('select u.metadata from zigo.users')) return {rows:deleted||!roleActive||args[1]!==role?[]:[{metadata}]};
+  if(text.startsWith('insert into zigo.users')) { deleted=false; metadata={accountStatus:'inactive',otpVerificationStatus:'pending',isLoginWithOtp:true,isLoginWithPassword:false,createdFrom:'customer_portal'}; return {rows:[{id}],rowCount:1}; }
+  if(text.startsWith('insert into zigo.customers')) return {rows:[{id}],rowCount:1};
+  if(text.startsWith('update zigo.users') && text.includes('otpChallengeSentAt')) { metadata={...metadata,accountStatus:'inactive',otpVerificationStatus:'pending'}; return {rows:[{id}],rowCount:1}; }
   if(text.includes('from zigo.users') && text.startsWith('select')) return {rows:deleted?[]:[user()]};
   if(text.startsWith('update zigo.users') && text.includes('otpVerifiedAt')) {
     assert.ok(text.includes("coalesce(metadata, '{}'::jsonb) = $7::jsonb"));
@@ -96,8 +101,9 @@ try {
     deleted=true;await assert.rejects(()=>assertActivePortalSession(id,role),rejection(401));deleted=false;
   }
   role='customer';deleted=true;metadata={accountStatus:'deleted'};queries=[];
-  await assert.rejects(()=>requestPortalCode({actor:'customer',phone:'9876543210'}),rejection(403));
-  assert.equal(queries.some(item=>item.text.startsWith('insert into zigo.users')),false);deleted=false;
+  const reRegistered=await requestPortalCode({actor:'customer',phone:'9876543210'});
+  assert.equal(reRegistered.userId,id);
+  assert.equal(queries.some(item=>item.text.startsWith('insert into zigo.users')),true);deleted=false;
   for(role of ['admin','super_admin','manager','staff']) {
     metadata={accountStatus:'active'};
     const request=(path,body,headers={})=>fetch(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...headers},body:body?JSON.stringify(body):undefined});
@@ -114,5 +120,5 @@ try {
     assert.equal((await request('/auth/refresh',{refreshToken:refresh})).status,401);
     assert.equal((await request('/private',null,{Authorization:`Bearer ${access}`})).status,401);deleted=false;
   }
-  console.log('Account access passed: all-role OTP blocking, active/onboarding login, concurrent deactivation guard, admin login/refresh/session rejection, portal session revocation and deleted-customer re-registration prevention. Mock database; no SMS sent.');
+  console.log('Account access passed: all-role OTP blocking, active/onboarding login, deactivation guard, admin login/refresh/session revocation and deleted-customer re-registration. Mock database; no SMS sent.');
 } finally {pool.query=originalQuery;pool.connect=originalConnect;await new Promise(resolve=>server.close(resolve));await pool.end();}

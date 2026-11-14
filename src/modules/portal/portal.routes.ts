@@ -64,6 +64,10 @@ import {
   listCustomerPortalAssistants,
   listCustomerPortalBookings,
   listCustomerPortalWalletTransactions,
+  listCustomerPortalOffers,
+  validateCustomerPortalOffer,
+  createCustomerPortalOfferPurchaseOrder,
+  completeCustomerPortalOfferPurchase,
   loginAssistantPortalWithPassword,
   markPortalBookingTaskUpdatesRead,
   requestPortalCode,
@@ -158,18 +162,19 @@ const customerSupportListSchema = z.object({
   pageSize: z.coerce.number().int().min(5).max(50).default(20),
   bookingId: z.string().uuid().optional()
 });
-const customerSupportTicketSchema = z.object({
-  subject: z.string().trim().min(3).max(200),
-  category: z.enum(["general", "booking", "payment", "assistant", "location", "account"]).default("general"),
-  message: z.string().trim().max(4000).default(""),
-  bookingId: z.string().uuid().nullable().optional()
-});
 const customerSupportAttachmentSchema = z.object({
   url: z.string().trim().min(1).max(1000),
   name: z.string().trim().max(255).optional(),
   type: z.string().trim().max(160).optional(),
   size: z.coerce.number().int().min(0).max(25 * 1024 * 1024).optional()
 });
+const customerSupportTicketSchema = z.object({
+  subject: z.string().trim().min(3).max(200),
+  category: z.enum(["general", "booking", "payment", "assistant", "location", "account"]).default("general"),
+  message: z.string().trim().max(4000).default(""),
+  attachments: z.array(customerSupportAttachmentSchema).max(8).default([]),
+  bookingId: z.string().uuid().nullable().optional()
+}).refine((value) => Boolean(value.message || value.attachments.length), "Enter a message or attach a file.");
 const customerSupportMessageSchema = z.object({
   message: z.string().trim().max(4000).default(""),
   attachments: z.array(customerSupportAttachmentSchema).max(8).default([])
@@ -233,6 +238,20 @@ const bookingBodySchema = z.object({
   durationMinutes: z.coerce.number().int().min(1).max(1440).default(30),
   metadata: z.record(z.unknown()).default({})
 });
+const customerOffersQuerySchema = z.object({
+  categoryId: z.string().uuid().optional(),
+  durationId: z.string().uuid().optional(),
+  serviceMasterId: z.string().uuid().optional(),
+  serviceId: z.string().uuid().optional(),
+  clusterId: z.string().uuid().optional(),
+  paymentModeId: z.string().uuid().optional(),
+  bookingType: z.enum(["instant", "schedule"]).optional(),
+  paymentModeCode: z.string().trim().max(80).optional()
+});
+const customerOfferCodeBodySchema = customerOffersQuerySchema.extend({
+  code: z.string().trim().min(2).max(100)
+});
+const customerOfferPurchaseParamsSchema = z.object({ offerId: z.string().uuid() });
 const razorpayOrderBodySchema = z.object({
   amountPaise: z.coerce.number().int().min(100),
   currency: z.string().trim().length(3).default("INR"),
@@ -285,7 +304,7 @@ const customerLiveBookingStopBodySchema = z.object({
 const customerBookingTipBodySchema = z.object({
   amountPaise: z.coerce.number().int().min(0).max(100000)
 }).refine((value) => value.amountPaise === 0 || value.amountPaise >= 2000, {
-  message: "Tip must be zero or at least ₹20."
+  message: "Tip must be zero or at least \u20B920."
 });
 const customerCartBodySchema = z.object({
   cartItems: z.array(z.record(z.unknown())).default([]),
@@ -819,7 +838,7 @@ portalRouter.post("/customer/support/tickets", requirePortalAuth("customer"), as
       await emitBookingRealtimeEvent({
         type: result.created ? "support.ticket.created" : "support.message.created",
         message: result.created ? "New customer support ticket created." : "Customer continued an existing support ticket.",
-        payload: { ticketId: result.ticket.id, customerUserId: req.portalAuth!.userId }
+        payload: { ticketId: result.ticket.id, customerUserId: req.portalAuth!.userId, actor: "customer", autoReplied: result.autoReplyApplied === true }
       });
     }
     res.status(result.created ? 201 : 200).json({ data: result });
@@ -840,7 +859,7 @@ portalRouter.post("/customer/support/tickets/:ticketId/messages", requirePortalA
     await emitBookingRealtimeEvent({
       type: "support.message.created",
       message: "Customer replied to a support ticket.",
-      payload: { ticketId, customerUserId: req.portalAuth!.userId, actor: "customer" }
+      payload: { ticketId, customerUserId: req.portalAuth!.userId, actor: "customer", autoReplied: result.autoReplyApplied === true }
     });
     res.status(201).json({ data: result });
   } catch (error) { next(error); }
@@ -905,6 +924,27 @@ portalRouter.get("/customer/catalog", requirePortalAuth("customer"), async (req,
   } catch (error) {
     next(error);
   }
+});
+
+portalRouter.get("/customer/offers", requirePortalAuth("customer"), async (req, res, next) => {
+  try {
+    res.json({ data: await listCustomerPortalOffers(req.portalAuth!.userId, customerOffersQuerySchema.parse(req.query)) });
+  } catch (error) { next(error); }
+});
+
+portalRouter.post("/customer/offers/validate", requirePortalAuth("customer"), async (req, res, next) => {
+  try {
+    const body = customerOfferCodeBodySchema.parse(req.body);
+    const { code, ...filters } = body;
+    res.json({ data: await validateCustomerPortalOffer(req.portalAuth!.userId, code, filters) });
+  } catch (error) { next(error); }
+});
+
+portalRouter.post("/customer/offers/:offerId/purchase-order", requirePortalAuth("customer"), async (req, res, next) => {
+  try {
+    const { offerId } = customerOfferPurchaseParamsSchema.parse(req.params);
+    res.status(201).json({ data: await createCustomerPortalOfferPurchaseOrder(req.portalAuth!.userId, offerId) });
+  } catch (error) { next(error); }
 });
 
 portalRouter.post("/customer/ai/identify-services", requirePortalAuth("customer"), async (req, res, next) => {
@@ -1092,7 +1132,11 @@ portalRouter.post("/customer/payments/razorpay/orders", requirePortalAuth("custo
 portalRouter.post("/customer/payments/razorpay/verify", requirePortalAuth("customer"), async (req, res, next) => {
   try {
     const body = razorpayVerifyBodySchema.parse(req.body);
-    res.json({ data: await verifyAndSaveRazorpayPayment({ ...body, customerUserId: req.portalAuth!.userId }) });
+    const payment = await verifyAndSaveRazorpayPayment({ ...body, customerUserId: req.portalAuth!.userId });
+    const packageEntitlement = payment.verified
+      ? await completeCustomerPortalOfferPurchase(req.portalAuth!.userId, body.razorpay_order_id)
+      : null;
+    res.json({ data: { ...payment, packageEntitlement } });
   } catch (error) {
     next(error);
   }
@@ -1407,7 +1451,9 @@ portalRouter.post("/assistant/support/tickets", requirePortalAuth("assistant"), 
           ticketId: result.ticket.id,
           assistantId: result.ticket.assistantId,
           assistantUserId: req.portalAuth!.userId,
-          requesterType: "assistant"
+          requesterType: "assistant",
+          actor: "assistant",
+          autoReplied: result.autoReplyApplied === true
         }
       });
     }
@@ -1436,7 +1482,8 @@ portalRouter.post("/assistant/support/tickets/:ticketId/messages", requirePortal
         assistantId: result.ticket.assistantId,
         assistantUserId: req.portalAuth!.userId,
         requesterType: "assistant",
-        actor: "assistant"
+        actor: "assistant",
+        autoReplied: result.autoReplyApplied === true
       }
     });
     res.status(201).json({ data: result });
@@ -1484,6 +1531,7 @@ portalRouter.patch("/assistant/availability", requirePortalAuth("assistant"), ra
       payload: {
         assistantId: data.assistantId,
         isOnline: body.isOnline,
+        onlineIntent: data.onlineIntent,
         availabilityStatus: data.availabilityStatus,
         presenceStatus: data.presenceStatus,
         heartbeatFresh: data.heartbeatFresh,

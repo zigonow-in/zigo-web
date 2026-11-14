@@ -1411,6 +1411,17 @@ function localDateText(value) {
 function localTimeText(value) {
     return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
 }
+function bookingEngineTimeMinutes(value) {
+    const text = String(value || "").trim();
+    if (!/^\d{2}:\d{2}$/.test(text))
+        return null;
+    const [hoursText, minutesText] = text.split(":");
+    const hours = Number(hoursText);
+    const minutes = Number(minutesText);
+    if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59)
+        return null;
+    return hours * 60 + minutes;
+}
 async function createUniqueBookingRequestNumber(client, input) {
     const preferred = String(input.preferred || "").trim();
     if (isZigoBookingReference(preferred)) {
@@ -1450,30 +1461,29 @@ function minutesUntil(from, to) {
         return null;
     return Math.max(0, Math.ceil((to.getTime() - from.getTime()) / 60_000));
 }
+function bookingEngineRuleBlockedToday(rule, at = new Date()) {
+    const calendar = rule?.metadata?.serviceCalendar || {};
+    const startedAt = new Date(calendar.blockTodayStartedAt ?? rule?.blockTodayStartedAt ?? "");
+    const blockedUntil = new Date(calendar.blockTodayUntil ?? rule?.blockTodayUntil ?? "");
+    if (!Number.isFinite(startedAt.getTime()) || !Number.isFinite(blockedUntil.getTime()))
+        return false;
+    if (blockedUntil.getTime() <= startedAt.getTime() || localDateText(startedAt) !== localDateText(at))
+        return false;
+    return at.getTime() >= startedAt.getTime() && at.getTime() < blockedUntil.getTime();
+}
 function bookingEngineRuleOpen(rule, now = new Date(), options = {}) {
     if (!rule)
         return !options.requireRule;
+    if (bookingEngineRuleBlockedToday(rule, now))
+        return false;
     if (rule.serviceControlMode === "manual") {
         const status = String(rule.manualServiceStatus || "").toLowerCase();
         return status === "start" || status === "on" || status === "1" || status === "true";
     }
     if (rule.serviceControlMode === "auto") {
         const currentMinutes = now.getHours() * 60 + now.getMinutes();
-        const parseMinutes = (value) => {
-            const text = String(value || "").trim();
-            if (!/^\d{2}:\d{2}$/.test(text))
-                return null;
-            const [hoursText, minutesText] = text.split(":");
-            const hours = Number(hoursText);
-            const minutes = Number(minutesText);
-            if (!Number.isInteger(hours) || !Number.isInteger(minutes))
-                return null;
-            if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59)
-                return null;
-            return hours * 60 + minutes;
-        };
-        const startTimeMinutes = parseMinutes(rule.autoStartTime ?? rule.metadata?.serviceCalendar?.autoStartTime);
-        const endTimeMinutes = parseMinutes(rule.autoEndTime ?? rule.metadata?.serviceCalendar?.autoEndTime);
+        const startTimeMinutes = bookingEngineTimeMinutes(rule.autoStartTime ?? rule.metadata?.serviceCalendar?.autoStartTime);
+        const endTimeMinutes = bookingEngineTimeMinutes(rule.autoEndTime ?? rule.metadata?.serviceCalendar?.autoEndTime);
         if (startTimeMinutes != null && endTimeMinutes != null) {
             if (startTimeMinutes === endTimeMinutes)
                 return false;
@@ -1490,6 +1500,44 @@ function bookingEngineRuleOpen(rule, now = new Date(), options = {}) {
             return false;
     }
     return true;
+}
+function bookingEngineRuleAllowsInstantStart(rule, now = new Date(), etaMinutes = 0) {
+    // Instant availability is based on when the assistant can start, not only when the customer taps the button.
+    return bookingEngineRuleOpen(rule, addMinutes(now, Math.max(0, Math.round(Number(etaMinutes || 0)))), { requireRule: true });
+}
+function bookingEngineRuleRestrictionMessage(rule) {
+    return String(rule?.bookingRestrictionMessage
+        ?? rule?.metadata?.serviceCalendar?.bookingRestrictionMessage
+        ?? "").trim();
+}
+function bookingEngineRuleAllowsScheduleSlot(rule, scheduledDate, scheduledTime, now = new Date()) {
+    // A start/stop rule controls today's demand. Future schedule dates remain bookable.
+    if (!rule || String(scheduledDate || "") !== localDateText(now))
+        return true;
+    const slotStart = scheduleSlotDate(scheduledDate, scheduledTime);
+    return Boolean(slotStart && bookingEngineRuleOpen(rule, slotStart, { requireRule: true }));
+}
+function bookingEngineRuleHidesScheduleSlot(rule, scheduledDate, scheduledTime, now = new Date()) {
+    if (!rule || String(scheduledDate || "") !== localDateText(now))
+        return false;
+    if (String(rule.serviceControlMode || "").toLowerCase() !== "auto")
+        return false;
+    const slotMinutes = bookingEngineTimeMinutes(scheduledTime);
+    const startMinutes = bookingEngineTimeMinutes(rule.autoStartTime ?? rule.metadata?.serviceCalendar?.autoStartTime);
+    const endMinutes = bookingEngineTimeMinutes(rule.autoEndTime ?? rule.metadata?.serviceCalendar?.autoEndTime);
+    if (slotMinutes == null || endMinutes == null)
+        return false;
+    if (startMinutes == null || startMinutes < endMinutes)
+        return slotMinutes >= endMinutes;
+    if (startMinutes === endMinutes)
+        return true;
+    return slotMinutes >= endMinutes && slotMinutes < startMinutes;
+}
+function scheduleSlotIsInFuture(scheduledDate, scheduledTime, now = new Date()) {
+    if (String(scheduledDate || "") !== localDateText(now))
+        return true;
+    const slotStart = scheduleSlotDate(scheduledDate, scheduledTime);
+    return Boolean(slotStart && slotStart.getTime() > now.getTime());
 }
 function bookingSupplyStatusFor(input) {
     if (!input.assistantId)
@@ -1740,9 +1788,10 @@ export async function getBookingAvailabilityDecision(input) {
         clusterId: requiredClusterId,
         categoryId: input.categoryId ?? null
     });
-    const isServiceOpenByEngine = bookingEngineRuleOpen(resolvedBookingEngineRule, now, { requireRule: true });
     const engineAssignmentMode = resolvedBookingEngineRule?.assistantAssignmentMode === "auto" ? "auto" : resolvedBookingEngineRule?.assistantAssignmentMode === "manual" ? "manual" : (assignType === "automate" ? "auto" : "manual");
     const instantEtaMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantEtaMinutes ?? engineSettings.instantAutoMaxWaitMinutes ?? 45)));
+    const isServiceOpenByEngine = bookingEngineRuleOpen(resolvedBookingEngineRule, now, { requireRule: true });
+    const isInstantServiceOpenByEngine = bookingEngineRuleAllowsInstantStart(resolvedBookingEngineRule, now, instantEtaMinutes);
     const instantInitiateMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantInitiateMinutes ?? 0)));
     const instantWrapUpMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantWrapUpMinutes ?? 0)));
     const instantTravelMinutes = Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantTravelMinutes ?? 0)));
@@ -1999,7 +2048,7 @@ export async function getBookingAvailabilityDecision(input) {
     const hasScheduleMode = bookingMode === "schedule" || bookingMode === "both";
     const hasInstantFreeAssistantNow = onlineFreeAssistantCount > 0;
     const instantAllowed = Boolean(hasInstantMode
-        && isServiceOpenByEngine
+        && isInstantServiceOpenByEngine
         && !hasClusterMismatch
         && hasInstantFreeAssistantNow
         && bestCandidate
@@ -2010,6 +2059,12 @@ export async function getBookingAvailabilityDecision(input) {
         && scheduleAssistantPool.length);
     const dates = scheduleDatesForConfig(scheduleType);
     const scheduleTimeSlots = (scheduleType.timeSlots || []).filter(Boolean).sort();
+    const todayDate = localDateText(now);
+    const todayScheduleConfigured = dates.some((date) => date.value === todayDate);
+    const scheduleTodayServiceOpen = !todayScheduleConfigured
+        || !resolvedBookingEngineRule
+        || scheduleTimeSlots.some((time) => scheduleSlotIsInFuture(todayDate, time, now)
+            && bookingEngineRuleAllowsScheduleSlot(resolvedBookingEngineRule, todayDate, time, now));
     const scheduleAvailableSlots = [];
     if (scheduleAssistantPool.length && dates.length && scheduleTimeSlots.length) {
         const requestedDurationMinutes = durationMinutes;
@@ -2081,6 +2136,15 @@ export async function getBookingAvailabilityDecision(input) {
         }
         for (const date of dates) {
             for (const time of scheduleTimeSlots) {
+                if (!scheduleSlotIsInFuture(date.value, time, now))
+                    continue;
+                if (bookingEngineRuleHidesScheduleSlot(resolvedBookingEngineRule, date.value, time, now))
+                    continue;
+                if (!bookingEngineRuleAllowsScheduleSlot(resolvedBookingEngineRule, date.value, time, now)) {
+                    // Keep blocked slots in the response so the customer sees Sold Out instead of a disappearing time.
+                    scheduleAvailableSlots.push({ date: date.value, time, availableAssistants: 0 });
+                    continue;
+                }
                 const capacityWindow = scheduleCapacityWindow({
                     scheduledDate: date.value,
                     scheduledTime: time,
@@ -2120,7 +2184,7 @@ export async function getBookingAvailabilityDecision(input) {
             : !hasScheduleCapacity
                 ? "no_schedule_slots"
                 : null;
-    const instantSupplyUnavailable = Boolean(hasInstantMode && !hasClusterMismatch && isServiceOpenByEngine && !instantAllowed);
+    const instantSupplyUnavailable = Boolean(hasInstantMode && !hasClusterMismatch && isInstantServiceOpenByEngine && !instantAllowed);
     const instantSupplyUnavailableReason = instantSupplyUnavailable
         ? (!assistantPool.length
             ? "no_cluster_assistant"
@@ -2169,8 +2233,10 @@ export async function getBookingAvailabilityDecision(input) {
             scheduleWrapUpMinutes,
             scheduleTravelMinutes,
             serviceOpen: isServiceOpenByEngine,
-            instantServiceOpen: isServiceOpenByEngine,
-            scheduleServiceOpen: true
+            instantServiceOpen: isInstantServiceOpenByEngine,
+            scheduleServiceOpen: true,
+            scheduleTodayServiceOpen,
+            bookingRestrictionMessage: bookingEngineRuleRestrictionMessage(resolvedBookingEngineRule)
         },
         engine: engineSettings,
         scheduleDates: dates,
@@ -2429,9 +2495,6 @@ export async function createBookingByAdmin(input) {
             clusterId: input.clusterId,
             categoryId: bookingEngineCategoryId
         });
-        if (!isScheduleBooking && !bookingEngineRuleOpen(resolvedBookingEngineRule, new Date(), { requireRule: true })) {
-            throw new HttpError(400, "Instant booking is not accepting bookings right now. Please choose Schedule.");
-        }
         const bookingEngineTiming = isScheduleBooking
             ? {
                 etaMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.scheduleEtaMinutes ?? 0))),
@@ -2445,6 +2508,9 @@ export async function createBookingByAdmin(input) {
                 wrapUpMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantWrapUpMinutes ?? 0))),
                 travelBufferMinutes: Math.max(0, Math.round(Number(resolvedBookingEngineRule?.instantTravelMinutes ?? 0)))
             };
+        if (!isScheduleBooking && !bookingEngineRuleAllowsInstantStart(resolvedBookingEngineRule, new Date(), bookingEngineTiming.etaMinutes)) {
+            throw new HttpError(400, bookingEngineRuleRestrictionMessage(resolvedBookingEngineRule) || "Bookings are currently closed. Please try again later.");
+        }
         const assignmentMode = resolvedAvailabilityConfig.assignType;
         const scheduledDate = typeof inputMetadata.scheduledDate === "string" ? inputMetadata.scheduledDate : "";
         const scheduledTime = typeof inputMetadata.scheduledTime === "string" ? inputMetadata.scheduledTime : "";
@@ -2461,6 +2527,12 @@ export async function createBookingByAdmin(input) {
         const scheduledSlotStart = isScheduleBooking ? scheduleSlotDate(scheduledDate, scheduledTime) : null;
         if (isScheduleBooking && !scheduledSlotStart)
             throw new HttpError(400, "Select a valid schedule date and time.");
+        if (isScheduleBooking && !scheduleSlotIsInFuture(scheduledDate, scheduledTime, instantStartAt)) {
+            throw new HttpError(409, "Selected schedule time has already passed. Choose another time.");
+        }
+        if (isScheduleBooking && !bookingEngineRuleAllowsScheduleSlot(resolvedBookingEngineRule, scheduledDate, scheduledTime, instantStartAt)) {
+            throw new HttpError(400, bookingEngineRuleRestrictionMessage(resolvedBookingEngineRule) || "Bookings are currently closed for the selected time. Please choose another schedule slot.");
+        }
         const scheduleBoundaryToleranceMs = 60_000;
         if (isScheduleBooking && scheduledSlotStart.getTime() + scheduleBoundaryToleranceMs < addMinutes(instantStartAt, bookingEngineTiming.etaMinutes).getTime()) {
             throw new HttpError(409, "Selected schedule slot is no longer available.");
@@ -2579,8 +2651,11 @@ export async function createBookingByAdmin(input) {
         const razorpayCard = razorpayPayment.card && typeof razorpayPayment.card === "object" && !Array.isArray(razorpayPayment.card)
             ? razorpayPayment.card
             : {};
+        const paymentType = grandTotalPaise <= 0 ? "cash" : String(inputMetadata.paymentType || "cash").toLowerCase();
+        const paymentStatus = grandTotalPaise <= 0 ? "paid" : String(inputMetadata.paymentStatus || "due").toLowerCase();
+        const isPaid = grandTotalPaise <= 0 || ["paid", "success", "captured", "completed"].includes(paymentStatus);
         const pgTransactionCharge = await resolvePgTransactionCharge({
-            paymentMode: razorpayPayment.method || inputMetadata.paymentType || "cash",
+            paymentMode: grandTotalPaise <= 0 ? "cash" : razorpayPayment.method || paymentType,
             cardType: razorpayPayment.cardType || razorpayCard.type,
             amountPaise: grandTotalPaise
         });
@@ -2642,9 +2717,6 @@ export async function createBookingByAdmin(input) {
             pgTransactionChargeBasePaise: pgTransactionCharge.baseAmountPaise,
             pgTransactionChargePaise: pgTransactionCharge.chargeAmountPaise
         };
-        const paymentType = String(inputMetadata.paymentType || "cash").toLowerCase();
-        const paymentStatus = String(inputMetadata.paymentStatus || (paymentType === "cash" ? "due" : "due")).toLowerCase();
-        const isPaid = paymentStatus === "paid" || paymentStatus === "success" || paymentStatus === "captured" || paymentStatus === "completed";
         const paymentAmountPaise = grandTotalPaise;
         const bookingAt = instantStartAt;
         const bookingDate = isScheduleBooking ? scheduledDate : localDateText(bookingAt);
@@ -2784,6 +2856,9 @@ export async function createBookingByAdmin(input) {
             ...(pricingBreakdown ? { pricingBreakdown } : {}),
             ...inputMetadata,
             pricingBreakdown: billingSnapshot,
+            paymentType,
+            paymentStatus,
+            isPaid,
             basePricePaise,
             discountPaise,
             sellingPricePaise,
@@ -2880,7 +2955,7 @@ export async function createBookingByAdmin(input) {
                 serviceName: serviceRow.rows[0]?.name || inputMetadata.serviceName || null,
                 categoryName: categoryRow.rows[0]?.name || inputMetadata.categoryName || null,
                 selectedLocation: inputMetadata.selectedLocation || null,
-                selectedPayment: inputMetadata.paymentType || "cash"
+                selectedPayment: paymentType
             }),
             normalizedDurationMinutes,
             paymentAmountPaise,
@@ -3445,7 +3520,8 @@ async function ensureAssistantAvailableForBookingAssignment(db, input) {
     const eligibility = await listAssignableAssistantWindows(db, {
         serviceRequestId: input.serviceRequestId,
         assistantId: input.assistantId,
-        forUpdate: true
+        forUpdate: true,
+        force: input.forceCancelledRecovery === true
     });
     const selected = eligibility.assistants.find((assistant) => assistant.assistantId === input.assistantId);
     if (!selected) {
@@ -3460,7 +3536,7 @@ async function ensureAssistantAvailableForBookingAssignment(db, input) {
         clusterId: eligibility.clusterId,
         bookingType: eligibility.bookingType,
         metadata: eligibility.metadata,
-        multiTaskOverride: false,
+        multiTaskOverride: input.forceCancelledRecovery === true,
         overlappingAssignments: []
     };
 }
@@ -3523,10 +3599,11 @@ async function listAssignableAssistantWindows(db, input) {
       left join zigo.assistant_availability av on av.assistant_id = a.id
       where u.deleted_at is null
         and coalesce(u.metadata->>'accountStatus', 'active') = 'active'
-        and lower(coalesce(av.status_code, 'offline')) = any($2::text[])
-        and ($3::uuid is null or a.id = $3::uuid)
+        and ($2::boolean or lower(coalesce(av.status_code, 'offline')) = any($3::text[]))
+        and ($4::uuid is null or a.id = $4::uuid)
         and (
-          a.current_cluster_id = $1::uuid
+          $2::boolean
+          or a.current_cluster_id = $1::uuid
           or exists (
             select 1
             from zigo.assistant_cluster_map acm
@@ -3536,7 +3613,7 @@ async function listAssignableAssistantWindows(db, input) {
           )
         )
       ${input.forUpdate ? "for update of a" : ""}
-    `, [window.clusterId, Array.from(assistantOnlineStatusCodes), input.assistantId ?? null]);
+    `, [window.clusterId, input.force === true, Array.from(assistantOnlineStatusCodes), input.assistantId ?? null]);
     if (!assistants.rows.length)
         return { ...window, assistants: [] };
     const activeAssignments = await db.query(`
@@ -3603,7 +3680,7 @@ async function listAssignableAssistantWindows(db, input) {
         .map((assistant) => {
         const activeWindows = windowsByAssistant.get(assistant.assistantId) || [];
         const hasOverlap = activeWindows.some((activeWindow) => activeBookingWindowOverlaps(window.slotStart, window.slotEnd, activeWindow.start, activeWindow.end));
-        if (hasOverlap)
+        if (hasOverlap && input.force !== true)
             return null;
         const nextAvailableAt = activeWindows.reduce((latest, activeWindow) => {
             if (activeWindow.end.getTime() > latest.getTime() && activeWindow.end.getTime() <= window.slotStart.getTime())
@@ -3622,9 +3699,9 @@ async function listAssignableAssistantWindows(db, input) {
         .sort((left, right) => new Date(left.nextAvailableAt).getTime() - new Date(right.nextAvailableAt).getTime() || left.assistantId.localeCompare(right.assistantId));
     return { ...window, assistants: eligible };
 }
-export async function listAssignableAssistantsForBooking(serviceRequestId) {
+export async function listAssignableAssistantsForBooking(serviceRequestId, options = {}) {
     await ensureBookingEngineSchema();
-    const result = await listAssignableAssistantWindows(pool, { serviceRequestId });
+    const result = await listAssignableAssistantWindows(pool, { serviceRequestId, force: options.force === true });
     return {
         bookingType: result.bookingType,
         assignmentWindowStartAt: result.slotStart.toISOString(),
@@ -4030,6 +4107,7 @@ export async function reassignBooking(input) {
         await writeAdminAction(client, input.actorUserId, input.serviceRequestId, "reassign", input.reason, {
             assistantId: input.assistantId,
             assignmentId,
+            forceCancelledRecovery: input.forceCancelledRecovery === true,
             multiTaskOverride: availability.multiTaskOverride,
             overlappingAssignments: availability.overlappingAssignments
         });
@@ -4072,6 +4150,420 @@ async function getDefaultServiceId(client) {
       limit 1
     `);
     return result.rows[0]?.id ?? null;
+}
+export async function changeBookingSlotByAdmin(serviceRequestId, actorUserId, input) {
+    const normalizedTime = normalizeScheduleTimeValue(input.scheduledTime);
+    const scheduledStartAt = scheduleSlotDate(input.scheduledDate, input.scheduledTime);
+    const dateParts = String(input.scheduledDate || "").split("-").map(Number);
+    if (!scheduledStartAt || !normalizedTime || dateParts.length !== 3
+        || scheduledStartAt.getFullYear() !== dateParts[0]
+        || scheduledStartAt.getMonth() + 1 !== dateParts[1]
+        || scheduledStartAt.getDate() !== dateParts[2]
+        || scheduledStartAt.getHours() !== Number(normalizedTime.slice(0, 2))
+        || scheduledStartAt.getMinutes() !== Number(normalizedTime.slice(3, 5))) {
+        throw new HttpError(400, "Choose a valid booking date and time.");
+    }
+    if (scheduledStartAt.getTime() <= Date.now()) {
+        throw new HttpError(409, "The new booking slot must be in the future.");
+    }
+    const client = await pool.connect();
+    try {
+        await client.query("begin");
+        await ensureBookingEngineSchema(client);
+        const engineSettings = await getBookingEngineSetting(client);
+        const bookingResult = await client.query(`
+        select
+          id,
+          status_code as "statusCode",
+          cluster_id as "clusterId",
+          booking_type as "bookingType",
+          booking_date::text as "bookingDate",
+          booking_time_slot as "bookingTimeSlot",
+          scheduled_at as "scheduledAt",
+          booking_start_at as "bookingStartAt",
+          booking_end_at as "bookingEndAt",
+          booking_available_at as "bookingAvailableAt",
+          cancelled_reason as "cancelledReason",
+          actual_task_started_at as "actualTaskStartedAt",
+          completed_at as "completedAt",
+          accepted_assignment_id as "acceptedAssignmentId",
+          coalesce(metadata, '{}'::jsonb) as metadata,
+          coalesce(duration_minutes, 30)::int as "durationMinutes",
+          coalesce(eta_minutes, 0)::int as "etaMinutes",
+          coalesce(initiate_minutes, 0)::int as "initiateMinutes",
+          coalesce(wrap_up_minutes, 0)::int as "wrapUpMinutes",
+          coalesce(travel_buffer_minutes, 0)::int as "travelBufferMinutes"
+        from zigo.service_requests
+        where id = $1::uuid
+        for update
+      `, [serviceRequestId]);
+        const booking = bookingResult.rows[0];
+        if (!booking)
+            throw new HttpError(404, "Booking not found.");
+        const assignmentResult = await client.query(`
+        select
+          id,
+          assistant_id as "assistantId",
+          status_code as "statusCode",
+          expires_at as "expiresAt",
+          coalesce(metadata, '{}'::jsonb) as metadata
+        from zigo.task_assignments
+        where (service_request_id = $1::uuid or request_id = $1::uuid)
+          and lower(coalesce(status_code, '')) in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted')
+        order by case when id = $2::uuid then 0 else 1 end,
+          coalesce(responded_at, assigned_at, offered_at) desc nulls last,
+          id desc
+        limit 1
+        for update
+      `, [serviceRequestId, booking.acceptedAssignmentId]);
+        const assignment = assignmentResult.rows[0] ?? null;
+        const cancelledAssignmentResult = await client.query(`
+        select
+          status_code as "statusCode",
+          coalesce(metadata, '{}'::jsonb) as metadata
+        from zigo.task_assignments
+        where (service_request_id = $1::uuid or request_id = $1::uuid)
+          and lower(coalesce(status_code, '')) in ('cancelled', 'canceled')
+        order by coalesce(responded_at, assigned_at, offered_at) desc nulls last, id desc
+        limit 1
+      `, [serviceRequestId]);
+        const cancelledAssignment = cancelledAssignmentResult.rows[0] ?? null;
+        const statusCode = String(booking.statusCode || "").toLowerCase();
+        const assignmentStatus = String(assignment?.statusCode || "").toLowerCase();
+        const isCancelledBooking = statusCode === "cancelled" || statusCode === "canceled" || (!assignment && Boolean(cancelledAssignment));
+        const nonReschedulableStatuses = new Set(["in_progress", "approval_pending", "completed", "success"]);
+        const isReopeningCancelled = Boolean(input.reopenCancelled || input.forceCancelledRecovery)
+            && isCancelledBooking
+            && !nonReschedulableStatuses.has(statusCode)
+            && !booking.actualTaskStartedAt
+            && !booking.completedAt;
+        const immutableStatuses = new Set(["in_progress", "approval_pending", "completed", "success", "cancelled", "canceled", "failed", "rejected"]);
+        if (booking.actualTaskStartedAt || booking.completedAt || (immutableStatuses.has(statusCode) && !isReopeningCancelled) || immutableStatuses.has(assignmentStatus)) {
+            throw new HttpError(409, "Only bookings that have not started can change slot.");
+        }
+        if (isCancelledBooking && !isReopeningCancelled) {
+            throw new HttpError(409, "Use Reschedule to reopen a cancelled booking.");
+        }
+        const editableStatuses = new Set(["draft", "hold", "on_hold", "payment_pending", "queued", "paid", "confirmed", "processing", "pending", "pending_assign", "assigned", "accepted", "reserved", "offered"]);
+        if (!isReopeningCancelled && !editableStatuses.has(statusCode) && !editableStatuses.has(assignmentStatus)) {
+            throw new HttpError(409, "This booking is not in a changeable state.");
+        }
+        const durationMinutes = Math.max(1, Math.min(1440, Math.round(Number(booking.durationMinutes || 30))));
+        const capacityWindow = scheduleCapacityWindow({
+            scheduledDate: input.scheduledDate,
+            scheduledTime: normalizedTime,
+            durationMinutes,
+            etaMinutes: booking.etaMinutes,
+            initiateMinutes: booking.initiateMinutes,
+            wrapUpMinutes: booking.wrapUpMinutes,
+            travelBufferMinutes: booking.travelBufferMinutes
+        });
+        if (!capacityWindow)
+            throw new HttpError(400, "Unable to calculate the new booking window.");
+        const slaDeadlineAt = addMinutes(capacityWindow.taskStartAt, Math.max(0, engineSettings.slaGraceMinutes ?? 10));
+        const nextCheckAt = new Date(Math.max(Date.now(), capacityWindow.taskStartAt.getTime() - Math.max(1, engineSettings.riskLookaheadMinutes || 15) * 60_000));
+        let reservation = null;
+        if (assignment?.assistantId) {
+            if (!booking.clusterId)
+                throw new HttpError(409, "Booking cluster is not set. Cannot move an assigned booking.");
+            const assistantConflict = await client.query(`
+          select 1
+          from zigo.assistant_capacity_reservations
+          where assistant_id = $1::uuid
+            and service_request_id <> $2::uuid
+            and status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active', 'in_progress')
+            and reserved_from < $3::timestamptz
+            and reserved_until > $4::timestamptz
+          limit 1
+        `, [assignment.assistantId, serviceRequestId, capacityWindow.availableAt, capacityWindow.taskStartAt]);
+            if (assistantConflict.rows[0]) {
+                throw new HttpError(409, "The assigned assistant is not available in the new slot.");
+            }
+            const assignmentConflict = await client.query(`
+          select 1
+          from zigo.task_assignments ta
+          join zigo.service_requests other_sr on other_sr.id = coalesce(ta.service_request_id, ta.request_id)
+          where ta.assistant_id = $1::uuid
+            and other_sr.id <> $2::uuid
+            and ta.status_code in ('pending', 'reserved', 'offered', 'confirmed', 'processing', 'hold', 'on_hold', 'assigned', 'accepted', 'in_progress')
+            and other_sr.status_code in ('payment_pending', 'paid', 'queued', 'pending', 'pending_assign', 'confirmed', 'processing', 'hold', 'on_hold', 'reserved', 'offered', 'assigned', 'accepted', 'in_progress', 'approval_pending')
+            and coalesce(other_sr.booking_start_at, other_sr.scheduled_at, other_sr.created_at) < $3::timestamptz
+            and coalesce(
+              other_sr.booking_available_at,
+              other_sr.booking_end_at,
+              other_sr.scheduled_at + (coalesce(other_sr.duration_minutes, 30) || ' minutes')::interval,
+              other_sr.created_at + (coalesce(other_sr.duration_minutes, 30) || ' minutes')::interval
+            ) > $4::timestamptz
+          limit 1
+        `, [assignment.assistantId, serviceRequestId, capacityWindow.availableAt, capacityWindow.taskStartAt]);
+            if (assignmentConflict.rows[0]) {
+                throw new HttpError(409, "The assigned assistant has another booking in the new slot.");
+            }
+            const reservationResult = await client.query(`
+          select id, status_code as "statusCode", coalesce(metadata, '{}'::jsonb) as metadata
+          from zigo.assistant_capacity_reservations
+          where service_request_id = $1::uuid
+            and status_code in ('held', 'pending', 'reserved', 'offered', 'confirmed', 'assigned', 'active', 'in_progress')
+          order by created_at desc
+          limit 1
+          for update
+        `, [serviceRequestId]);
+            const existingReservation = reservationResult.rows[0] ?? null;
+            const slotMetadata = {
+                ...(existingReservation?.metadata || {}),
+                source: "admin_slot_change",
+                slotChangedAt: new Date().toISOString(),
+                slotChangedBy: actorUserId,
+                scheduledDate: input.scheduledDate,
+                scheduledTime: normalizedTime,
+                startsAt: capacityWindow.taskStartAt.toISOString(),
+                taskEndAt: capacityWindow.taskEndAt.toISOString(),
+                bookingAvailableAt: capacityWindow.availableAt.toISOString(),
+                expectedFreeAt: capacityWindow.availableAt.toISOString(),
+                durationMinutes,
+                reason: input.reason?.trim() || "Admin changed booking slot"
+            };
+            if (existingReservation) {
+                await client.query(`
+            update zigo.assistant_capacity_reservations
+            set booking_type = 'schedule',
+                reserved_from = $2::timestamptz,
+                reserved_until = $3::timestamptz,
+                promised_start_at = $2::timestamptz,
+                sla_deadline_at = $4::timestamptz,
+                metadata = $5::jsonb,
+                updated_at = now(),
+                released_at = null,
+                release_reason = null
+            where id = $1::uuid
+          `, [existingReservation.id, capacityWindow.taskStartAt, capacityWindow.availableAt, slaDeadlineAt, JSON.stringify(slotMetadata)]);
+                reservation = { id: existingReservation.id, statusCode: existingReservation.statusCode };
+            }
+            else {
+                const insertedReservation = await upsertCapacityReservation(client, {
+                    serviceRequestId,
+                    assignmentId: assignment.id,
+                    assistantId: assignment.assistantId,
+                    clusterId: booking.clusterId || "",
+                    bookingType: "schedule",
+                    assignType: "manual",
+                    statusCode: assignmentStatus === "offered" ? "held" : assignmentStatus === "reserved" ? "reserved" : "assigned",
+                    reservedFrom: capacityWindow.taskStartAt,
+                    reservedUntil: capacityWindow.availableAt,
+                    promisedStartAt: capacityWindow.taskStartAt,
+                    slaDeadlineAt,
+                    source: "admin_slot_change",
+                    actorUserId,
+                    metadata: slotMetadata
+                });
+                reservation = insertedReservation ? { id: insertedReservation.id, statusCode: assignmentStatus === "offered" ? "held" : assignmentStatus === "reserved" ? "reserved" : "assigned" } : null;
+            }
+            if (!reservation?.id)
+                throw new HttpError(409, "Unable to reserve the assistant for the new slot.");
+        }
+        const nowIso = new Date().toISOString();
+        const oldScheduledDate = booking.bookingDate
+            || (booking.scheduledAt && !Number.isNaN(booking.scheduledAt.getTime()) ? localDateText(booking.scheduledAt) : String(booking.metadata?.scheduledDate || ""));
+        const oldScheduledTime = booking.bookingTimeSlot
+            || (booking.scheduledAt && !Number.isNaN(booking.scheduledAt.getTime()) ? localTimeText(booking.scheduledAt) : String(booking.metadata?.scheduledTime || ""));
+        const slotChange = {
+            changedAt: nowIso,
+            changedBy: actorUserId,
+            reason: input.reason?.trim() || "Admin changed booking slot",
+            from: { scheduledDate: oldScheduledDate || null, scheduledTime: oldScheduledTime || null },
+            to: { scheduledDate: input.scheduledDate, scheduledTime: normalizedTime },
+            bookingStartAt: capacityWindow.taskStartAt.toISOString(),
+            bookingEndAt: capacityWindow.taskEndAt.toISOString(),
+            bookingAvailableAt: capacityWindow.availableAt.toISOString()
+        };
+        const previousHistory = Array.isArray(booking.metadata?.slotChangeHistory) ? booking.metadata.slotChangeHistory : [];
+        const previousRescheduleHistory = Array.isArray(booking.metadata?.rescheduleHistory) ? booking.metadata.rescheduleHistory : [];
+        const previousCancellationHistory = Array.isArray(booking.metadata?.cancellationHistory) ? booking.metadata.cancellationHistory : [];
+        const cancellationMetadata = cancelledAssignment?.metadata || {};
+        const cancellationSnapshot = isReopeningCancelled ? {
+            cancelledAt: booking.metadata?.cancelledAt || cancellationMetadata.cancelledAt || null,
+            cancelledBy: booking.metadata?.cancelledBy || cancellationMetadata.cancelledBy || null,
+            reason: booking.cancelledReason || booking.metadata?.cancellationReason || cancellationMetadata.cancellationReason || null,
+            reasonCode: booking.metadata?.cancellationReasonCode || cancellationMetadata.cancellationReasonCode || null,
+            source: booking.metadata?.cancellationSource || cancellationMetadata.cancellationSource || null
+        } : null;
+        const rescheduleHistory = isReopeningCancelled ? {
+            rescheduledAt: nowIso,
+            rescheduledBy: actorUserId,
+            reason: slotChange.reason,
+            from: slotChange.from,
+            to: slotChange.to,
+            bookingStartAt: capacityWindow.taskStartAt.toISOString(),
+            bookingEndAt: capacityWindow.taskEndAt.toISOString(),
+            bookingAvailableAt: capacityWindow.availableAt.toISOString()
+        } : null;
+        const nextMetadata = {
+            ...booking.metadata,
+            bookingType: "schedule",
+            scheduledDate: input.scheduledDate,
+            scheduledTime: normalizedTime,
+            scheduledAt: capacityWindow.taskStartAt.toISOString(),
+            bookingStartAt: capacityWindow.taskStartAt.toISOString(),
+            bookingEndAt: capacityWindow.taskEndAt.toISOString(),
+            bookingAvailableAt: capacityWindow.availableAt.toISOString(),
+            expectedFreeAt: capacityWindow.availableAt.toISOString(),
+            promisedStartAt: capacityWindow.taskStartAt.toISOString(),
+            slaDeadlineAt: slaDeadlineAt.toISOString(),
+            taskEndAt: capacityWindow.taskEndAt.toISOString(),
+            slotChangedAt: nowIso,
+            slotChangedBy: actorUserId,
+            slotChangeReason: slotChange.reason,
+            slotChangeHistory: [...previousHistory, slotChange].slice(-20),
+            capacityReservationId: reservation?.id || booking.metadata?.capacityReservationId || null,
+            ...(isReopeningCancelled ? {
+                reopenedFromCancelled: true,
+                reopenedAt: nowIso,
+                reopenedBy: actorUserId,
+                reopenedReason: slotChange.reason,
+                cancellationHistory: [...previousCancellationHistory, cancellationSnapshot].filter(Boolean).slice(-20),
+                rescheduleHistory: [...previousRescheduleHistory, rescheduleHistory].filter(Boolean).slice(-20),
+                cancelledBy: null,
+                cancelledAt: null,
+                cancellationReason: null,
+                cancellationReasonCode: null,
+                cancellationSource: null,
+                autoCancelled: false
+            } : {})
+        };
+        const nextStatusCode = isReopeningCancelled ? "queued" : statusCode;
+        const serviceRequestUpdate = await client.query(`
+        update zigo.service_requests
+        set status_code = $8::text,
+            cancelled_reason = case when $9::boolean then null else cancelled_reason end,
+            accepted_assignment_id = case when $9::boolean then null else accepted_assignment_id end,
+            booking_type = 'schedule',
+            booking_date = $2::date,
+            booking_time_slot = $3::text,
+            scheduled_at = $4::timestamptz,
+            booking_start_at = $4::timestamptz,
+            booking_end_at = $5::timestamptz,
+            booking_available_at = $6::timestamptz,
+            metadata = $7::jsonb,
+            updated_at = now()
+        where id = $1::uuid
+          and (status_code not in ('in_progress', 'approval_pending', 'completed', 'success', 'cancelled', 'canceled', 'failed', 'rejected')
+            or $9::boolean)
+      `, [serviceRequestId, input.scheduledDate, normalizedTime, capacityWindow.taskStartAt, capacityWindow.taskEndAt, capacityWindow.availableAt, JSON.stringify(nextMetadata), nextStatusCode, isReopeningCancelled]);
+        if (serviceRequestUpdate.rowCount === 0)
+            throw new HttpError(409, "Booking state changed while changing the slot. Refresh and try again.");
+        if (assignment) {
+            const assignmentMetadata = {
+                ...(assignment.metadata || {}),
+                source: "admin_slot_change",
+                startsAt: capacityWindow.taskStartAt.toISOString(),
+                taskEndAt: capacityWindow.taskEndAt.toISOString(),
+                bookingAvailableAt: capacityWindow.availableAt.toISOString(),
+                expectedFreeAt: capacityWindow.availableAt.toISOString(),
+                scheduledDate: input.scheduledDate,
+                scheduledTime: normalizedTime,
+                slotChangedAt: nowIso,
+                slotChangedBy: actorUserId,
+                slotChangeReason: slotChange.reason,
+                durationMinutes
+            };
+            const expiresAt = assignmentStatus === "offered" && assignment.expiresAt && assignment.expiresAt.getTime() > Date.now()
+                ? assignment.expiresAt
+                : capacityWindow.availableAt;
+            await client.query(`
+          update zigo.task_assignments
+          set expires_at = $2::timestamptz,
+              metadata = $3::jsonb
+          where id = $1::uuid
+        `, [assignment.id, expiresAt, JSON.stringify(assignmentMetadata)]);
+        }
+        if (booking.clusterId) {
+            const orchestrationResult = await client.query(`
+          select
+            demand_status as "demandStatus",
+            risk_status as "riskStatus",
+            supply_status as "supplyStatus",
+            assign_type as "assignType",
+            assistant_id as "assistantId",
+            reservation_id as "reservationId",
+            coalesce(metadata, '{}'::jsonb) as metadata
+          from zigo.booking_orchestration_state
+          where service_request_id = $1::uuid
+          for update
+        `, [serviceRequestId]);
+            const orchestration = orchestrationResult.rows[0];
+            await upsertBookingOrchestrationState(client, {
+                serviceRequestId,
+                clusterId: booking.clusterId,
+                demandStatus: isReopeningCancelled ? "pending_assign" : (orchestration?.demandStatus || (assignment ? "assigned" : "pending_assign")),
+                riskStatus: isReopeningCancelled ? "on_time" : (orchestration?.riskStatus || "on_time"),
+                supplyStatus: isReopeningCancelled ? "unassigned" : (orchestration?.supplyStatus || (assignment ? "assigned" : "unassigned")),
+                bookingType: "schedule",
+                assignType: orchestration?.assignType || "manual",
+                requestedStartAt: capacityWindow.taskStartAt,
+                promisedStartAt: capacityWindow.taskStartAt,
+                slaDeadlineAt,
+                assistantId: isReopeningCancelled ? null : (assignment?.assistantId || orchestration?.assistantId || null),
+                reservationId: isReopeningCancelled ? null : (reservation?.id || orchestration?.reservationId || null),
+                nextCheckAt,
+                lastEventType: isReopeningCancelled ? "booking.rescheduled" : "booking.slot_changed",
+                metadata: {
+                    ...(orchestration?.metadata || {}),
+                    slotChangedAt: nowIso,
+                    slotChangedBy: actorUserId,
+                    slotChangeReason: slotChange.reason,
+                    scheduledDate: input.scheduledDate,
+                    scheduledTime: normalizedTime,
+                    taskEndAt: capacityWindow.taskEndAt.toISOString(),
+                    bookingAvailableAt: capacityWindow.availableAt.toISOString(),
+                    ...(isReopeningCancelled ? { rescheduledAt: nowIso, rescheduledBy: actorUserId } : {})
+                }
+            });
+        }
+        await writeAdminAction(client, actorUserId, serviceRequestId, isReopeningCancelled ? "reschedule_cancelled" : "change_slot", slotChange.reason, {
+            from: slotChange.from,
+            to: slotChange.to,
+            bookingStartAt: capacityWindow.taskStartAt.toISOString(),
+            bookingEndAt: capacityWindow.taskEndAt.toISOString(),
+            bookingAvailableAt: capacityWindow.availableAt.toISOString(),
+            statusCode: nextStatusCode,
+            reopenedFromCancelled: isReopeningCancelled,
+            forceCancelledRecovery: input.forceCancelledRecovery === true,
+            assignmentId: assignment?.id || null,
+            assistantId: assignment?.assistantId || null,
+            capacityReservationId: reservation?.id || null
+        });
+        await client.query("commit");
+        return {
+            bookingId: serviceRequestId,
+            statusCode: nextStatusCode,
+            reopenedFromCancelled: isReopeningCancelled,
+            scheduledDate: input.scheduledDate,
+            scheduledTime: normalizedTime,
+            bookingType: "schedule",
+            bookingStartAt: capacityWindow.taskStartAt.toISOString(),
+            bookingEndAt: capacityWindow.taskEndAt.toISOString(),
+            bookingAvailableAt: capacityWindow.availableAt.toISOString(),
+            assignmentId: assignment?.id || null,
+            assistantId: assignment?.assistantId || null,
+            capacityReservationId: reservation?.id || null
+        };
+    }
+    catch (error) {
+        await client.query("rollback");
+        if (error && typeof error === "object" && "code" in error) {
+            const dbError = error;
+            if (dbError.code === "23505")
+                throw new HttpError(409, "Booking slot was changed by another admin. Refresh and try again.");
+            if (dbError.code === "23503")
+                throw new HttpError(404, "Unable to update booking slot because a linked record is missing.");
+            if (dbError.code === "42P18")
+                throw new HttpError(400, "Booking slot data contains an invalid value.");
+        }
+        throw error;
+    }
+    finally {
+        client.release();
+    }
 }
 export async function cancelBookingByAdmin(serviceRequestId, actorUserId, reason) {
     const client = await pool.connect();

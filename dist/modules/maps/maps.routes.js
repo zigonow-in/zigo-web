@@ -10,6 +10,17 @@ mapsRouter.use((req, _res, next) => {
         return next(new HttpError(403, "Cross-site map asset requests are not allowed."));
     next();
 });
+function browserMapBase(req) {
+    // The live proxy forwards the original scheme, while the server may run with
+    // NODE_ENV=development. Prefer that trusted forwarded value so HTTPS pages
+    // never receive mixed-content map tile or font URLs.
+    const forwardedProtocol = String(req.get("x-forwarded-proto") || "")
+        .split(",")[0]
+        .trim()
+        .toLowerCase();
+    const protocol = ["http", "https"].includes(forwardedProtocol) ? forwardedProtocol : req.protocol;
+    return `${protocol}://${req.get("host")}${req.baseUrl}`;
+}
 const cache = new Map();
 const pending = new Map();
 let cachedBytes = 0;
@@ -101,7 +112,7 @@ mapsRouter.get("/style.json", async (req, res, next) => {
         const style = JSON.parse(resource.body.toString("utf8"));
         // Ola's shared style references an optional 3D source absent from its 2D tiles.
         style.layers = style.layers.filter((layer) => layer["source-layer"] !== "3d_model");
-        res.json(rewriteMapAssetUrls(style, `${req.protocol}://${req.get("host")}${req.baseUrl}`));
+        res.json(rewriteMapAssetUrls(style, browserMapBase(req)));
     }
     catch (error) {
         next(error);
@@ -119,7 +130,7 @@ mapsRouter.get("/assets/:resource(*)", async (req, res, next) => {
             return;
         }
         if (resource.contentType.includes("json"))
-            res.json(rewriteMapAssetUrls(JSON.parse(resource.body.toString("utf8")), `${req.protocol}://${req.get("host")}${req.baseUrl}`));
+            res.json(rewriteMapAssetUrls(JSON.parse(resource.body.toString("utf8")), browserMapBase(req)));
         else
             res.type(resource.contentType).send(resource.body);
     }

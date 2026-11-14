@@ -5,6 +5,7 @@ const state = {
   roles: JSON.parse(localStorage.getItem("zigoAdminRoles") || "[]"),
   section: "dashboard"
 };
+const INR_SYMBOL = "\u20B9";
 let adminSessionGeneration = 0;
 
 const zigoBasePath = (() => {
@@ -70,6 +71,9 @@ const cache = {
   offerCustomers: [],
   offers: [],
   offersPagination: null,
+  offerRedemptionReport: [],
+  offerRedemptionReportPagination: null,
+  offerRedemptionReportSummary: {},
   bookingEngineRules: [],
   bookingEngineQuickReplies: [],
   payments: [],
@@ -82,6 +86,10 @@ const cache = {
   supportTickets: [],
   supportTicketsPagination: null,
   supportTicketDetail: null,
+  supportReplyTemplates: {
+    customer: { quick: [], auto: [] },
+    assistant: { quick: [], auto: [] }
+  },
   assistantSupportTickets: [],
   assistantSupportPagination: null,
   assistantSupportDetail: null,
@@ -111,6 +119,8 @@ let editingAddOnChargeId = null;
 let editingPaymentModeId = null;
 let editingPgTransactionChargeId = null;
 let editingOfferId = null;
+let offerMasterTargetSection = "offerMasterSection";
+let offerMasterPageTitle = "Offer Master";
 let editingBookingEngineRuleId = null;
 let editingBookingEngineQuickReplyId = null;
 let serviceCategoryFilters = { search: "", serviceId: "" };
@@ -120,8 +130,10 @@ let bookingEngineFilters = { search: "", scopeType: "", stateId: "", cityId: "",
 let bookingEngineQuickReplyFilters = { search: "", actor: "", bookingStage: "", actionType: "", status: "" };
 let customerDisputeFilters = { status: "open", search: "", page: 1, pageSize: 20 };
 let supportTicketFilters = { status: "all", search: "", page: 1, pageSize: 20 };
+let supportTicketLoadGeneration = 0;
 let assistantSupportFilters = { status: "all", search: "", page: 1, pageSize: 50 };
 let assistantSupportLoadGeneration = 0;
+let supportReplyTemplateEditing = null;
 let paymentFilters = { status: "all", search: "", page: 1, pageSize: 20 };
 let assistantReportFilters = { search: "", stateId: "", cityId: "", zoneId: "", clusterId: "" };
 let assistantReportSearchTimer = null;
@@ -275,6 +287,10 @@ let bookingPendingAssignmentRefreshTimer = null;
 let bookingPendingAssignmentRefreshRequestId = 0;
 let bookingWorkingCountdownTimer = null;
 let adminRefreshPromise = null;
+let supportUnreadCounts = { assistant: 0, customer: 0 };
+let supportNotificationRefreshPromise = null;
+let supportNotificationRefreshTimer = null;
+let supportNotificationRingTimer = null;
 
 function clearAlert() {
   appAlert.classList.add("d-none");
@@ -303,6 +319,9 @@ function clearAdminSession(message = "") {
   adminSessionGeneration++;
   Object.keys(cache).forEach(key => { cache[key] = Array.isArray(cache[key]) ? [] : null; });
   if (assistantOnlineTimer) clearInterval(assistantOnlineTimer);
+  stopSupportNotificationPolling();
+  supportUnreadCounts = { assistant: 0, customer: 0 };
+  renderSupportNotificationIndicators();
   localStorage.removeItem('zigoBookingRealtimeLastEventId');
   bookingRealtimeLastEventId = '';
   stopBookingRealtime();
@@ -398,7 +417,8 @@ function formatCustomerDateTime(value) {
 }
 
 function money(value) {
-  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format((Number(value) || 0) / 100);
+  const amount = new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format((Number(value) || 0) / 100);
+  return `${INR_SYMBOL}${amount}`;
 }
 
 async function refreshAdminSession() {
@@ -718,6 +738,15 @@ function imageCell(url) {
     : `<span class="text-secondary">No image</span>`;
 }
 
+function categoryMasterMediaCell(url) {
+  const viewUrl = assetUrl(url);
+  if (!url) return `<span class="text-secondary">No media</span>`;
+  if (/\.(?:mp4|m4v|webm|mov|ogv)(?:[?#].*)?$/i.test(String(url))) {
+    return `<video class="media-thumb" src="${escapeHtml(viewUrl)}" muted playsinline preload="metadata" controls aria-label="Video preview"></video>`;
+  }
+  return imageCell(url);
+}
+
 function categoryServiceIconImagePreview(url) {
   const viewUrl = assetUrl(url);
   return url
@@ -855,13 +884,17 @@ function uploadControl(name, currentUrl = "") {
   const inputId = `${name}UploadInput`;
   const previewId = `${name}UploadPreview`;
   const multiple = name === "categoryMasterImage" ? " multiple" : "";
-  return `<div class="upload-box" data-upload-box="${name}" data-upload-kind="image">
+  const acceptsMedia = name === "categoryMasterImage";
+  const accept = acceptsMedia
+    ? "image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime,.mov,.m4v"
+    : "image/png,image/jpeg,image/webp,image/gif";
+  return `<div class="upload-box" data-upload-box="${name}" data-upload-kind="${acceptsMedia ? "media" : "image"}">
     <input type="hidden" name="imageUrl" value="${escapeHtml(currentUrl || "")}">
-    <input id="${inputId}" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-image-upload="${name}"${multiple}>
+    <input id="${inputId}" class="visually-hidden" type="file" accept="${accept}" data-image-upload="${name}"${multiple}>
     <div class="upload-icon">UP</div>
-    <div class="upload-title">Drag and Drop Files</div>
+    <div class="upload-title">${acceptsMedia ? "Drag and Drop Images or Videos" : "Drag and Drop Files"}</div>
     <button class="btn btn-primary btn-sm" type="button" data-action="browse-image" data-target="${inputId}">Browse</button>
-    <div id="${previewId}" class="upload-preview">${currentUrl ? imageCell(currentUrl) : ""}</div>
+    <div id="${previewId}" class="upload-preview">${currentUrl ? (acceptsMedia ? categoryMasterMediaCell(currentUrl) : imageCell(currentUrl)) : ""}</div>
   </div>`;
 }
 
@@ -930,6 +963,42 @@ async function uploadImageFile(file, fieldName) {
   return payload.data;
 }
 
+async function uploadCategoryGuidanceIconImage(file, editor = null) {
+  const dataBase64 = await fileToDataUrl(file);
+  const payload = await api("/settings/media-images", {
+    method: "POST",
+    body: JSON.stringify({
+      originalName: file.name,
+      mimeType: file.type,
+      dataBase64
+    })
+  });
+  const imageUrl = payload.data?.imageUrl || "";
+  const valueInput = editor?.querySelector("[data-category-guidance-icon-value]");
+  const preview = editor?.querySelector("[data-category-guidance-icon-preview]");
+  if (valueInput) valueInput.value = imageUrl;
+  if (preview) preview.innerHTML = categoryGuidanceIconPreview(imageUrl);
+  return payload.data;
+}
+
+async function uploadCategoryGuidanceRowImage(file, editor = null) {
+  const dataBase64 = await fileToDataUrl(file);
+  const payload = await api("/settings/media-images", {
+    method: "POST",
+    body: JSON.stringify({
+      originalName: file.name,
+      mimeType: file.type,
+      dataBase64
+    })
+  });
+  const imageUrl = payload.data?.imageUrl || "";
+  const valueInput = categoryGuidanceRowImageValueInput(editor);
+  const preview = editor?.querySelector("[data-category-guidance-row-image-preview]");
+  if (valueInput) valueInput.value = imageUrl;
+  if (preview) preview.innerHTML = categoryGuidanceRowImagePreview(imageUrl);
+  return payload.data;
+}
+
 async function uploadOfferImageFile(file, uploadBox = null) {
   const dataBase64 = await fileToDataUrl(file);
   const payload = await api("/settings/media-images", {
@@ -947,6 +1016,23 @@ async function uploadOfferImageFile(file, uploadBox = null) {
     const preview = wrapper.querySelector(".upload-preview");
     if (input) input.value = imageUrl;
     if (preview) preview.innerHTML = imageCell(imageUrl);
+  }
+  return payload.data;
+}
+
+async function uploadSupportReplyIconImage(file, uploadBox = null) {
+  const dataBase64 = await fileToDataUrl(file);
+  const payload = await api("/settings/media-images", {
+    method: "POST",
+    body: JSON.stringify({ originalName: file.name, mimeType: file.type, dataBase64 })
+  });
+  const imageUrl = payload.data?.imageUrl || "";
+  const wrapper = uploadBox;
+  if (wrapper) {
+    const input = wrapper.closest("[data-support-reply-template-form]")?.querySelector('input[name="iconUrl"]');
+    const preview = wrapper.querySelector(".upload-preview");
+    if (input) input.value = imageUrl;
+    if (preview) preview.innerHTML = imageUrl ? imageCell(imageUrl) : "";
   }
   return payload.data;
 }
@@ -1056,6 +1142,44 @@ async function uploadServiceCategoryMediaFiles(files) {
   hidden.value = JSON.stringify(media);
   if (preview) preview.innerHTML = serviceCategoryMediaGallery(media);
   return media;
+}
+
+async function uploadCategoryMasterMediaFiles(files) {
+  const form = $("#categoryMasterForm");
+  const hidden = $("#categoryMasterImageUrls");
+  if (!hidden) return [];
+  const urls = categoryMasterImageUrlsFromItem({
+    imageUrl: form?.elements.imageUrl?.value || "",
+    imageUrls: hidden.value || "[]"
+  });
+  for (const file of files || []) {
+    const uploaded = await uploadServiceCategoryMediaFile(file);
+    if (uploaded.url && !urls.includes(uploaded.url)) urls.push(uploaded.url);
+  }
+  setCategoryMasterMediaUrls(urls);
+  return urls;
+}
+
+function categoryMasterVideoThumbnailPreview(url = "") {
+  return url
+    ? `<div class="category-master-video-thumbnail-preview">${imageCell(url)}<button class="btn btn-light btn-xs" data-action="clear-category-master-video-thumbnail" type="button">Clear</button></div>`
+    : `<span class="helper-text">No thumbnail image uploaded</span>`;
+}
+
+async function uploadCategoryMasterVideoThumbnailFile(file) {
+  const mimeType = mimeTypeForFile(file);
+  if (!mimeType.startsWith("image/")) throw new Error("Thumbnail must be an image file.");
+  const dataBase64 = await fileToDataUrl(file);
+  const payload = await api("/settings/media-images", {
+    method: "POST",
+    body: JSON.stringify({ originalName: file.name, mimeType, dataBase64 })
+  });
+  const imageUrl = String(payload.data?.imageUrl || "").trim();
+  const form = $("#categoryMasterForm");
+  if (form?.elements.categoryMediaThumbnailUrl) form.elements.categoryMediaThumbnailUrl.value = imageUrl;
+  const preview = form?.querySelector("[data-category-master-video-thumbnail-preview]");
+  if (preview) preview.innerHTML = categoryMasterVideoThumbnailPreview(imageUrl);
+  return imageUrl;
 }
 
 function bookingAttachmentType(mimeType = "", url = "") {
@@ -2006,8 +2130,8 @@ function categoryMasterRows(items) {
     .map(
       (item) => {
         const imageUrls = categoryMasterImageUrlsFromItem(item);
-        return `<tr>
-        <td>${imageCell(imageUrls[0] || item.imageUrl)}${imageUrls.length > 1 ? `<div class="row-note">${escapeHtml(imageUrls.length)} images</div>` : ""}</td>
+     return `<tr>
+        <td>${categoryMasterMediaCell(imageUrls[0] || item.imageUrl)}${imageUrls.length > 1 ? `<div class="row-note">${escapeHtml(imageUrls.length)} media files</div>` : ""}</td>
         <td><b>${escapeHtml(item.name)}</b><div class="row-note">${escapeHtml(item.id)}</div></td>
         <td>${escapeHtml(item.code)}</td>
         <td>${escapeHtml(item.priority ?? 0)}</td>
@@ -2084,6 +2208,8 @@ function categoryServiceMasterRows(items = []) {
       <td>${status(item.showEta ? "show" : "hide")}</td>
       <td>${serviceMasterIconSummary(item.icons || [])}</td>
       <td>${escapeHtml(item.serviceCategoryGridSize || "3x3")}</td>
+      <td>${Number(item.serviceCategorySliderItemCount || 0) > 0 ? `${escapeHtml(item.serviceCategorySliderItemCount)} / ${escapeHtml(item.serviceCategorySliderVisibleItems || 2)}` : "Off"}</td>
+      <td>${status(item.serviceCategorySliderAutoPlay ? "on" : "off")}</td>
       <td>${escapeHtml(item.servicePosition ?? 0)}</td>
       <td>${status(item.isEnabled ? "enabled" : "disabled")}</td>
       <td>${status(item.isActive ? "active" : "inactive")}</td>
@@ -2136,35 +2262,188 @@ function collectCategoryServiceMasterIcons(form = $("#categoryServiceMasterForm"
 
 const categoryGuidanceDefaults = {
   taskListTitle: "Tasks related to category",
+  taskIcon: String.fromCharCode(9733),
+  showTaskList: true,
   canDoTitle: "What Assistant can do",
-  cantDoTitle: "What Assistant can't do"
+  canDoIcon: String.fromCharCode(10003),
+  showCanDoList: true,
+  cantDoTitle: "What Assistant can't do",
+  cantDoIcon: String.fromCharCode(10005),
+  showCantDoList: true,
+  categoryGuidanceDisplayMode: "list",
+  categoryGuidanceGridColumns: 3,
+  categoryGuidanceShowImage: false,
+  categoryGuidanceFontFamily: "Inter",
+  categoryGuidanceFontSize: 10,
+  categoryGuidanceTextColor: "#2b2f38",
+  categoryGuidanceTitleFontFamily: "Inter",
+  categoryGuidanceTitleFontSize: 12,
+  categoryGuidanceTitleFontWeight: 700,
+  categoryGuidanceTitleTextColor: "#2b2f38",
+  categoryGuidanceTitleIconSize: 24,
+  categoryGuidanceRowImageSize: 44,
+  categoryGuidanceRowRadius: 8,
+  categoryGuidanceRowTextPosition: "outside",
+  categoryGuidanceRowTextAlign: "left",
+  categoryGuidanceRowOverlayEnabled: true,
+  categoryGuidanceRowOverlayColor: "#111936",
+  categoryGuidanceRowOverlayHeight: 100,
+  categoryGuidanceRowOverlayOpacity: 45,
+  categoryGuidanceRowOverlayGradientEnabled: true,
+  categoryGuidanceRowOverlayGradientOpacity: 35
 };
+
+function categoryGuidanceIconValue(value, fallback = "") {
+  const raw = value == null ? fallback : String(value).trim();
+  return raw === "&#9733;" ? String.fromCharCode(9733)
+    : raw === "&#10003;" ? String.fromCharCode(10003)
+      : raw === "&#10005;" ? String.fromCharCode(10005)
+        : raw;
+}
+
+function categoryGuidanceIconPreview(value = "") {
+  const raw = categoryGuidanceIconValue(value, "");
+  if (!raw) return "";
+  if (/^(?:https?:\/\/|\/?uploads\/|\/|data:image\/)/i.test(raw)) {
+    const normalized = /^uploads\//i.test(raw) ? `/${raw}` : raw;
+    const source = raw.startsWith("data:") ? raw : assetUrl(normalized);
+    return `<img class="category-guidance-icon-image" src="${escapeHtml(source)}" alt="">`;
+  }
+  return escapeHtml(raw);
+}
 
 function normalizeCategoryGuidanceList(values = []) {
   return (Array.isArray(values) ? values : [])
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
+    .map((value) => {
+      if (value && typeof value === "object") {
+        return {
+          text: String(value.text || value.name || value.title || "").trim(),
+          imageUrl: String(value.imageUrl || value.image_url || value.image || "").trim(),
+          strikeThrough: Object.prototype.hasOwnProperty.call(value, "strikeThrough") || Object.prototype.hasOwnProperty.call(value, "strike_through")
+            ? value.strikeThrough === true || value.strike_through === true
+            : null
+        };
+      }
+      return { text: String(value || "").trim(), imageUrl: "", strikeThrough: null };
+    })
+    .filter((value) => value.text || value.imageUrl);
 }
 
-function categoryMasterGuidanceRows(type, values = []) {
+function parseCategoryGuidanceObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function categoryGuidanceEditSource(data = {}) {
+  const root = data && typeof data === "object" ? data : {};
+  const config = parseCategoryGuidanceObject(root.config);
+  const nested = {
+    ...parseCategoryGuidanceObject(config.categoryGuidance),
+    ...parseCategoryGuidanceObject(root.categoryGuidance)
+  };
+  return { ...nested, ...root };
+}
+
+function categoryGuidanceSnakeCase(name = "") {
+  return String(name).replace(/[A-Z]/g, (match) => `_${match.toLowerCase()}`);
+}
+
+function categoryGuidanceValue(source, name, fallback) {
+  const snakeName = categoryGuidanceSnakeCase(name);
+  if (source[name] !== undefined && source[name] !== null) return source[name];
+  if (source[snakeName] !== undefined && source[snakeName] !== null) return source[snakeName];
+  return fallback;
+}
+
+function categoryGuidanceBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function categoryGuidanceListValue(source, name) {
+  let value = categoryGuidanceValue(source, name, []);
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch (_error) {
+      value = [];
+    }
+  }
+  return normalizeCategoryGuidanceList(value);
+}
+
+let categoryGuidanceRowImageSequence = 0;
+
+function categoryGuidanceRowImagePreview(imageUrl = "") {
+  const raw = String(imageUrl || "").trim();
+  if (!raw) return `<span class="helper-text">No image</span>`;
+  const normalized = /^uploads\//i.test(raw) ? `/${raw}` : raw;
+  const source = raw.startsWith("data:") ? raw : assetUrl(normalized);
+  return `<img src="${escapeHtml(source)}" alt="">`;
+}
+
+function categoryGuidanceRowImageValueInput(editor = null) {
+  return editor?.querySelector("[data-category-guidance-image-value]")
+    || editor?.closest("[data-category-guidance-row]")?.querySelector("[data-category-guidance-image-value]")
+    || null;
+}
+
+function categoryMasterGuidanceRows(type, values = [], showImage = false) {
   const rows = normalizeCategoryGuidanceList(values);
-  const list = rows.length ? rows : [""];
-  return list.map((value) => `<div class="category-guidance-row" data-category-guidance-row="${type}">
+  const list = rows.length ? rows : [{ text: "", imageUrl: "", strikeThrough: type === "cantDo" }];
+  return list.map((value) => {
+    const imageInputId = `categoryGuidance${type}RowImageUploadInput${categoryGuidanceRowImageSequence++}`;
+    const strikeThrough = value.strikeThrough == null ? type === "cantDo" : value.strikeThrough === true;
+    return `<div class="category-guidance-row" data-category-guidance-row="${type}">
     <button class="category-guidance-drag" data-category-guidance-drag-handle draggable="true" type="button" title="Drag to reorder" aria-label="Drag to reorder">Move</button>
-    <input class="form-control" data-category-guidance-input="${type}" value="${escapeHtml(value)}" placeholder="${type === "task" ? "Task related to this category" : type === "canDo" ? "Assistant can do..." : "Assistant can't do..."}">
+    <div class="category-guidance-row-content">
+      <input class="form-control" data-category-guidance-input="${type}" value="${escapeHtml(value.text)}" placeholder="${type === "task" ? "Task related to this category" : type === "canDo" ? "Assistant can do..." : "Assistant can't do..."}">
+      <input type="hidden" data-category-guidance-image-value value="${escapeHtml(value.imageUrl)}">
+      ${showImage ? `<div class="category-guidance-row-image" data-category-guidance-row-image-editor data-upload-box="categoryGuidance${type}RowImage" data-upload-kind="image">
+        <div class="category-guidance-row-image-preview" data-category-guidance-row-image-preview>${categoryGuidanceRowImagePreview(value.imageUrl)}</div>
+        <input id="${imageInputId}" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-category-guidance-row-image-upload>
+        <button class="btn btn-soft btn-xs" data-action="browse-image" data-target="${imageInputId}" type="button">Upload image</button>
+        <button class="btn btn-light btn-xs" data-action="clear-category-guidance-row-image" type="button">Clear</button>
+      </div>` : ""}
+      <label class="form-check category-guidance-row-strike-through"><input class="form-check-input" type="checkbox" data-category-guidance-strike-through${strikeThrough ? " checked" : ""}> Strike through</label>
+    </div>
     <button class="btn btn-light btn-sm" data-action="remove-category-guidance-row" data-type="${type}" type="button">Remove</button>
-  </div>`).join("");
+  </div>`;
+  }).join("");
 }
 
-function categoryMasterGuidanceBlock(type, icon, iconClass, titleName, defaultTitle, values = []) {
+function categoryMasterGuidanceBlock(type, iconClass, titleName, defaultTitle, values = [], showName = "", showVisible = true, iconName = "", iconValue = "", showImage = false) {
+  const iconInputId = `categoryGuidance${type}IconUploadInput`;
   return `<div class="category-guidance-block">
     <div class="category-guidance-head">
-      <span class="category-guidance-icon ${iconClass}">${icon}</span>
-      <input class="form-control" name="${titleName}" value="${escapeHtml(defaultTitle)}" placeholder="${escapeHtml(defaultTitle)}">
+      <div class="category-guidance-icon-editor" data-category-guidance-icon-editor data-upload-box="categoryGuidance${type}Icon" data-upload-kind="image">
+        <span class="category-guidance-icon ${iconClass}" data-category-guidance-icon-preview>${categoryGuidanceIconPreview(iconValue)}</span>
+        <input type="hidden" name="${iconName}" data-category-guidance-icon-value value="${escapeHtml(iconValue)}">
+        <input id="${iconInputId}" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-category-guidance-icon-upload>
+        <div class="category-guidance-icon-actions">
+          <button class="btn btn-soft btn-xs" data-action="browse-image" data-target="${iconInputId}" type="button">Upload</button>
+          <button class="btn btn-light btn-xs" data-action="clear-category-guidance-icon" type="button">Clear</button>
+        </div>
+      </div>
+      <div class="category-guidance-title-field">
+        <span class="helper-text">Section title</span>
+        <input class="form-control" name="${titleName}" value="${escapeHtml(defaultTitle)}" placeholder="${escapeHtml(defaultTitle)}">
+      </div>
+      ${showName ? `<label class="form-check module-switch category-guidance-visibility"><input class="form-check-input" type="checkbox" name="${showName}"${showVisible ? " checked" : ""}> Show</label>` : ""}
       <button class="btn btn-soft btn-sm" data-action="add-category-guidance-row" data-type="${type}" type="button">Add</button>
     </div>
     <div class="category-guidance-list" data-category-guidance-list="${type}">
-      ${categoryMasterGuidanceRows(type, values)}
+      ${categoryMasterGuidanceRows(type, values, showImage)}
     </div>
   </div>`;
 }
@@ -2173,31 +2452,148 @@ function renderCategoryMasterGuidance(form = $("#categoryMasterForm"), data = {}
   if (!form) return;
   const wrap = form.querySelector("[data-category-guidance-editor]");
   if (!wrap) return;
-  const taskTitle = data.taskListTitle || categoryGuidanceDefaults.taskListTitle;
-  const canDoTitle = data.canDoTitle || categoryGuidanceDefaults.canDoTitle;
-  const cantDoTitle = data.cantDoTitle || categoryGuidanceDefaults.cantDoTitle;
+  const source = categoryGuidanceEditSource(data);
+  const taskList = categoryGuidanceListValue(source, "taskList");
+  const canDoList = categoryGuidanceListValue(source, "canDoList");
+  const cantDoList = categoryGuidanceListValue(source, "cantDoList");
+  const showImage = categoryGuidanceBoolean(categoryGuidanceValue(source, "categoryGuidanceShowImage", categoryGuidanceDefaults.categoryGuidanceShowImage), categoryGuidanceDefaults.categoryGuidanceShowImage);
+  const showExistingRowImages = [...taskList, ...canDoList, ...cantDoList].some((value) => value.imageUrl);
+  const showRowImageControls = showImage || showExistingRowImages;
+  const taskTitle = categoryGuidanceValue(source, "taskListTitle", "") || categoryGuidanceDefaults.taskListTitle;
+  const taskIcon = categoryGuidanceIconValue(categoryGuidanceValue(source, "taskIcon", categoryGuidanceDefaults.taskIcon), categoryGuidanceDefaults.taskIcon);
+  const canDoTitle = categoryGuidanceValue(source, "canDoTitle", "") || categoryGuidanceDefaults.canDoTitle;
+  const canDoIcon = categoryGuidanceIconValue(categoryGuidanceValue(source, "canDoIcon", categoryGuidanceDefaults.canDoIcon), categoryGuidanceDefaults.canDoIcon);
+  const cantDoTitle = categoryGuidanceValue(source, "cantDoTitle", "") || categoryGuidanceDefaults.cantDoTitle;
+  const cantDoIcon = categoryGuidanceIconValue(categoryGuidanceValue(source, "cantDoIcon", categoryGuidanceDefaults.cantDoIcon), categoryGuidanceDefaults.cantDoIcon);
+  const displayMode = categoryGuidanceValue(source, "categoryGuidanceDisplayMode", "list") === "grid" ? "grid" : categoryGuidanceDefaults.categoryGuidanceDisplayMode;
+  const gridColumnsValue = Number(categoryGuidanceValue(source, "categoryGuidanceGridColumns", categoryGuidanceDefaults.categoryGuidanceGridColumns));
+  const gridColumns = [1, 2, 3, 4].includes(gridColumnsValue) ? gridColumnsValue : categoryGuidanceDefaults.categoryGuidanceGridColumns;
+  const fontFamilyValue = categoryGuidanceValue(source, "categoryGuidanceFontFamily", categoryGuidanceDefaults.categoryGuidanceFontFamily);
+  const fontFamily = ["Inter", "Arial", "Roboto", "Poppins", "Georgia", "Verdana", "system-ui"].includes(fontFamilyValue) ? fontFamilyValue : categoryGuidanceDefaults.categoryGuidanceFontFamily;
+  const fontSize = Math.max(8, Math.min(40, Number(categoryGuidanceValue(source, "categoryGuidanceFontSize", categoryGuidanceDefaults.categoryGuidanceFontSize)) || categoryGuidanceDefaults.categoryGuidanceFontSize));
+  const sourceTextColor = categoryGuidanceValue(source, "categoryGuidanceTextColor", "");
+  const textColor = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(String(sourceTextColor)) ? sourceTextColor : categoryGuidanceDefaults.categoryGuidanceTextColor;
+  const titleFontFamilyValue = categoryGuidanceValue(source, "categoryGuidanceTitleFontFamily", categoryGuidanceDefaults.categoryGuidanceTitleFontFamily);
+  const titleFontFamily = ["Inter", "Arial", "Roboto", "Poppins", "Georgia", "Verdana", "system-ui"].includes(titleFontFamilyValue) ? titleFontFamilyValue : categoryGuidanceDefaults.categoryGuidanceTitleFontFamily;
+  const titleFontSize = Math.max(8, Math.min(40, Number(categoryGuidanceValue(source, "categoryGuidanceTitleFontSize", categoryGuidanceDefaults.categoryGuidanceTitleFontSize)) || categoryGuidanceDefaults.categoryGuidanceTitleFontSize));
+  const titleFontWeightValue = Number(categoryGuidanceValue(source, "categoryGuidanceTitleFontWeight", categoryGuidanceDefaults.categoryGuidanceTitleFontWeight));
+  const titleFontWeight = [100, 200, 300, 400, 500, 600, 700, 800, 900].includes(titleFontWeightValue) ? titleFontWeightValue : categoryGuidanceDefaults.categoryGuidanceTitleFontWeight;
+  const sourceTitleTextColor = categoryGuidanceValue(source, "categoryGuidanceTitleTextColor", "");
+  const titleTextColor = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(String(sourceTitleTextColor)) ? sourceTitleTextColor : categoryGuidanceDefaults.categoryGuidanceTitleTextColor;
+  const titleIconSizeValue = Number(categoryGuidanceValue(source, "categoryGuidanceTitleIconSize", categoryGuidanceDefaults.categoryGuidanceTitleIconSize));
+  const titleIconSize = Number.isFinite(titleIconSizeValue) ? Math.max(12, Math.min(64, titleIconSizeValue)) : categoryGuidanceDefaults.categoryGuidanceTitleIconSize;
+  const rowImageSizeValue = Number(categoryGuidanceValue(source, "categoryGuidanceRowImageSize", categoryGuidanceDefaults.categoryGuidanceRowImageSize));
+  const rowImageSize = Number.isFinite(rowImageSizeValue) ? Math.max(24, Math.min(240, rowImageSizeValue)) : categoryGuidanceDefaults.categoryGuidanceRowImageSize;
+  const rowRadiusValue = Number(categoryGuidanceValue(source, "categoryGuidanceRowRadius", categoryGuidanceDefaults.categoryGuidanceRowRadius));
+  const rowRadius = Number.isFinite(rowRadiusValue) ? Math.max(0, Math.min(40, rowRadiusValue)) : categoryGuidanceDefaults.categoryGuidanceRowRadius;
+  const rowTextPosition = categoryGuidanceValue(source, "categoryGuidanceRowTextPosition", categoryGuidanceDefaults.categoryGuidanceRowTextPosition) === "inside" ? "inside" : "outside";
+  const rowTextAlignValue = categoryGuidanceValue(source, "categoryGuidanceRowTextAlign", categoryGuidanceDefaults.categoryGuidanceRowTextAlign);
+  const rowTextAlign = ["left", "center", "right"].includes(rowTextAlignValue) ? rowTextAlignValue : categoryGuidanceDefaults.categoryGuidanceRowTextAlign;
+  const rowOverlayEnabled = categoryGuidanceBoolean(categoryGuidanceValue(source, "categoryGuidanceRowOverlayEnabled", categoryGuidanceDefaults.categoryGuidanceRowOverlayEnabled), categoryGuidanceDefaults.categoryGuidanceRowOverlayEnabled);
+  const sourceRowOverlayColor = categoryGuidanceValue(source, "categoryGuidanceRowOverlayColor", "");
+  const rowOverlayColor = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(String(sourceRowOverlayColor)) ? sourceRowOverlayColor : categoryGuidanceDefaults.categoryGuidanceRowOverlayColor;
+  const rowOverlayHeightValue = Number(categoryGuidanceValue(source, "categoryGuidanceRowOverlayHeight", categoryGuidanceDefaults.categoryGuidanceRowOverlayHeight));
+  const rowOverlayHeight = Number.isFinite(rowOverlayHeightValue) ? Math.max(0, Math.min(100, rowOverlayHeightValue)) : categoryGuidanceDefaults.categoryGuidanceRowOverlayHeight;
+  const rowOverlayOpacityValue = Number(categoryGuidanceValue(source, "categoryGuidanceRowOverlayOpacity", categoryGuidanceDefaults.categoryGuidanceRowOverlayOpacity));
+  const rowOverlayOpacity = Number.isFinite(rowOverlayOpacityValue) ? Math.max(0, Math.min(100, rowOverlayOpacityValue <= 1 ? rowOverlayOpacityValue * 100 : rowOverlayOpacityValue)) : categoryGuidanceDefaults.categoryGuidanceRowOverlayOpacity;
+  const rowOverlayGradientEnabled = categoryGuidanceBoolean(categoryGuidanceValue(source, "categoryGuidanceRowOverlayGradientEnabled", categoryGuidanceDefaults.categoryGuidanceRowOverlayGradientEnabled), categoryGuidanceDefaults.categoryGuidanceRowOverlayGradientEnabled);
+  const rowOverlayGradientOpacityValue = Number(categoryGuidanceValue(source, "categoryGuidanceRowOverlayGradientOpacity", categoryGuidanceDefaults.categoryGuidanceRowOverlayGradientOpacity));
+  const rowOverlayGradientOpacity = Number.isFinite(rowOverlayGradientOpacityValue) ? Math.max(0, Math.min(100, rowOverlayGradientOpacityValue <= 1 ? rowOverlayGradientOpacityValue * 100 : rowOverlayGradientOpacityValue)) : categoryGuidanceDefaults.categoryGuidanceRowOverlayGradientOpacity;
+  const showTaskList = categoryGuidanceBoolean(categoryGuidanceValue(source, "showTaskList", true), true);
+  const showCanDoList = categoryGuidanceBoolean(categoryGuidanceValue(source, "showCanDoList", true), true);
+  const showCantDoList = categoryGuidanceBoolean(categoryGuidanceValue(source, "showCantDoList", true), true);
   wrap.innerHTML = `
-    ${categoryMasterGuidanceBlock("task", "&#9733;", "star", "taskListTitle", taskTitle, data.taskList || [])}
-    ${categoryMasterGuidanceBlock("canDo", "&#10003;", "tick", "canDoTitle", canDoTitle, data.canDoList || [])}
-    ${categoryMasterGuidanceBlock("cantDo", "&#10005;", "cross", "cantDoTitle", cantDoTitle, data.cantDoList || [])}
+    <div class="category-guidance-display-settings">
+      <div class="control-title"><div><p>Customer app</p><h3>Guidance display</h3></div></div>
+      <div class="category-master-priority-row">
+        ${priceMasterFloatingField("Guidance Layout", `<select class="form-select" name="categoryGuidanceDisplayMode"><option value="list"${displayMode === "list" ? " selected" : ""}>List</option><option value="grid"${displayMode === "grid" ? " selected" : ""}>Grid</option></select>`)}
+        ${priceMasterFloatingField("Grid Columns", `<select class="form-select" name="categoryGuidanceGridColumns"><option value="1"${gridColumns === 1 ? " selected" : ""}>1</option><option value="2"${gridColumns === 2 ? " selected" : ""}>2</option><option value="3"${gridColumns === 3 ? " selected" : ""}>3</option><option value="4"${gridColumns === 4 ? " selected" : ""}>4</option></select>`)}
+        <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="categoryGuidanceShowImage"${showImage ? " checked" : ""}> Show image</label>
+      </div>
+      <div class="category-master-priority-row">
+        ${priceMasterFloatingField("Guidance Font", `<select class="form-select" name="categoryGuidanceFontFamily">${["Inter", "Arial", "Roboto", "Poppins", "Georgia", "Verdana", "system-ui"].map((family) => `<option value="${family}"${fontFamily === family ? " selected" : ""}>${family}</option>`).join("")}</select>`)}
+        ${priceMasterFloatingField("Guidance Font Size (px)", `<input class="form-control" name="categoryGuidanceFontSize" type="number" min="8" max="40" step="1" value="${escapeHtml(fontSize)}" placeholder=" ">`)}
+        ${priceMasterFloatingField("Guidance Text Color", `<input class="form-control" name="categoryGuidanceTextColor" type="color" value="${escapeHtml(textColor)}">`)}
+      </div>
+      <div class="category-master-priority-row">
+        ${priceMasterFloatingField("Title Font", `<select class="form-select" name="categoryGuidanceTitleFontFamily">${["Inter", "Arial", "Roboto", "Poppins", "Georgia", "Verdana", "system-ui"].map((family) => `<option value="${family}"${titleFontFamily === family ? " selected" : ""}>${family}</option>`).join("")}</select>`)}
+        ${priceMasterFloatingField("Title Size (px)", `<input class="form-control" name="categoryGuidanceTitleFontSize" type="number" min="8" max="40" step="1" value="${escapeHtml(titleFontSize)}" placeholder=" ">`)}
+        ${priceMasterFloatingField("Title Weight", `<select class="form-select" name="categoryGuidanceTitleFontWeight">${[100, 200, 300, 400, 500, 600, 700, 800, 900].map((weight) => `<option value="${weight}"${titleFontWeight === weight ? " selected" : ""}>${weight}</option>`).join("")}</select>`)}
+        ${priceMasterFloatingField("Title Color", `<input class="form-control" name="categoryGuidanceTitleTextColor" type="color" value="${escapeHtml(titleTextColor)}">`)}
+        ${priceMasterFloatingField("Title icon image size (px)", `<input class="form-control" name="categoryGuidanceTitleIconSize" type="number" min="12" max="64" step="1" value="${escapeHtml(titleIconSize)}" placeholder=" ">`)}
+      </div>
+      <div class="category-master-priority-row category-guidance-row-style-settings">
+        ${priceMasterFloatingField("Row image size (px)", `<input class="form-control" name="categoryGuidanceRowImageSize" type="number" min="24" max="240" step="1" value="${escapeHtml(rowImageSize)}" placeholder=" ">`)}
+        ${priceMasterFloatingField("Row radius (px)", `<input class="form-control" name="categoryGuidanceRowRadius" type="number" min="0" max="40" step="1" value="${escapeHtml(rowRadius)}" placeholder=" ">`)}
+        ${priceMasterFloatingField("Row text position", `<select class="form-select" name="categoryGuidanceRowTextPosition"><option value="outside"${rowTextPosition === "outside" ? " selected" : ""}>Outside image</option><option value="inside"${rowTextPosition === "inside" ? " selected" : ""}>Inside image</option></select>`)}
+        ${priceMasterFloatingField("Row text align", `<select class="form-select" name="categoryGuidanceRowTextAlign"><option value="left"${rowTextAlign === "left" ? " selected" : ""}>Left</option><option value="center"${rowTextAlign === "center" ? " selected" : ""}>Center</option><option value="right"${rowTextAlign === "right" ? " selected" : ""}>Right</option></select>`)}
+      </div>
+      <div class="category-master-priority-row category-guidance-row-style-settings">
+        <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="categoryGuidanceRowOverlayEnabled"${rowOverlayEnabled ? " checked" : ""}> Show image overlay</label>
+        ${priceMasterFloatingField("Overlay color", `<input class="form-control" name="categoryGuidanceRowOverlayColor" type="color" value="${escapeHtml(rowOverlayColor)}">`)}
+        ${priceMasterFloatingField("Overlay height (%)", `<input class="form-control" name="categoryGuidanceRowOverlayHeight" type="number" min="0" max="100" step="1" value="${escapeHtml(rowOverlayHeight)}" placeholder=" ">`)}
+        ${priceMasterFloatingField("Overlay opacity (%)", `<input class="form-control" name="categoryGuidanceRowOverlayOpacity" type="number" min="0" max="100" step="1" value="${escapeHtml(rowOverlayOpacity)}" placeholder=" ">`)}
+        <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="categoryGuidanceRowOverlayGradientEnabled"${rowOverlayGradientEnabled ? " checked" : ""}> Gradient overlay</label>
+        ${priceMasterFloatingField("Gradient opacity (%)", `<input class="form-control" name="categoryGuidanceRowOverlayGradientOpacity" type="number" min="0" max="100" step="1" value="${escapeHtml(rowOverlayGradientOpacity)}" placeholder=" ">`)}
+      </div>
+    </div>
+    ${categoryMasterGuidanceBlock("task", "star", "taskListTitle", taskTitle, taskList, "showTaskList", showTaskList, "taskIcon", taskIcon, showRowImageControls)}
+    ${categoryMasterGuidanceBlock("canDo", "tick", "canDoTitle", canDoTitle, canDoList, "showCanDoList", showCanDoList, "canDoIcon", canDoIcon, showRowImageControls)}
+    ${categoryMasterGuidanceBlock("cantDo", "cross", "cantDoTitle", cantDoTitle, cantDoList, "showCantDoList", showCantDoList, "cantDoIcon", cantDoIcon, showRowImageControls)}
   `;
 }
 
 function collectCategoryMasterGuidance(form = $("#categoryMasterForm")) {
-  const list = (type) => [...form.querySelectorAll(`[data-category-guidance-input="${type}"]`)]
-    .map((input) => input.value.trim())
-    .filter(Boolean);
+  const list = (type) => [...form.querySelectorAll(`[data-category-guidance-row="${type}"]`)]
+    .map((row) => ({
+      text: row.querySelector(`[data-category-guidance-input="${type}"]`)?.value.trim() || "",
+      imageUrl: row.querySelector("[data-category-guidance-image-value]")?.value.trim() || "",
+      strikeThrough: row.querySelector("[data-category-guidance-strike-through]")?.checked === true
+    }))
+    .filter((value) => value.text);
+  const numberField = (name, fallback) => {
+    const value = Number(form.elements[name]?.value);
+    return Number.isFinite(value) ? value : fallback;
+  };
   return {
     taskListTitle: form.elements.taskListTitle?.value || categoryGuidanceDefaults.taskListTitle,
     taskList: list("task"),
+    taskIcon: form.elements.taskIcon ? form.elements.taskIcon.value.trim() : categoryGuidanceDefaults.taskIcon,
+    showTaskList: form.elements.showTaskList?.checked !== false,
     canDoTitle: form.elements.canDoTitle?.value || categoryGuidanceDefaults.canDoTitle,
     canDoList: list("canDo"),
+    canDoIcon: form.elements.canDoIcon ? form.elements.canDoIcon.value.trim() : categoryGuidanceDefaults.canDoIcon,
+    showCanDoList: form.elements.showCanDoList?.checked !== false,
     cantDoTitle: form.elements.cantDoTitle?.value || categoryGuidanceDefaults.cantDoTitle,
-    cantDoList: list("cantDo")
+    cantDoList: list("cantDo"),
+    cantDoIcon: form.elements.cantDoIcon ? form.elements.cantDoIcon.value.trim() : categoryGuidanceDefaults.cantDoIcon,
+    showCantDoList: form.elements.showCantDoList?.checked !== false,
+    categoryGuidanceDisplayMode: form.elements.categoryGuidanceDisplayMode?.value === "grid" ? "grid" : "list",
+    categoryGuidanceGridColumns: Math.max(1, Math.min(4, Number(form.elements.categoryGuidanceGridColumns?.value || 3))),
+    categoryGuidanceShowImage: form.elements.categoryGuidanceShowImage?.checked === true,
+    categoryGuidanceFontFamily: form.elements.categoryGuidanceFontFamily?.value || "Inter",
+    categoryGuidanceFontSize: Math.max(8, Math.min(40, Number(form.elements.categoryGuidanceFontSize?.value || 10))),
+    categoryGuidanceTextColor: form.elements.categoryGuidanceTextColor?.value || "#2b2f38",
+    categoryGuidanceTitleFontFamily: form.elements.categoryGuidanceTitleFontFamily?.value || "Inter",
+    categoryGuidanceTitleFontSize: Math.max(8, Math.min(40, Number(form.elements.categoryGuidanceTitleFontSize?.value || 12))),
+    categoryGuidanceTitleFontWeight: Math.max(100, Math.min(900, Number(form.elements.categoryGuidanceTitleFontWeight?.value || 700))),
+    categoryGuidanceTitleTextColor: form.elements.categoryGuidanceTitleTextColor?.value || "#2b2f38",
+    categoryGuidanceTitleIconSize: Math.round(Math.max(12, Math.min(64, numberField("categoryGuidanceTitleIconSize", 24)))),
+    categoryGuidanceRowImageSize: Math.round(Math.max(24, Math.min(240, numberField("categoryGuidanceRowImageSize", 44)))),
+    categoryGuidanceRowRadius: Math.round(Math.max(0, Math.min(40, numberField("categoryGuidanceRowRadius", 8)))),
+    categoryGuidanceRowTextPosition: form.elements.categoryGuidanceRowTextPosition?.value === "inside" ? "inside" : "outside",
+    categoryGuidanceRowTextAlign: ["left", "center", "right"].includes(form.elements.categoryGuidanceRowTextAlign?.value) ? form.elements.categoryGuidanceRowTextAlign.value : "left",
+    categoryGuidanceRowOverlayEnabled: form.elements.categoryGuidanceRowOverlayEnabled?.checked === true,
+    categoryGuidanceRowOverlayColor: form.elements.categoryGuidanceRowOverlayColor?.value || "#111936",
+    categoryGuidanceRowOverlayHeight: Math.round(Math.max(0, Math.min(100, numberField("categoryGuidanceRowOverlayHeight", 100)))),
+    categoryGuidanceRowOverlayOpacity: Math.max(0, Math.min(100, numberField("categoryGuidanceRowOverlayOpacity", 45))),
+    categoryGuidanceRowOverlayGradientEnabled: form.elements.categoryGuidanceRowOverlayGradientEnabled?.checked === true,
+    categoryGuidanceRowOverlayGradientOpacity: Math.max(0, Math.min(100, numberField("categoryGuidanceRowOverlayGradientOpacity", 35)))
   };
 }
 
 let categoryGuidanceDragRow = null;
+let bookingTypeTimeSlotDragRow = null;
 
 function clearCategoryGuidanceDragState() {
   document.querySelectorAll(".category-guidance-row.dragging, .category-guidance-row.drag-over").forEach((row) => {
@@ -2209,6 +2605,19 @@ function clearCategoryGuidanceDragState() {
 function categoryGuidanceDropTarget(target) {
   const row = target?.closest?.("[data-category-guidance-row]");
   if (!row || !row.closest("#categoryMasterForm")) return null;
+  return row;
+}
+
+function clearBookingTypeTimeSlotDragState() {
+  document.querySelectorAll(".booking-type-time-slot.dragging, .booking-type-time-slot.drag-over").forEach((row) => {
+    row.classList.remove("dragging", "drag-over");
+  });
+  bookingTypeTimeSlotDragRow = null;
+}
+
+function bookingTypeTimeSlotDropTarget(target) {
+  const row = target?.closest?.("[data-booking-type-time-slot-row]");
+  if (!row || !row.closest("[data-time-slot-builder-form]")) return null;
   return row;
 }
 
@@ -2483,9 +2892,10 @@ function normalizeBookingTypeTimeCategories(categories = [], fallbackTimes = [])
       const sortOrder = Math.max(1, Math.round(Number(category?.sortOrder || index + 1)));
       const isActive = category?.isActive !== false;
       const timeSlots = [...new Set(category?.timeSlots || [])]
-        .filter((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time))
-        .sort();
-      return { id, name, sortOrder, isActive, timeSlots };
+        .filter((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time));
+      const inactiveTimeSlots = [...new Set(category?.inactiveTimeSlots || [])]
+        .filter((time) => timeSlots.includes(time));
+      return { id, name, sortOrder, isActive, timeSlots, inactiveTimeSlots };
     })
     .filter((category) => category.name)
     .sort((left, right) => left.sortOrder - right.sortOrder || left.name.localeCompare(right.name));
@@ -2493,14 +2903,20 @@ function normalizeBookingTypeTimeCategories(categories = [], fallbackTimes = [])
   const grouped = new Map();
   for (const time of csvValues(Array.isArray(fallbackTimes) ? fallbackTimes.join(",") : fallbackTimes)) {
     const period = bookingTypeTimePeriod(time);
-    if (!grouped.has(period)) grouped.set(period, { id: period, name: bookingTypeDefaultCategoryName(period), sortOrder: grouped.size + 1, isActive: true, timeSlots: [] });
+    if (!grouped.has(period)) grouped.set(period, { id: period, name: bookingTypeDefaultCategoryName(period), sortOrder: grouped.size + 1, isActive: true, timeSlots: [], inactiveTimeSlots: [] });
     grouped.get(period).timeSlots.push(time);
   }
-  return [...grouped.values()].map((category) => ({ ...category, timeSlots: [...new Set(category.timeSlots)].sort() }));
+  return [...grouped.values()].map((category) => ({ ...category, timeSlots: [...new Set(category.timeSlots)] }));
 }
 
 function activeBookingTypeTimeCategories(categories = [], fallbackTimes = []) {
-  return normalizeBookingTypeTimeCategories(categories, fallbackTimes).filter((category) => category.isActive);
+  return normalizeBookingTypeTimeCategories(categories, fallbackTimes)
+    .filter((category) => category.isActive)
+    .map((category) => ({
+      ...category,
+      timeSlots: category.timeSlots.filter((time) => !category.inactiveTimeSlots.includes(time))
+    }))
+    .filter((category) => category.timeSlots.length);
 }
 
 function bookingTypeTimeCategories(form = $("#bookingTypeForm")) {
@@ -2516,7 +2932,7 @@ function setBookingTypeTimeCategories(form = $("#bookingTypeForm"), categories =
   if (!form?.elements.timeCategories) return;
   const normalized = normalizeBookingTypeTimeCategories(categories);
   form.elements.timeCategories.value = JSON.stringify(normalized);
-  if (form.elements.timeSlots) form.elements.timeSlots.value = [...new Set(normalized.filter((category) => category.isActive).flatMap((category) => category.timeSlots))].sort().join(",");
+  if (form.elements.timeSlots) form.elements.timeSlots.value = [...new Set(normalized.filter((category) => category.isActive).flatMap((category) => category.timeSlots.filter((time) => !category.inactiveTimeSlots.includes(time))))].join(",");
   if (form.elements.activeTimeCategoryId) {
     const nextActive = normalized.some((category) => category.id === activeId) ? activeId : normalized[0]?.id || "";
     form.elements.activeTimeCategoryId.value = nextActive;
@@ -2556,8 +2972,16 @@ function renderBookingTypeTimeCategories(form = $("#bookingTypeForm")) {
       ${priceMasterFloatingField("Time Slot", `<div class="d-flex gap-2"><select class="form-select" name="timeSlotHour">${bookingTypeHourOptions().map((hour) => `<option value="${escapeHtml(hour)}">${escapeHtml(hour)}</option>`).join("")}</select><select class="form-select" name="timeSlotMinute">${bookingTypeMinuteOptions().map((minute) => `<option value="${escapeHtml(minute)}">${escapeHtml(minute)}</option>`).join("")}</select></div>`)}
       <button class="btn btn-soft" data-action="add-booking-type-time" type="button">Add Time Slot</button>
     </div>
-    <div class="booking-type-time-slot-grid">
-      ${active.timeSlots.length ? active.timeSlots.map((time) => `<button class="booking-type-time-slot" data-action="remove-booking-type-time" data-id="${escapeHtml(active.id)}" data-time="${escapeHtml(time)}" type="button">${escapeHtml(time)}<span>x</span></button>`).join("") : `<div class="empty-state">No time slots added in ${escapeHtml(active.name)}.</div>`}
+    <div class="booking-type-time-slot-grid" data-booking-type-time-slot-grid="${escapeHtml(active.id)}">
+      ${active.timeSlots.length ? active.timeSlots.map((time) => {
+        const slotActive = !active.inactiveTimeSlots.includes(time);
+        return `<div class="booking-type-time-slot ${slotActive ? "" : "inactive"}" data-booking-type-time-slot-row data-id="${escapeHtml(active.id)}" data-time="${escapeHtml(time)}" draggable="true">
+          <span class="booking-type-time-slot-drag" aria-hidden="true" title="Drag to reorder">::</span>
+          <strong>${escapeHtml(time)}</strong>
+          <button class="booking-type-time-slot-toggle ${slotActive ? "active" : "inactive"}" data-action="toggle-booking-type-time" data-id="${escapeHtml(active.id)}" data-time="${escapeHtml(time)}" type="button">${slotActive ? "Active" : "Inactive"}</button>
+          <button class="booking-type-time-slot-delete" data-action="remove-booking-type-time" data-id="${escapeHtml(active.id)}" data-time="${escapeHtml(time)}" type="button" aria-label="Delete ${escapeHtml(time)}" title="Delete time slot">x</button>
+        </div>`;
+      }).join("") : `<div class="empty-state">No time slots added in ${escapeHtml(active.name)}.</div>`}
     </div>
   </div>`;
 }
@@ -2617,9 +3041,33 @@ function addBookingTypeTimeSlot(form = $("#bookingTypeForm")) {
   const activeId = form.elements.activeTimeCategoryId?.value;
   if (!time || !activeId) return;
   const categories = bookingTypeTimeCategories(form).map((category) => category.id === activeId
-    ? { ...category, timeSlots: [...new Set([...category.timeSlots, time])].sort() }
+    ? { ...category, timeSlots: [...new Set([...category.timeSlots, time])] }
     : category);
   setBookingTypeTimeCategories(form, categories, activeId);
+}
+
+function toggleBookingTypeTimeSlot(form = $("#bookingTypeForm"), categoryId = "", time = "") {
+  if (!form || !categoryId || !time) return;
+  const categories = bookingTypeTimeCategories(form).map((category) => {
+    if (category.id !== categoryId) return category;
+    const inactive = new Set(category.inactiveTimeSlots || []);
+    if (inactive.has(time)) inactive.delete(time);
+    else inactive.add(time);
+    return { ...category, inactiveTimeSlots: [...inactive].filter((value) => category.timeSlots.includes(value)) };
+  });
+  setBookingTypeTimeCategories(form, categories, categoryId);
+}
+
+function reorderBookingTypeTimeSlots(form = $("#bookingTypeForm"), categoryId = "", orderedTimes = []) {
+  if (!form || !categoryId || !orderedTimes.length) return;
+  const categories = bookingTypeTimeCategories(form).map((category) => {
+    if (category.id !== categoryId) return category;
+    const knownTimes = new Set(category.timeSlots);
+    const nextTimes = [...new Set(orderedTimes.filter((time) => knownTimes.has(time)))];
+    category.timeSlots.forEach((time) => { if (!nextTimes.includes(time)) nextTimes.push(time); });
+    return { ...category, timeSlots: nextTimes };
+  });
+  setBookingTypeTimeCategories(form, categories, categoryId);
 }
 
 function toggleBookingTypeScheduleFields(form = $("#bookingTypeForm")) {
@@ -3812,6 +4260,47 @@ function offerTypeLabel(value = "") {
   return labels[value] || value || "-";
 }
 
+const OFFER_KIND_OPTIONS = [
+  ["flat_booking_discount", "Flat booking discount"],
+  ["percentage_booking_discount", "Percentage booking discount"],
+  ["free_first_booking", "Free first booking"],
+  ["free_service_minutes", "Free service minutes"],
+  ["first_booking_discount", "First booking discount"],
+  ["repeat_booking_discount", "Repeat booking discount"],
+  ["booking_milestone", "Booking milestone reward"],
+  ["referral_offer", "Referral offer"],
+  ["prepaid_booking_package", "Prepaid booking package"],
+  ["prepaid_service_hour_package", "Prepaid service-hour package"],
+  ["fixed_price", "Fixed-price offer"],
+  ["buy_x_get_y", "Buy X Get Y"]
+];
+
+function offerKindFromModel(offer = {}) {
+  const stored = String(offer.metadata?.offerKind || "").trim();
+  if (OFFER_KIND_OPTIONS.some(([value]) => value === stored)) return stored;
+  if (offer.offerType === "PACKAGE") return "prepaid_booking_package";
+  if (offer.offerType === "FREE_SERVICE") return "free_service_minutes";
+  if (offer.offerType === "CREDIT") return "booking_milestone";
+  if (offer.offerType === "FIXED_PRICE") return "fixed_price";
+  if (offer.offerType === "BUY_X_GET_Y") return "buy_x_get_y";
+  if (offer.discountType === "percent") return "percentage_booking_discount";
+  return "flat_booking_discount";
+}
+
+function offerKindLabel(value = "") {
+  if (!String(value || "").trim()) return "";
+  return OFFER_KIND_OPTIONS.find(([key]) => key === value)?.[1] || offerTypeLabel(value);
+}
+
+function offerKindStorageType(value = "") {
+  if (["prepaid_booking_package", "prepaid_service_hour_package"].includes(value)) return "PACKAGE";
+  if (["free_first_booking", "free_service_minutes"].includes(value)) return "FREE_SERVICE";
+  if (["booking_milestone", "referral_offer"].includes(value)) return "CREDIT";
+  if (value === "fixed_price") return "FIXED_PRICE";
+  if (value === "buy_x_get_y") return "BUY_X_GET_Y";
+  return "DISCOUNT";
+}
+
 function offerStatusText(value = "") {
   return String(value || "DRAFT").toLowerCase();
 }
@@ -4143,6 +4632,48 @@ function offerDurationOptions(selected = []) {
   </div>`;
 }
 
+function offerPackageProductHtml(offer = {}, offerKind = "") {
+  const product = offer.metadata?.packageProduct || {};
+  const isPackage = ["prepaid_booking_package", "prepaid_service_hour_package"].includes(offerKind);
+  const entitlementType = product.entitlementType || (offerKind === "prepaid_service_hour_package" ? "service_hours" : "bookings");
+  const quantity = product.quantity ?? (offerKind === "prepaid_service_hour_package" ? "" : offer.buyQuantity ?? "");
+  const durationMinutes = product.durationMinutes ?? (offerKind === "prepaid_booking_package" ? offer.metadata?.priceRule?.durationPerBookingMinutes ?? "" : "");
+  const validityDays = product.validityDays ?? offer.validDays ?? "";
+  const activationRule = product.activationRule || "on_purchase";
+  const minimumUnitMinutes = product.minimumRedemptionMinutes ?? 30;
+  const maximumUsageMinutes = product.maximumUsageMinutesPerBooking ?? durationMinutes ?? "";
+  const extraDurationPolicy = product.extraDurationPolicy || "chargeable";
+  const cancellationPolicy = product.cancellationPolicy || "restore_reserved";
+  const refundPolicy = product.refundPolicy || "unused_only";
+  const blackoutDates = Array.isArray(product.blackoutDates) ? product.blackoutDates.join("\n") : String(product.blackoutDates || "");
+  return `<div class="category-price-duration-card offer-package-product ${isPackage ? "" : "d-none"}" data-offer-package-config>
+    <div class="control-title"><div><p>Prepaid package product</p><h3>Entitlement rules</h3></div><span>versioned at purchase</span></div>
+    <p class="helper-text mb-0">Package benefits are reserved at confirmation, consumed at completion, and never changed for customers who already purchased them.</p>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Entitlement", `<select class="form-select" name="packageEntitlementType"><option value="bookings" ${entitlementType === "bookings" ? "selected" : ""}>Booking bundle</option><option value="service_hours" ${entitlementType === "service_hours" ? "selected" : ""}>Service-hour balance</option></select>`)}
+      ${priceMasterFloatingField("Quantity", `<input class="form-control" name="packageQuantity" type="number" min="1" step="1" value="${escapeHtml(quantity)}" placeholder="5">`)}
+      ${priceMasterFloatingField("Duration per booking (mins)", `<input class="form-control" name="packageDurationMinutes" type="number" min="1" step="1" value="${escapeHtml(durationMinutes)}" placeholder="60">`)}
+      ${priceMasterFloatingField("Validity (days)", `<input class="form-control" name="packageValidityDays" type="number" min="1" step="1" value="${escapeHtml(validityDays)}" placeholder="30">`)}
+      ${priceMasterFloatingField("Activation", `<select class="form-select" name="packageActivationRule"><option value="on_purchase" ${activationRule === "on_purchase" ? "selected" : ""}>On purchase</option><option value="on_first_use" ${activationRule === "on_first_use" ? "selected" : ""}>On first use</option></select>`)}
+      ${priceMasterFloatingField("Minimum redemption (mins)", `<input class="form-control" name="packageMinimumRedemptionMinutes" type="number" min="1" step="1" value="${escapeHtml(minimumUnitMinutes)}">`)}
+      ${priceMasterFloatingField("Max use per booking (mins)", `<input class="form-control" name="packageMaximumUsageMinutesPerBooking" type="number" min="1" step="1" value="${escapeHtml(maximumUsageMinutes)}" placeholder="60">`)}
+      ${priceMasterFloatingField("Extra duration", `<select class="form-select" name="packageExtraDurationPolicy"><option value="chargeable" ${extraDurationPolicy === "chargeable" ? "selected" : ""}>Chargeable at normal price</option><option value="blocked" ${extraDurationPolicy === "blocked" ? "selected" : ""}>Do not allow</option><option value="admin_review" ${extraDurationPolicy === "admin_review" ? "selected" : ""}>Admin review</option></select>`)}
+      ${priceMasterFloatingField("Cancellation", `<select class="form-select" name="packageCancellationPolicy"><option value="restore_reserved" ${cancellationPolicy === "restore_reserved" ? "selected" : ""}>Restore reserved benefit</option><option value="forfeit" ${cancellationPolicy === "forfeit" ? "selected" : ""}>Forfeit reserved benefit</option><option value="admin_review" ${cancellationPolicy === "admin_review" ? "selected" : ""}>Admin review</option></select>`)}
+      ${priceMasterFloatingField("Refund", `<select class="form-select" name="packageRefundPolicy"><option value="unused_only" ${refundPolicy === "unused_only" ? "selected" : ""}>Unused balance only</option><option value="none" ${refundPolicy === "none" ? "selected" : ""}>No refund</option><option value="admin_review" ${refundPolicy === "admin_review" ? "selected" : ""}>Admin review</option></select>`)}
+    </div>
+    <label class="form-check"><input class="form-check-input" type="checkbox" name="packageHouseholdSharingAllowed" ${product.householdSharingAllowed ? "checked" : ""}> Allow household sharing</label>
+    <label class="form-label mb-0" for="packageBlackoutDates">Blackout dates</label>
+    <textarea class="form-control" id="packageBlackoutDates" name="packageBlackoutDates" rows="2" placeholder="One YYYY-MM-DD date per line">${escapeHtml(blackoutDates)}</textarea>
+  </div>`;
+}
+
+function syncOfferPackageConfig(form = $("#offerMasterForm")) {
+  if (!form) return;
+  const kind = String(form.elements.offerKind?.value || "");
+  const packageConfig = form.querySelector("[data-offer-package-config]");
+  if (packageConfig) packageConfig.classList.toggle("d-none", !["prepaid_booking_package", "prepaid_service_hour_package"].includes(kind));
+}
+
 function offerFormHtml(offer = {}) {
   const serviceMasterIds = offer.serviceMasterIds || [];
   const categoryIds = offer.categoryIds || [];
@@ -4151,13 +4682,15 @@ function offerFormHtml(offer = {}) {
   const bookingTypes = offer.bookingTypes || [];
   const contentItems = offer.contentItems || [];
   const priceRule = offer.metadata?.priceRule || {};
+  const campaign = offer.metadata?.campaign || {};
   const scope = offerPrimaryScope(offer);
+  const offerKind = offerKindFromModel(offer);
   return `<form class="master-form stack" data-form="offer-master" id="offerMasterForm">
     <input type="hidden" name="id" value="${escapeHtml(offer.id || "")}">
     <div class="control-title"><div><p>Basic Information</p><h3>Offer Setup</h3></div><span>${escapeHtml(offer.status || "DRAFT")}</span></div>
     <div class="master-form compact mb-0">
       ${priceMasterFloatingField("Internal Name", `<input class="form-control" name="internalName" maxlength="160" value="${escapeHtml(offer.internalName || offer.title || "")}" required>`)}
-      ${priceMasterFloatingField("Offer Type", `<select class="form-select" name="offerType" required><option value="PACKAGE" ${offer.offerType === "PACKAGE" ? "selected" : ""}>Package</option><option value="DISCOUNT" ${offer.offerType === "DISCOUNT" ? "selected" : ""}>Discount</option><option value="BUY_X_GET_Y" ${offer.offerType === "BUY_X_GET_Y" ? "selected" : ""}>Buy X Get Y</option><option value="FREE_SERVICE" ${offer.offerType === "FREE_SERVICE" ? "selected" : ""}>Free Service</option><option value="CREDIT" ${offer.offerType === "CREDIT" ? "selected" : ""}>Credit</option><option value="FIXED_PRICE" ${offer.offerType === "FIXED_PRICE" ? "selected" : ""}>Fixed Price</option></select>`)}
+      ${priceMasterFloatingField("Offer / Package Type", `<select class="form-select" name="offerKind" required>${OFFER_KIND_OPTIONS.map(([value, label]) => `<option value="${escapeHtml(value)}" ${offerKind === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>`)}
       ${priceMasterFloatingField("Status", `<select class="form-select" name="status"><option value="DRAFT" ${offer.status === "DRAFT" || !offer.status ? "selected" : ""}>Draft</option><option value="SCHEDULED" ${offer.status === "SCHEDULED" ? "selected" : ""}>Scheduled</option><option value="ACTIVE" ${offer.status === "ACTIVE" ? "selected" : ""}>Active</option><option value="PAUSED" ${offer.status === "PAUSED" ? "selected" : ""}>Paused</option><option value="ARCHIVED" ${offer.status === "ARCHIVED" ? "selected" : ""}>Archived</option></select>`)}
       ${priceMasterFloatingField("Priority", `<input class="form-control" name="priority" type="number" min="0" step="1" value="${escapeHtml(offer.priority ?? 0)}">`)}
     </div>
@@ -4195,6 +4728,16 @@ function offerFormHtml(offer = {}) {
       ${priceMasterFloatingField("Discount Amount", `<input class="form-control" name="priceRuleDiscountAmount" type="number" min="0" step="0.01" value="${escapeHtml(priceRule.discountAmount ?? "")}">`)}
       ${priceMasterFloatingField("Selling Price", `<input class="form-control" name="priceRuleSellingPrice" type="number" min="0" step="0.01" value="${escapeHtml(priceRule.sellingPrice ?? (offer.packagePricePaise ? Number(offer.packagePricePaise || 0) / 100 : ""))}">`)}
     </div>
+    <div class="control-title"><div><p>Campaign guardrails</p><h3>Budget and eligibility limits</h3></div><span>server enforced</span></div>
+    <div class="master-form compact mb-0">
+      ${priceMasterFloatingField("Campaign Budget", `<input class="form-control" name="campaignBudget" type="number" min="0" step="0.01" value="${escapeHtml(campaign.budgetPaise == null ? "" : Number(campaign.budgetPaise || 0) / 100)}" placeholder="Optional">`)}
+      ${priceMasterFloatingField("Max Benefit / Redemption", `<input class="form-control" name="campaignMaxBenefit" type="number" min="0" step="0.01" value="${escapeHtml(campaign.maxBenefitPaise == null ? "" : Number(campaign.maxBenefitPaise || 0) / 100)}" placeholder="Optional">`)}
+      ${priceMasterFloatingField("Minimum Service Amount", `<input class="form-control" name="campaignMinimumServiceAmount" type="number" min="0" step="0.01" value="${escapeHtml(campaign.minimumServiceAmountPaise == null ? "" : Number(campaign.minimumServiceAmountPaise || 0) / 100)}" placeholder="Optional">`)}
+      ${priceMasterFloatingField("Eligible Weekdays", `<input class="form-control" name="campaignWeekdays" value="${escapeHtml((campaign.weekdays || []).join(", "))}" placeholder="Mon, Tue, Wed">`)}
+      ${priceMasterFloatingField("Booking Channels", `<input class="form-control" name="campaignChannels" value="${escapeHtml((campaign.channels || []).join(", "))}" placeholder="app, web, admin">`)}
+      ${priceMasterFloatingField("Time Slots", `<input class="form-control" name="campaignTimeSlots" value="${escapeHtml((campaign.timeSlots || []).join(", "))}" placeholder="09:00-12:00, 18:00-21:00">`)}
+    </div>
+    ${offerPackageProductHtml(offer, offerKind)}
     <div class="control-title"><div><p>Validity and Redemption</p><h3>Limits</h3></div><span>ledger protected</span></div>
     <div class="master-form compact mb-0">
       ${priceMasterFloatingField("Validity Mode", `<select class="form-select" name="validityMode"><option value="fixed_dates" ${offer.validityMode === "fixed_dates" || !offer.validityMode ? "selected" : ""}>Date range</option><option value="days_from_purchase" ${offer.validityMode === "days_from_purchase" ? "selected" : ""}>Days from purchase</option><option value="days_from_issue" ${offer.validityMode === "days_from_issue" ? "selected" : ""}>Days from issue</option><option value="days_from_first_use" ${offer.validityMode === "days_from_first_use" ? "selected" : ""}>Days from first use</option><option value="no_expiry" ${offer.validityMode === "no_expiry" ? "selected" : ""}>No expiry</option></select>`)}
@@ -4238,7 +4781,7 @@ function offerRows(items = []) {
     const redemptions = `${item.consumedCount || 0}/${item.redemptionCount || 0}`;
     return `<tr>
       <td><b>${escapeHtml(item.title || "-")}</b><br><span class="text-secondary">${escapeHtml(item.internalName || "")}</span></td>
-      <td>${escapeHtml(offerTypeLabel(item.offerType))}</td>
+      <td>${escapeHtml(offerKindLabel(item.metadata?.offerKind) || offerTypeLabel(item.offerType))}</td>
       <td>${escapeHtml(item.audienceType === "selected_users" ? "Selected users" : "All users")}<br><span class="text-secondary">${escapeHtml(item.userSegment || "all")}</span></td>
       <td>${escapeHtml(dates)}</td>
       <td>${escapeHtml(payment)}</td>
@@ -4276,6 +4819,39 @@ function renderOfferMasterReport() {
 
 function collectOfferPayload(form) {
   const data = formObject(form);
+  const offerKind = data.offerKind || "flat_booking_discount";
+  const offerType = offerKindStorageType(offerKind);
+  const isPackage = ["prepaid_booking_package", "prepaid_service_hour_package"].includes(offerKind);
+  const packageNumber = (value) => value === "" || value === undefined ? null : Math.max(0, Math.trunc(Number(value || 0)));
+  const packageProduct = isPackage ? {
+    entitlementType: data.packageEntitlementType || (offerKind === "prepaid_service_hour_package" ? "service_hours" : "bookings"),
+    quantity: packageNumber(data.packageQuantity),
+    durationMinutes: packageNumber(data.packageDurationMinutes),
+    validityDays: packageNumber(data.packageValidityDays),
+    activationRule: data.packageActivationRule || "on_purchase",
+    minimumRedemptionMinutes: packageNumber(data.packageMinimumRedemptionMinutes),
+    maximumUsageMinutesPerBooking: packageNumber(data.packageMaximumUsageMinutesPerBooking),
+    extraDurationPolicy: data.packageExtraDurationPolicy || "chargeable",
+    cancellationPolicy: data.packageCancellationPolicy || "restore_reserved",
+    refundPolicy: data.packageRefundPolicy || "unused_only",
+    householdSharingAllowed: Boolean(data.packageHouseholdSharingAllowed),
+    blackoutDates: String(data.packageBlackoutDates || "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+  } : null;
+  const moneyToPaise = (value) => value === "" || value === undefined ? null : Math.max(0, Math.round(Number(value || 0) * 100));
+  const listFromText = (value) => String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const campaign = {
+    budgetPaise: moneyToPaise(data.campaignBudget),
+    maxBenefitPaise: moneyToPaise(data.campaignMaxBenefit),
+    minimumServiceAmountPaise: moneyToPaise(data.campaignMinimumServiceAmount),
+    weekdays: listFromText(data.campaignWeekdays),
+    channels: listFromText(data.campaignChannels),
+    timeSlots: listFromText(data.campaignTimeSlots)
+  };
+  const discountType = ["percentage_booking_discount", "repeat_booking_discount"].includes(offerKind)
+    ? "percent"
+    : ["flat_booking_discount", "first_booking_discount"].includes(offerKind)
+      ? "flat"
+      : data.discountType || "none";
   const sellingPricePaise = data.priceRuleSellingPrice === "" ? null : Math.round(Number(data.priceRuleSellingPrice || 0) * 100);
   const scope = offerScopeFromForm(form);
   const scopedUserIds = offerScopedCustomers(scope).map(offerCustomerUserId).filter(Boolean);
@@ -4289,7 +4865,7 @@ function collectOfferPayload(form) {
   });
   return {
     internalName: data.internalName || data.title,
-    offerType: data.offerType || "DISCOUNT",
+    offerType,
     status: data.status || "DRAFT",
     title: data.title || "",
     subtitle: data.subtitle || null,
@@ -4306,7 +4882,7 @@ function collectOfferPayload(form) {
     validityMode: data.validityMode || "fixed_dates",
     activeFrom: data.activeFrom || null,
     activeUntil: data.activeUntil || null,
-    validDays: data.validDays === "" ? null : Number(data.validDays || 0),
+    validDays: isPackage && data.packageValidityDays !== "" ? Number(data.packageValidityDays || 0) : data.validDays === "" ? null : Number(data.validDays || 0),
     redeemLimitPerUser: Number(data.redeemLimitPerUser || 1),
     redeemLimitTotal: data.redeemLimitTotal === "" ? null : Number(data.redeemLimitTotal || 0),
     autoApply: Boolean(data.autoApply),
@@ -4314,14 +4890,14 @@ function collectOfferPayload(form) {
     referralEnabled: Boolean(data.referralEnabled),
     referralScope: data.referralScope || "none",
     commonReferralCode: data.commonReferralCode || null,
-    discountType: data.discountType || "none",
+    discountType,
     discountValue: Number(data.discountValue || 0),
-    discountCapPaise: null,
-    fixedPricePaise: sellingPricePaise,
-    buyQuantity: data.priceRuleBookings === "" ? null : Number(data.priceRuleBookings || 0),
-    freeQuantity: null,
+    discountCapPaise: campaign.maxBenefitPaise,
+    fixedPricePaise: offerKind === "fixed_price" ? sellingPricePaise : null,
+    buyQuantity: isPackage && data.packageEntitlementType === "bookings" ? packageNumber(data.packageQuantity) : data.priceRuleBookings === "" ? null : Number(data.priceRuleBookings || 0),
+    freeQuantity: ["free_first_booking", "free_service_minutes"].includes(offerKind) ? packageNumber(data.priceRuleDurationMinutes) : null,
     creditAmountPaise: null,
-    packagePricePaise: sellingPricePaise,
+    packagePricePaise: isPackage ? sellingPricePaise : null,
     scopes: [{
       scopeType: scope.scopeType || "all",
       stateId: scope.stateId || null,
@@ -4341,7 +4917,10 @@ function collectOfferPayload(form) {
     isEnabled: Boolean(data.isEnabled),
     isActive: Boolean(data.isActive),
     metadata: {
-      source: "admin_offer_master",
+      source: "admin_offer_packages_master",
+      offerKind,
+      campaign,
+      packageProduct,
       eligibility: {
         includedUserIdsMode,
         excludedUserIdsMode,
@@ -4351,7 +4930,7 @@ function collectOfferPayload(form) {
         noOfBookings: data.priceRuleBookings === "" ? null : Number(data.priceRuleBookings || 0),
         durationPerBookingMinutes: data.priceRuleDurationMinutes === "" ? null : Number(data.priceRuleDurationMinutes || 0),
         basePrice: data.priceRuleBasePrice === "" ? null : Number(data.priceRuleBasePrice || 0),
-        discountType: data.discountType || "none",
+        discountType,
         discountValue: Number(data.discountValue || 0),
         discountAmount: data.priceRuleDiscountAmount === "" ? null : Number(data.priceRuleDiscountAmount || 0),
         sellingPrice: data.priceRuleSellingPrice === "" ? null : Number(data.priceRuleSellingPrice || 0)
@@ -4367,7 +4946,9 @@ function resetOfferMasterForm() {
   form.outerHTML = offerFormHtml({});
 }
 
-async function loadOfferMaster() {
+async function loadOfferMaster(targetSection = offerMasterTargetSection, pageTitleText = offerMasterPageTitle) {
+  offerMasterTargetSection = targetSection;
+  offerMasterPageTitle = pageTitleText;
   const params = new URLSearchParams();
   params.set("page", String(offerFilters.page || 1));
   params.set("pageSize", String(offerFilters.pageSize || 20));
@@ -4397,13 +4978,17 @@ async function loadOfferMaster() {
   cache.zones = zones.data || [];
   cache.clusters = clusters.data || [];
   cache.offerCustomers = customers.data || [];
-  $("#offerMasterSection").innerHTML =
-    pageTitleBlock("Offer Master", "Create packages, discounts, referral offers, redemption rules, and customer entitlements") +
+  $(`#${targetSection}`).innerHTML =
+    pageTitleBlock(pageTitleText, "Create offers, prepaid booking/hour packages, referral campaigns, redemption rules, and customer entitlements") +
     `<div class="master-grid single-column">
-      ${panel("Create / Edit Offer", "Backend validates eligibility, pricing, payment mode restrictions, and redemption safety", offerFormHtml({}))}
-      ${panel("Offers", "Validate, publish, pause, archive, and audit offer configurations", offerFilterBar() + `<div id="offerMasterReport"></div>`)}
+      ${panel("Create / Edit Offer or Package", "Configure discounts, prepaid entitlements, eligibility, campaign guardrails, and redemption safety", offerFormHtml({}))}
+      ${panel("Offers & Packages", "Validate, publish, pause, archive, and audit offer and package configurations", offerFilterBar() + `<div id="offerMasterReport"></div>`)}
     </div>`;
   renderOfferMasterReport();
+}
+
+async function loadOfferPackagesMaster() {
+  return loadOfferMaster("offerPackagesMasterSection", "Offer & Packages Master");
 }
 
 function taxMasterLabel(value = "") {
@@ -4837,6 +5422,16 @@ function bookingEngineTimeText(value) {
   return `${String(displayHours).padStart(2, "0")}:${String(minutes).padStart(2, "0")} ${suffix}`;
 }
 
+function bookingEngineTodayBlockText(rule = {}) {
+  const calendar = rule.metadata?.serviceCalendar || {};
+  const startedAt = new Date(calendar.blockTodayStartedAt || "");
+  const until = new Date(calendar.blockTodayUntil || "");
+  const now = new Date();
+  if (Number.isNaN(startedAt.getTime()) || Number.isNaN(until.getTime()) || until <= now) return "";
+  if (startedAt.toDateString() !== now.toDateString()) return "";
+  return `Block today until ${until.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
 function bookingEngineLocationHierarchy(selected = {}) {
   const form = $("#bookingEngineForm");
   const cluster = selected.clusterId ? cache.clusters.find((item) => item.id === selected.clusterId) : null;
@@ -4942,6 +5537,7 @@ function resetBookingEngineForm() {
   form.elements.manualServiceStatus.value = "stop";
   if (form.elements.autoStartTime) form.elements.autoStartTime.value = "";
   if (form.elements.autoEndTime) form.elements.autoEndTime.value = "";
+  if (form.elements.blockTodayMinutes) form.elements.blockTodayMinutes.value = "0";
   form.elements.assistantAssignmentMode.value = "manual";
   form.elements.isActive.checked = true;
   const preview = form.querySelector(".upload-preview");
@@ -4992,6 +5588,7 @@ function bookingEngineRows(items = []) {
   return (items || []).map((item) => {
     const autoStart = bookingEngineTimeValue(item.autoStartTime) || bookingEngineDateTimeValue(item.autoStartAt).slice(11, 16);
     const autoEnd = bookingEngineTimeValue(item.autoEndTime) || bookingEngineDateTimeValue(item.autoEndAt).slice(11, 16);
+    const blockText = bookingEngineTodayBlockText(item);
     const calendar = item.serviceControlMode === "auto"
       ? `<b>Auto</b><div class="row-note">${escapeHtml(bookingEngineTimeText(autoStart))} to ${escapeHtml(bookingEngineTimeText(autoEnd))}</div>`
       : `<b>Manual</b><div class="row-note">${escapeHtml(item.manualServiceStatus === "start" ? "Booking Started" : "Booking Stopped")}</div>`;
@@ -4999,10 +5596,10 @@ function bookingEngineRows(items = []) {
     const schedule = `ETA ${item.scheduleEtaMinutes || 0}m | Initiate ${item.scheduleInitiateMinutes || 0}m | Wrap ${item.scheduleWrapUpMinutes || 0}m | Travel ${item.scheduleTravelMinutes || 0}m`;
     return `<tr>
       <td><b>${escapeHtml(bookingEngineScopeText(item))}</b>${item.imageUrl ? `<div class="row-note">${imageCell(item.imageUrl)}</div>` : ""}</td>
-      <td>${calendar}</td>
+       <td>${calendar}${blockText ? `<div class="row-note">${escapeHtml(blockText)}</div>` : ""}</td>
       <td><b>Instant</b><div class="row-note">${escapeHtml(instant)}</div><b>Schedule</b><div class="row-note">${escapeHtml(schedule)}</div></td>
       <td>${status(item.assistantAssignmentMode === "auto" ? "auto" : "manual")}<div class="row-note">${escapeHtml(item.assistantAssignmentMode === "auto" ? "Assign as per availability" : "Admin assigns manually")}</div></td>
-      <td>${escapeHtml(item.note || "-")}</td>
+       <td>${escapeHtml(item.bookingRestrictionMessage || item.metadata?.serviceCalendar?.bookingRestrictionMessage || "-")}</td>
       <td>${status(item.isActive === false ? "inactive" : "active")}</td>
       <td class="text-end">
         <button class="btn btn-sm btn-outline-primary" data-action="edit-booking-engine" data-id="${escapeHtml(item.id)}" type="button">Edit</button>
@@ -5015,7 +5612,7 @@ function bookingEngineRows(items = []) {
 function renderBookingEngineReport() {
   const report = $("#bookingEngineReport");
   if (!report) return;
-  report.innerHTML = table(["Scope", "Service Calendar", "Timing Rules", "Assistant Assignment", "Note", "Status", ""], bookingEngineRows(bookingEngineFilteredRows()));
+  report.innerHTML = table(["Scope", "Service Calendar", "Timing Rules", "Assistant Assignment", "Customer Message", "Status", ""], bookingEngineRows(bookingEngineFilteredRows()));
   document.querySelectorAll("[data-booking-engine-filter]").forEach((input) => {
     input.value = bookingEngineFilters[input.dataset.bookingEngineFilter] || "";
   });
@@ -5395,7 +5992,15 @@ function vehiclePictureGallery(urls = []) {
 }
 
 function categoryMasterImageGallery(urls = []) {
-  return imageUrlGallery(urls, "remove-category-master-image-url");
+  return (urls || [])
+    .map(
+      (url) => `<span class="store-image-chip category-master-media-chip" draggable="true" data-category-master-media-url="${escapeHtml(url)}" title="Drag or swipe to reorder">
+        ${categoryMasterMediaCell(url)}
+        <span class="category-master-media-drag-handle" aria-hidden="true">:::</span>
+        <button class="btn btn-light btn-xs" data-action="remove-category-master-image-url" data-url="${escapeHtml(url)}" type="button">Remove</button>
+      </span>`
+    )
+    .join("");
 }
 
 function categoryMasterImageUrlsFromItem(item = {}) {
@@ -5404,6 +6009,99 @@ function categoryMasterImageUrlsFromItem(item = {}) {
     ...(Array.isArray(item.imageUrls) ? item.imageUrls : parseStoreImageUrls(item.imageUrls || "[]"))
   ].map((url) => String(url || "").trim()).filter(Boolean))];
 }
+
+function setCategoryMasterMediaUrls(urls = []) {
+  const form = $("#categoryMasterForm");
+  const hidden = $("#categoryMasterImageUrls");
+  const normalizedUrls = categoryMasterImageUrlsFromItem({ imageUrls: urls });
+  if (hidden) hidden.value = JSON.stringify(normalizedUrls);
+  if (form?.elements.imageUrl) form.elements.imageUrl.value = normalizedUrls[0] || "";
+  const preview = form?.querySelector(".upload-preview");
+  if (preview) preview.innerHTML = normalizedUrls[0] ? categoryMasterMediaCell(normalizedUrls[0]) : "";
+  const gallery = $("#categoryMasterImageGallery");
+  if (gallery) gallery.innerHTML = categoryMasterImageGallery(normalizedUrls);
+  syncCategoryMasterVideoThumbnailControl(form);
+}
+
+function reorderCategoryMasterMedia(sourceUrl = "", targetUrl = "") {
+  const urls = categoryMasterImageUrlsFromItem({
+    imageUrl: $("#categoryMasterForm")?.elements.imageUrl?.value || "",
+    imageUrls: $("#categoryMasterImageUrls")?.value || "[]"
+  });
+  const sourceIndex = urls.indexOf(sourceUrl);
+  const targetIndex = urls.indexOf(targetUrl);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+  const [movedUrl] = urls.splice(sourceIndex, 1);
+  urls.splice(targetIndex, 0, movedUrl);
+  setCategoryMasterMediaUrls(urls);
+}
+
+let categoryMasterMediaDragUrl = "";
+let categoryMasterMediaSwipeState = null;
+
+document.addEventListener("dragstart", (event) => {
+  const chip = event.target.closest?.("[data-category-master-media-url]");
+  if (!chip) return;
+  categoryMasterMediaDragUrl = chip.dataset.categoryMasterMediaUrl || "";
+  chip.classList.add("is-dragging");
+  event.dataTransfer?.setData("text/plain", categoryMasterMediaDragUrl);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+});
+
+document.addEventListener("dragover", (event) => {
+  const chip = event.target.closest?.("[data-category-master-media-url]");
+  if (!chip || !categoryMasterMediaDragUrl) return;
+  event.preventDefault();
+  document.querySelectorAll(".category-master-media-chip.is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
+  chip.classList.add("is-drop-target");
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+});
+
+document.addEventListener("drop", (event) => {
+  const chip = event.target.closest?.("[data-category-master-media-url]");
+  if (!chip) return;
+  event.preventDefault();
+  const sourceUrl = categoryMasterMediaDragUrl || event.dataTransfer?.getData("text/plain") || "";
+  reorderCategoryMasterMedia(sourceUrl, chip.dataset.categoryMasterMediaUrl || "");
+  categoryMasterMediaDragUrl = "";
+  document.querySelectorAll(".category-master-media-chip.is-dragging, .category-master-media-chip.is-drop-target").forEach((item) => item.classList.remove("is-dragging", "is-drop-target"));
+});
+
+document.addEventListener("dragend", () => {
+  categoryMasterMediaDragUrl = "";
+  document.querySelectorAll(".category-master-media-chip.is-dragging, .category-master-media-chip.is-drop-target").forEach((item) => item.classList.remove("is-dragging", "is-drop-target"));
+});
+
+document.addEventListener("pointerdown", (event) => {
+  const chip = event.target.closest?.("[data-category-master-media-url]");
+  if (!chip || event.target.closest?.('[data-action="remove-category-master-image-url"]')) return;
+  categoryMasterMediaSwipeState = {
+    chip,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY
+  };
+});
+
+document.addEventListener("pointerup", (event) => {
+  const swipe = categoryMasterMediaSwipeState;
+  categoryMasterMediaSwipeState = null;
+  if (!swipe || swipe.pointerId !== event.pointerId) return;
+  const deltaX = event.clientX - swipe.startX;
+  const deltaY = event.clientY - swipe.startY;
+  if (Math.abs(deltaX) < 36 || Math.abs(deltaX) <= Math.abs(deltaY)) return;
+  const urls = categoryMasterImageUrlsFromItem({ imageUrls: $("#categoryMasterImageUrls")?.value || "[]" });
+  const sourceUrl = swipe.chip.dataset.categoryMasterMediaUrl || "";
+  const sourceIndex = urls.indexOf(sourceUrl);
+  const targetIndex = sourceIndex + (deltaX < 0 ? 1 : -1);
+  if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= urls.length) return;
+  reorderCategoryMasterMedia(sourceUrl, urls[targetIndex]);
+  event.preventDefault();
+});
+
+document.addEventListener("pointercancel", () => {
+  categoryMasterMediaSwipeState = null;
+});
 
 function vehicleMasterRows(items) {
   return items
@@ -7907,6 +8605,168 @@ function supportTicketStatusCapsule(status = "open") {
   return `<span class="status-badge ${tone}">${escapeHtml(label)}</span>`;
 }
 
+function renderSupportNotificationIndicators({ ring = false } = {}) {
+  ["assistant", "customer"].forEach((kind) => {
+    const badge = document.querySelector(`[data-support-notification="${kind}"]`);
+    if (!badge) return;
+    const count = Math.max(0, Math.trunc(Number(supportUnreadCounts[kind]) || 0));
+    badge.classList.toggle("d-none", count === 0);
+    badge.classList.toggle("is-ringing", ring && count > 0);
+    badge.setAttribute("aria-hidden", String(count === 0));
+    badge.setAttribute("aria-label", `${count} unread ${kind} support message${count === 1 ? "" : "s"}`);
+    const countElement = badge.querySelector(".support-nav-notification-count");
+    if (countElement) countElement.textContent = count > 99 ? "99+" : String(count);
+  });
+  if (ring) {
+    if (supportNotificationRingTimer) clearTimeout(supportNotificationRingTimer);
+    supportNotificationRingTimer = setTimeout(() => {
+      document.querySelectorAll(".support-nav-notification.is-ringing").forEach((badge) => badge.classList.remove("is-ringing"));
+      supportNotificationRingTimer = null;
+    }, 900);
+  }
+}
+
+function updateSupportUnreadCount(kind, count, { ring = false } = {}) {
+  if (!(kind in supportUnreadCounts)) return;
+  supportUnreadCounts[kind] = Math.max(0, Math.trunc(Number(count) || 0));
+  renderSupportNotificationIndicators({ ring });
+}
+
+async function refreshSupportNotificationIndicators({ ring = false } = {}) {
+  if (!state.token) {
+    supportUnreadCounts = { assistant: 0, customer: 0 };
+    renderSupportNotificationIndicators();
+    return supportUnreadCounts;
+  }
+  if (supportNotificationRefreshPromise) return supportNotificationRefreshPromise;
+  supportNotificationRefreshPromise = Promise.all([
+    safeApi("/support/assistant/tickets?status=all&page=1&pageSize=5"),
+    safeApi("/support/tickets?status=all&page=1&pageSize=5")
+  ]).then(([assistantPayload, customerPayload]) => {
+    const next = { ...supportUnreadCounts };
+    if (assistantPayload.data) next.assistant = Number(assistantPayload.data.unreadCount || 0);
+    if (customerPayload.data) next.customer = Number(customerPayload.data.unreadCount || 0);
+    const increased = next.assistant > supportUnreadCounts.assistant || next.customer > supportUnreadCounts.customer;
+    supportUnreadCounts = next;
+    renderSupportNotificationIndicators({ ring: ring || increased });
+    return supportUnreadCounts;
+  }).finally(() => {
+    supportNotificationRefreshPromise = null;
+  });
+  return supportNotificationRefreshPromise;
+}
+
+function startSupportNotificationPolling() {
+  if (supportNotificationRefreshTimer) return;
+  void refreshSupportNotificationIndicators();
+  supportNotificationRefreshTimer = setInterval(() => {
+    if (state.token && document.visibilityState !== "hidden") void refreshSupportNotificationIndicators();
+  }, 30000);
+}
+
+function supportReplyTemplateIconHtml(template = {}) {
+  const url = assetUrl(String(template.iconUrl || ""));
+  return url
+    ? `<span class="support-reply-template-icon"><img src="${escapeHtml(url)}" alt=""></span>`
+    : `<span class="support-reply-template-icon fallback">R</span>`;
+}
+
+function supportReplyTemplateFormHtml(channel, replyType, template = null) {
+  const editing = Boolean(template?.id);
+  const label = replyType === "quick" ? "Quick Reply" : "Auto Reply";
+  const inputId = `supportReplyIcon-${channel}-${replyType}`;
+  return `<form class="support-reply-template-form" data-support-reply-template-form data-channel="${channel}" data-reply-type="${replyType}">
+    <input type="hidden" name="templateId" value="${escapeHtml(template?.id || "")}">
+    <div class="support-reply-template-form-heading"><b>${editing ? `Edit ${label}` : `New ${label}`}</b><button class="btn btn-light btn-xs" data-action="support-reply-template-cancel" type="button">Cancel</button></div>
+    <label class="form-label">Title<input class="form-control" name="title" maxlength="160" value="${escapeHtml(template?.title || "")}" placeholder="e.g. We are checking this for you" required></label>
+    <label class="form-label">Description / reply text<textarea class="form-control" name="description" rows="3" maxlength="4000" placeholder="Text that will be sent to the customer or assistant" required>${escapeHtml(template?.description || "")}</textarea></label>
+    <label class="form-label">Icon / image
+      <input type="hidden" name="iconUrl" value="${escapeHtml(template?.iconUrl || "")}">
+      <span class="support-reply-template-upload" data-support-reply-upload-box>
+        <input id="${inputId}" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-support-reply-image-upload>
+        <button class="btn btn-soft btn-xs" data-action="browse-image" data-target="${inputId}" type="button">Upload image</button>
+        <span class="upload-preview">${template?.iconUrl ? imageCell(template.iconUrl) : ""}</span>
+      </span>
+    </label>
+    <label class="checkbox-label"><input type="checkbox" name="isActive" value="true" ${template?.isActive === false ? "" : "checked"}> Active</label>
+    <div class="form-actions"><button class="btn btn-primary btn-sm" type="submit">${editing ? "Update reply" : "Create reply"}</button></div>
+  </form>`;
+}
+
+function supportReplyTemplateCardsHtml(channel, replyType) {
+  const templates = cache.supportReplyTemplates?.[channel]?.[replyType] || [];
+  if (!templates.length) return `<div class="support-reply-template-empty">No ${replyType} replies created yet.</div>`;
+  return templates.map((template) => `<article class="support-reply-template-card ${template.isActive === false ? "is-inactive" : ""}">
+    ${supportReplyTemplateIconHtml(template)}
+    <div class="support-reply-template-copy"><b>${escapeHtml(template.title)}</b><p>${escapeHtml(template.description)}</p><span class="status-badge ${template.isActive === false ? "warning" : "success"}">${template.isActive === false ? "Inactive" : "Active"}</span></div>
+    <div class="support-reply-template-actions">${replyType === "quick" && template.isActive !== false ? `<button class="btn btn-soft btn-xs" data-action="use-support-reply-template" data-channel="${channel}" data-id="${escapeHtml(template.id)}" type="button">Use</button>` : ""}<button class="btn btn-soft btn-xs" data-action="edit-support-reply-template" data-channel="${channel}" data-reply-type="${replyType}" data-id="${escapeHtml(template.id)}" type="button">Edit</button><button class="btn btn-soft btn-xs" data-action="toggle-support-reply-template" data-channel="${channel}" data-id="${escapeHtml(template.id)}" data-active="${template.isActive === false ? "false" : "true"}" type="button">${template.isActive === false ? "Activate" : "Deactivate"}</button><button class="btn btn-outline-danger btn-xs" data-action="delete-support-reply-template" data-channel="${channel}" data-id="${escapeHtml(template.id)}" type="button">Delete</button></div>
+  </article>`).join("");
+}
+
+function supportReplyTemplateGroupHtml(channel, replyType) {
+  const label = replyType === "quick" ? "Quick Replies" : "Auto Replies";
+  const editing = supportReplyTemplateEditing?.channel === channel && supportReplyTemplateEditing?.replyType === replyType;
+  const template = editing ? supportReplyTemplateEditing.template : null;
+  return `<section class="support-reply-template-group"><header><div><h3>${label}</h3><p>${replyType === "quick" ? "Reusable responses that an admin can insert into the chat composer." : "The first active auto reply is sent once when a new inbound conversation needs an initial response."}</p></div><button class="btn btn-primary btn-sm" data-action="new-support-reply-template" data-channel="${channel}" data-reply-type="${replyType}" type="button">Add ${replyType === "quick" ? "quick" : "auto"} reply</button></header>${editing ? supportReplyTemplateFormHtml(channel, replyType, template) : `<div class="support-reply-template-list">${supportReplyTemplateCardsHtml(channel, replyType)}</div>`}</section>`;
+}
+
+function supportReplyTemplatesHtml(channel) {
+  return `<section class="support-reply-templates" data-support-reply-templates="${channel}"><div class="support-reply-templates-header"><div><h2>Reply templates</h2><p>Create multiple quick replies and automatic first-response messages for this support channel.</p></div></div><div class="support-reply-template-groups">${supportReplyTemplateGroupHtml(channel, "quick")}${supportReplyTemplateGroupHtml(channel, "auto")}</div></section>`;
+}
+
+function supportQuickReplySelectHtml(channel, formId) {
+  const templates = (cache.supportReplyTemplates?.[channel]?.quick || []).filter((template) => template.isActive !== false);
+  return `<div class="support-quick-reply-picker"><select class="form-select" data-support-quick-reply-select data-channel="${channel}" data-target-form="${formId}"><option value="">Insert a quick reply...</option>${templates.map((template) => `<option value="${escapeHtml(template.id)}">${escapeHtml(template.title)}</option>`).join("")}</select></div>`;
+}
+
+function renderSupportSlashSuggestions(input) {
+  const suggestions = input.closest(".assistant-support-admin-detail")?.querySelector("[data-support-quick-reply-suggestions]");
+  if (!suggestions) return;
+  const value = String(input.value || "");
+  const match = value.match(/(?:^|\s)\/([^\s]*)$/);
+  if (!match) {
+    suggestions.classList.remove("is-visible");
+    suggestions.innerHTML = "";
+    return;
+  }
+  const query = String(match[1] || "").toLowerCase();
+  const channel = suggestions.dataset.channel === "assistant" ? "assistant" : "customer";
+  const templates = (cache.supportReplyTemplates?.[channel]?.quick || [])
+    .filter((template) => template.isActive !== false)
+    .filter((template) => !query || `${template.title} ${template.description}`.toLowerCase().includes(query));
+  suggestions.innerHTML = templates.length
+    ? templates.map((template) => `<button type="button" data-action="use-support-reply-suggestion" data-channel="${channel}" data-id="${escapeHtml(template.id)}" data-target-form="${escapeHtml(suggestions.dataset.targetForm || "")}">${supportReplyTemplateIconHtml(template)}<span><b>${escapeHtml(template.title)}</b><small>${escapeHtml(template.description)}</small></span></button>`).join("")
+    : `<div class="support-slash-suggestions-empty">No active quick replies match /${escapeHtml(query)}.</div>`;
+  suggestions.classList.add("is-visible");
+}
+
+async function loadSupportReplyTemplates(channel) {
+  const endpoint = channel === "assistant" ? "/support/assistant/reply-templates" : "/support/reply-templates";
+  const payload = await safeApi(endpoint);
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  cache.supportReplyTemplates[channel] = {
+    quick: rows.filter((template) => template.replyType === "quick"),
+    auto: rows.filter((template) => template.replyType === "auto")
+  };
+  return cache.supportReplyTemplates[channel];
+}
+
+function renderSupportReplyTemplates(channel) {
+  const container = document.querySelector(`[data-support-reply-templates="${cssEscape(channel)}"]`);
+  if (container) container.outerHTML = supportReplyTemplatesHtml(channel);
+}
+
+function supportReplyTemplateById(channel, id) {
+  return [...(cache.supportReplyTemplates?.[channel]?.quick || []), ...(cache.supportReplyTemplates?.[channel]?.auto || [])].find((template) => String(template.id) === String(id));
+}
+
+function stopSupportNotificationPolling() {
+  if (supportNotificationRefreshTimer) clearInterval(supportNotificationRefreshTimer);
+  supportNotificationRefreshTimer = null;
+  if (supportNotificationRingTimer) clearTimeout(supportNotificationRingTimer);
+  supportNotificationRingTimer = null;
+}
+
 function supportTicketFilterBar() {
   return `<div class="payment-filter-bar">
     <input id="supportTicketSearch" class="form-control" type="search" value="${escapeHtml(supportTicketFilters.search)}" placeholder="Search ticket, customer, phone or subject">
@@ -7925,6 +8785,116 @@ function supportTicketRows(items = []) {
   </tr>`).join("");
 }
 
+function supportUnreadBadgeHtml(ticket = {}) {
+  const count = Math.max(0, Math.trunc(Number(ticket.unreadCount || 0)));
+  return count ? `<span class="support-message-count" title="${escapeHtml(count)} unread message${count === 1 ? "" : "s"}">${count > 99 ? "99+" : count}</span>` : "";
+}
+
+function customerSupportAvatarHtml(ticket = {}) {
+  return `<span class="assistant-support-avatar customer">${escapeHtml(String(ticket.customerName || "C").trim().slice(0, 1).toUpperCase())}</span>`;
+}
+
+function customerSupportConversationListHtml() {
+  const rows = cache.supportTickets || [];
+  const selectedId = String(cache.supportTicketDetail?.ticket?.id || "");
+  if (!rows.length) return `<div class="assistant-support-admin-empty"><b>No customer chats</b><span>New customer support requests will appear here.</span></div>`;
+  return rows.map((ticket) => `<button class="assistant-support-thread ${String(ticket.id) === selectedId ? "active" : ""}" data-action="open-support-ticket" data-id="${escapeHtml(ticket.id)}" type="button">
+    ${customerSupportAvatarHtml(ticket)}
+    <span class="assistant-support-thread-copy"><b>${escapeHtml(ticket.customerName || "Customer")} ${supportUnreadBadgeHtml(ticket)}</b><small>${escapeHtml(ticket.bookingNumber ? `Booking ${ticket.bookingNumber}` : ticket.ticketNumber || "Support")}</small><p>${escapeHtml(ticket.lastMessage || ticket.subject || "Support chat opened")}</p></span>
+    <span class="assistant-support-thread-meta">${supportTicketStatusCapsule(ticket.statusCode)}<time>${escapeHtml(formatDate(ticket.lastMessageAt || ticket.createdAt))}</time></span>
+  </button>`).join("");
+}
+
+function parseSupportChatAttachments(value) {
+  let parsed = value;
+  if (typeof value === "string") {
+    try { parsed = JSON.parse(value || "[]"); } catch { parsed = []; }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((item) => item && typeof item.url === "string" && item.url.trim()).slice(0, 10);
+}
+
+function supportChatAttachmentPreviewHtml(attachments = []) {
+  if (!attachments.length) return "";
+  return `<div class="support-chat-attachment-preview" data-support-chat-attachment-preview>${attachments.map((attachment, index) => `<span class="support-chat-attachment-chip"><span title="${escapeHtml(attachment.name || "Attachment")}">${escapeHtml(attachment.name || `Attachment ${index + 1}`)}</span><button type="button" data-action="remove-support-chat-attachment" data-index="${index}" aria-label="Remove ${escapeHtml(attachment.name || "attachment")}">x</button></span>`).join("")}</div>`;
+}
+
+function supportAdminComposerHtml(channel, formId, ticketId) {
+  return `<form id="${escapeHtml(formId)}" class="assistant-support-admin-composer" data-admin-${channel === "assistant" ? "assistant-" : ""}support-message-form data-id="${escapeHtml(ticketId)}">
+    <input type="hidden" name="replyTemplateId" value="">
+    <input type="hidden" name="attachments" value="[]">
+    <div class="support-chat-composer-tools">
+      <label class="support-chat-attach-button" title="Attach image, audio, file, or video"><span aria-hidden="true">&#128206;</span><span>Attach</span><input class="visually-hidden" type="file" multiple accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx" data-support-chat-file-upload></label>
+      <button class="btn btn-soft btn-sm" data-action="share-support-location" type="button" title="Share your current location">Location</button>
+    </div>
+    <div data-support-chat-attachment-preview></div>
+    <textarea class="form-control" name="message" data-support-message-input rows="2" maxlength="4000" autocomplete="off" placeholder="Type / for quick replies"></textarea>
+    <button class="btn btn-primary" type="submit">Send</button>
+  </form>`;
+}
+
+function renderSupportChatAttachmentPreview(form) {
+  const preview = form?.querySelector("[data-support-chat-attachment-preview]");
+  if (!preview) return;
+  preview.innerHTML = supportChatAttachmentPreviewHtml(parseSupportChatAttachments(form.elements.attachments?.value));
+}
+
+function setSupportChatAttachments(form, attachments) {
+  if (!form?.elements.attachments) return;
+  form.elements.attachments.value = JSON.stringify(parseSupportChatAttachments(attachments));
+  renderSupportChatAttachmentPreview(form);
+}
+
+async function uploadSupportChatFile(file) {
+  const mimeType = mimeTypeForFile(file);
+  const dataBase64 = await fileToDataUrl(file);
+  const payload = await api("/settings/media-documents", {
+    method: "POST",
+    body: JSON.stringify({ originalName: file.name, mimeType, dataBase64 })
+  });
+  const url = payload.data?.previewUrl || payload.data?.imageUrl || "";
+  if (!url) throw new Error(`Unable to upload ${file.name}.`);
+  return { url, name: file.name, type: mimeType, size: file.size };
+}
+
+function customerSupportDetailHtml() {
+  const detail = cache.supportTicketDetail || {};
+  const ticket = detail.ticket;
+  if (!ticket) return `<div class="assistant-support-admin-placeholder"><b>Select a conversation</b><span>Choose a customer from the left to view and reply.</span></div>`;
+  const messages = detail.messages || [];
+  const closed = ["closed", "resolved"].includes(String(ticket.statusCode || "").toLowerCase());
+  return `<div class="assistant-support-admin-detail customer-support-admin-detail">
+    <header>
+      <div class="assistant-support-admin-person">${customerSupportAvatarHtml(ticket)}<span><b>${escapeHtml(ticket.customerName || "Customer")}</b><small>${escapeHtml(reportMobileNumber(ticket.customerPhone))}${ticket.bookingNumber ? ` | Booking ${escapeHtml(ticket.bookingNumber)}` : ""}</small></span></div>
+      <div class="assistant-support-admin-controls">
+        <label>Status<select id="supportTicketDetailStatus" class="form-select">${["open", "in_progress", "waiting_customer", "resolved", "closed"].map((value) => `<option value="${value}" ${ticket.statusCode === value ? "selected" : ""}>${escapeHtml(value.replace(/_/g, " "))}</option>`).join("")}</select></label>
+        <label>Priority<select id="supportTicketDetailPriority" class="form-select">${["low", "normal", "high", "urgent"].map((value) => `<option value="${value}" ${ticket.priorityCode === value ? "selected" : ""}>${value}</option>`).join("")}</select></label>
+        <button class="btn btn-outline-primary" data-action="update-support-ticket" data-id="${escapeHtml(ticket.id)}" type="button">Update</button>
+      </div>
+    </header>
+    <div class="assistant-support-admin-subject"><span><b>${escapeHtml(ticket.subject || "Customer support")}</b><small>${escapeHtml(ticket.ticketNumber || "")}</small></span>${supportTicketStatusCapsule(ticket.statusCode)}</div>
+    <section class="assistant-support-admin-messages" data-admin-support-messages>
+      ${messages.length ? messages.map((item) => `<article class="${item.senderType === "admin" ? "admin" : "customer"}"><b>${escapeHtml(item.senderType === "admin" ? item.senderName || "Support" : ticket.customerName || "Customer")}</b>${supportReplyMessageIconHtml(item)}${item.message ? `<p>${escapeHtml(item.message)}</p>` : ""}${supportTicketMessageAttachmentsHtml(item)}<time>${escapeHtml(formatDate(item.createdAt))}</time></article>`).join("") : `<div class="assistant-support-admin-empty"><b>No messages yet</b><span>The customer opened this chat but has not sent a message.</span></div>`}
+    </section>
+    ${closed ? `<p class="assistant-support-admin-closed">Reopen this ticket to send another response.</p>` : `${supportQuickReplySelectHtml("customer", "supportCustomerReplyForm")}<div class="support-slash-suggestions" data-support-quick-reply-suggestions data-channel="customer" data-target-form="supportCustomerReplyForm"></div>${supportAdminComposerHtml("customer", "supportCustomerReplyForm", ticket.id)}`}
+  </div>`;
+}
+
+function renderCustomerSupportWorkspace() {
+  const pagination = cache.supportTicketsPagination || { page: 1, totalPages: 1, totalRecords: 0 };
+  const section = $("#supportTicketsSection");
+  if (!section) return;
+  section.innerHTML = pageTitleBlock("Customer Support", "Manage customer conversations and reply in real time") + supportReplyTemplatesHtml("customer") + supportTicketFilterBar() +
+    `<div class="assistant-support-workspace customer-support-workspace">
+      <aside><header><b>Customers</b><span>${escapeHtml(pagination.totalRecords || 0)}</span></header><div class="assistant-support-thread-list">${customerSupportConversationListHtml()}</div>${supportTicketPaginationHtml(pagination)}</aside>
+      <main>${customerSupportDetailHtml()}</main>
+    </div>`;
+  requestAnimationFrame(() => {
+    const messages = $("[data-admin-support-messages]");
+    if (messages) messages.scrollTop = messages.scrollHeight;
+  });
+}
+
 function supportTicketPaginationHtml(pagination = {}) {
   return `<div class="booking-pagination"><span class="helper-text">${escapeHtml(pagination.totalRecords || 0)} tickets</span><div class="booking-pagination-controls">
     <button class="btn btn-soft btn-sm" data-action="support-ticket-page" data-page="${Math.max(1, Number(pagination.page || 1) - 1)}" ${Number(pagination.page || 1) <= 1 ? "disabled" : ""}>Previous</button>
@@ -7939,18 +8909,45 @@ function supportTicketMessageAttachmentsHtml(message = {}) {
   return `<div class="support-ticket-message-attachments">${attachments.map((attachment, index) => {
     const url = assetUrl(String(attachment.url || ""));
     const name = String(attachment.name || `Attachment ${index + 1}`);
-    const isImage = String(attachment.type || "").startsWith("image/") || /\.(png|jpe?g|gif|webp)$/i.test(url);
-    return url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer" title="${escapeHtml(name)}">${isImage ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(name)}">` : `<span>FILE</span>`}<small>${escapeHtml(name)}</small></a>` : "";
+    const type = String(attachment.type || "").toLowerCase();
+    const isLocation = type === "location" || (Number.isFinite(Number(attachment.latitude)) && Number.isFinite(Number(attachment.longitude)));
+    const href = isLocation && !url ? `https://www.google.com/maps?q=${Number(attachment.latitude)},${Number(attachment.longitude)}` : url;
+    const isImage = type.startsWith("image/") || /\.(png|jpe?g|gif|webp)$/i.test(url);
+    if (!href) return "";
+    if (type.startsWith("audio/")) return `<div class="support-ticket-message-media"><audio controls src="${escapeHtml(href)}"></audio><small>${escapeHtml(name)}</small></div>`;
+    if (type.startsWith("video/")) return `<div class="support-ticket-message-media"><video controls preload="metadata" src="${escapeHtml(href)}"></video><small>${escapeHtml(name)}</small></div>`;
+    return `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer" title="${escapeHtml(name)}">${isLocation ? `<span>MAP</span>` : isImage ? `<img src="${escapeHtml(href)}" alt="${escapeHtml(name)}">` : `<span>FILE</span>`}<small>${escapeHtml(name)}</small></a>`;
   }).join("")}</div>`;
 }
 
-async function loadSupportTickets() {
+function supportReplyMessageIconHtml(message = {}) {
+  const url = assetUrl(String(message.metadata?.iconUrl || ""));
+  return url ? `<img class="support-reply-message-icon" src="${escapeHtml(url)}" alt="">` : "";
+}
+
+async function loadSupportTickets(options = {}) {
+  const generation = ++supportTicketLoadGeneration;
   const params = new URLSearchParams({ search: supportTicketFilters.search, status: supportTicketFilters.status, page: String(supportTicketFilters.page), pageSize: String(supportTicketFilters.pageSize) });
   const payload = await safeApi(`/support/tickets?${params.toString()}`);
+  await loadSupportReplyTemplates("customer");
+  if (generation !== supportTicketLoadGeneration) return;
   const data = payload.data || {};
   cache.supportTickets = data.rows || [];
   cache.supportTicketsPagination = data.pagination || { page: 1, pageSize: 20, totalRecords: 0, totalPages: 1 };
-  $("#supportTicketsSection").innerHTML = pageTitleBlock("Customer Support", "Manage customer tickets and reply to queries in real time") + `<div class="master-grid single-column">${panel("Support Tickets", "Open a ticket to view the conversation and manage its status", supportTicketFilterBar() + table(["Ticket", "Customer", "Query", "Status / Priority", "Assigned"], supportTicketRows(cache.supportTickets)) + supportTicketPaginationHtml(cache.supportTicketsPagination))}</div>`;
+  if (Number.isFinite(Number(data.unreadCount))) updateSupportUnreadCount("customer", data.unreadCount);
+  const preferredId = String(options.ticketId || cache.supportTicketDetail?.ticket?.id || "");
+  const requestedId = String(cache.supportTickets.some((ticket) => String(ticket.id) === preferredId)
+    ? preferredId
+    : cache.supportTickets[0]?.id || "");
+  if (requestedId) {
+    try { await openAdminSupportTicket(requestedId, { render: false }); }
+    catch (error) {
+      cache.supportTicketDetail = null;
+      if (options.ticketId) showAlert(error.message || "Unable to open customer support chat.");
+    }
+  } else cache.supportTicketDetail = null;
+  if (generation !== supportTicketLoadGeneration) return;
+  renderCustomerSupportWorkspace();
 }
 
 function supportTicketDetailModalHtml(detail = {}) {
@@ -7963,17 +8960,20 @@ function supportTicketDetailModalHtml(detail = {}) {
       <label>Status<select id="supportTicketDetailStatus" class="form-select">${["open","in_progress","waiting_customer","resolved","closed"].map((value) => `<option value="${value}" ${ticket.statusCode === value ? "selected" : ""}>${escapeHtml(value.replace(/_/g, " "))}</option>`).join("")}</select></label>
       <label>Priority<select id="supportTicketDetailPriority" class="form-select">${["low","normal","high","urgent"].map((value) => `<option value="${value}" ${ticket.priorityCode === value ? "selected" : ""}>${value}</option>`).join("")}</select></label>
       <button class="btn btn-outline-primary" data-action="update-support-ticket" data-id="${escapeHtml(ticket.id)}" type="button">Update & Assign to me</button></section>
-      <section class="support-ticket-admin-chat" data-admin-support-messages>${(detail.messages || []).map((item) => `<article class="${item.senderType === "admin" ? "admin" : "customer"}"><b>${escapeHtml(item.senderType === "admin" ? item.senderName || "Admin" : ticket.customerName || "Customer")}</b>${item.message ? `<p>${escapeHtml(item.message)}</p>` : ""}${supportTicketMessageAttachmentsHtml(item)}<time>${escapeHtml(formatDate(item.createdAt))}</time></article>`).join("")}</section>
-      ${closed ? `<p class="helper-text">Reopen this ticket to send another response.</p>` : `<form class="support-ticket-admin-composer" data-admin-support-message-form data-id="${escapeHtml(ticket.id)}"><input class="form-control" name="message" maxlength="4000" placeholder="Type your response" required><button class="btn btn-primary" type="submit">Send Reply</button></form>`}
+      <section class="support-ticket-admin-chat" data-admin-support-messages>${(detail.messages || []).map((item) => `<article class="${item.senderType === "admin" ? "admin" : "customer"}"><b>${escapeHtml(item.senderType === "admin" ? item.senderName || "Admin" : ticket.customerName || "Customer")}</b>${supportReplyMessageIconHtml(item)}${item.message ? `<p>${escapeHtml(item.message)}</p>` : ""}${supportTicketMessageAttachmentsHtml(item)}<time>${escapeHtml(formatDate(item.createdAt))}</time></article>`).join("")}</section>
+      ${closed ? `<p class="helper-text">Reopen this ticket to send another response.</p>` : `${supportQuickReplySelectHtml("customer", "supportCustomerReplyForm")}<form id="supportCustomerReplyForm" class="support-ticket-admin-composer" data-admin-support-message-form data-id="${escapeHtml(ticket.id)}"><input class="form-control" name="message" maxlength="4000" placeholder="Type your response" required><button class="btn btn-primary" type="submit">Send Reply</button></form>`}
     </div></div></div>`;
 }
 
-async function openAdminSupportTicket(ticketId) {
+async function openAdminSupportTicket(ticketId, { render = true } = {}) {
+  const row = cache.supportTickets.find((ticket) => String(ticket.id) === String(ticketId));
+  const wasUnread = Boolean(row?.isUnread || Number(row?.unreadCount || 0) > 0);
   const payload = await api(`/support/tickets/${ticketId}`);
   cache.supportTicketDetail = payload.data;
+  if (row) { row.isUnread = false; row.unreadCount = 0; }
+  if (wasUnread) updateSupportUnreadCount("customer", supportUnreadCounts.customer - 1);
   $("#supportTicketModal")?.remove();
-  document.body.insertAdjacentHTML("beforeend", supportTicketDetailModalHtml(cache.supportTicketDetail));
-  requestAnimationFrame(() => { const list = $("[data-admin-support-messages]"); if (list) list.scrollTop = list.scrollHeight; });
+  if (render) renderCustomerSupportWorkspace();
 }
 
 function assistantSupportToolbarHtml() {
@@ -7997,7 +8997,7 @@ function assistantSupportConversationListHtml() {
   if (!rows.length) return `<div class="assistant-support-admin-empty"><b>No assistant chats</b><span>New help requests will appear here in real time.</span></div>`;
   return rows.map((ticket) => `<button class="assistant-support-thread ${String(ticket.id) === selectedId ? "active" : ""}" data-action="open-assistant-support-ticket" data-id="${escapeHtml(ticket.id)}" type="button">
     ${assistantSupportAvatarHtml(ticket)}
-    <span class="assistant-support-thread-copy"><b>${escapeHtml(ticket.assistantName || "Assistant")}</b><small>${escapeHtml(ticket.bookingNumber ? `Booking ${ticket.bookingNumber}` : ticket.ticketNumber || "Support")}</small><p>${escapeHtml(ticket.lastMessage || "Support chat opened")}</p></span>
+    <span class="assistant-support-thread-copy"><b>${escapeHtml(ticket.assistantName || "Assistant")} ${supportUnreadBadgeHtml(ticket)}</b><small>${escapeHtml(ticket.bookingNumber ? `Booking ${ticket.bookingNumber}` : ticket.ticketNumber || "Support")}</small><p>${escapeHtml(ticket.lastMessage || "Support chat opened")}</p></span>
     <span class="assistant-support-thread-meta">${supportTicketStatusCapsule(ticket.statusCode)}<time>${escapeHtml(formatDate(ticket.lastMessageAt || ticket.createdAt))}</time></span>
   </button>`).join("");
 }
@@ -8019,9 +9019,9 @@ function assistantSupportDetailHtml() {
     </header>
     <div class="assistant-support-admin-subject"><span><b>${escapeHtml(ticket.subject || "Task support")}</b><small>${escapeHtml(ticket.ticketNumber || "")}</small></span>${supportTicketStatusCapsule(ticket.statusCode)}</div>
     <section class="assistant-support-admin-messages" data-admin-assistant-support-messages>
-      ${messages.length ? messages.map((message) => `<article class="${message.senderType === "admin" ? "admin" : "assistant"}"><b>${escapeHtml(message.senderType === "admin" ? message.senderName || "Support" : ticket.assistantName || "Assistant")}</b><p>${escapeHtml(message.message || "")}</p><time>${escapeHtml(formatDate(message.createdAt))}</time></article>`).join("") : `<div class="assistant-support-admin-empty"><b>No messages yet</b><span>The assistant opened this chat but has not sent a message.</span></div>`}
+      ${messages.length ? messages.map((message) => `<article class="${message.senderType === "admin" ? "admin" : "assistant"}"><b>${escapeHtml(message.senderType === "admin" ? message.senderName || "Support" : ticket.assistantName || "Assistant")}</b>${supportReplyMessageIconHtml(message)}${message.message ? `<p>${escapeHtml(message.message)}</p>` : ""}${supportTicketMessageAttachmentsHtml(message)}<time>${escapeHtml(formatDate(message.createdAt))}</time></article>`).join("") : `<div class="assistant-support-admin-empty"><b>No messages yet</b><span>The assistant opened this chat but has not sent a message.</span></div>`}
     </section>
-    ${closed ? `<p class="assistant-support-admin-closed">Reopen this chat to send another response.</p>` : `<form class="assistant-support-admin-composer" data-admin-assistant-support-message-form data-id="${escapeHtml(ticket.id)}"><input class="form-control" name="message" maxlength="4000" autocomplete="off" placeholder="Reply to assistant" required><button class="btn btn-primary" type="submit">Send</button></form>`}
+    ${closed ? `<p class="assistant-support-admin-closed">Reopen this chat to send another response.</p>` : `${supportQuickReplySelectHtml("assistant", "assistantSupportReplyForm")}<div class="support-slash-suggestions" data-support-quick-reply-suggestions data-channel="assistant" data-target-form="assistantSupportReplyForm"></div>${supportAdminComposerHtml("assistant", "assistantSupportReplyForm", ticket.id)}`}
   </div>`;
 }
 
@@ -8030,6 +9030,7 @@ function renderAssistantSupportWorkspace() {
   const section = $("#assistantSupportSection");
   if (!section) return;
   section.innerHTML = pageTitleBlock("Assistant Support", "Real-time task help conversations between assistants and the support team") +
+    supportReplyTemplatesHtml("assistant") +
     assistantSupportToolbarHtml() +
     `<div class="assistant-support-workspace">
       <aside><header><b>Conversations</b><span>${escapeHtml(pagination.totalRecords || 0)}</span></header><div class="assistant-support-thread-list">${assistantSupportConversationListHtml()}</div>${supportTicketPaginationHtml({ ...pagination, assistantSupport: true }).replaceAll("support-ticket-page", "assistant-support-page")}</aside>
@@ -8043,8 +9044,12 @@ function renderAssistantSupportWorkspace() {
 
 async function openAdminAssistantSupportTicket(ticketId, { render = true } = {}) {
   if (!ticketId) return;
+  const row = cache.assistantSupportTickets.find((ticket) => String(ticket.id) === String(ticketId));
+  const wasUnread = Boolean(row?.isUnread || Number(row?.unreadCount || 0) > 0);
   const payload = await api(`/support/assistant/tickets/${encodeURIComponent(ticketId)}`);
   cache.assistantSupportDetail = payload.data || null;
+  if (row) { row.isUnread = false; row.unreadCount = 0; }
+  if (wasUnread) updateSupportUnreadCount("assistant", supportUnreadCounts.assistant - 1);
   if (render) renderAssistantSupportWorkspace();
 }
 
@@ -8057,10 +9062,12 @@ async function loadAssistantSupport(options = {}) {
     pageSize: String(assistantSupportFilters.pageSize)
   });
   const payload = await safeApi(`/support/assistant/tickets?${params.toString()}`);
+  await loadSupportReplyTemplates("assistant");
   if (generation !== assistantSupportLoadGeneration) return;
   const data = payload.data || {};
   cache.assistantSupportTickets = data.rows || [];
   cache.assistantSupportPagination = data.pagination || { page: 1, pageSize: 50, totalRecords: 0, totalPages: 1 };
+  if (Number.isFinite(Number(data.unreadCount))) updateSupportUnreadCount("assistant", data.unreadCount);
   const preferredId = String(options.ticketId || cache.assistantSupportDetail?.ticket?.id || "");
   const requestedId = String(cache.assistantSupportTickets.some((ticket) => String(ticket.id) === preferredId)
     ? preferredId
@@ -8856,6 +9863,147 @@ function renderAssistantTaskReport() {
   });
 }
 
+function offerRedemptionReportMoney(value) {
+  const amount = Number(value || 0);
+  return money(Number.isFinite(amount) ? amount : 0);
+}
+
+function offerRedemptionReportQuery(page, pageSize) {
+  const filters = getAdminReportFilter("offerRedemptionReport");
+  const params = new URLSearchParams({
+    page: String(page),
+    pageSize: String(pageSize),
+    startDate: filters.startDate || "",
+    endDate: filters.endDate || "",
+    search: filters.search || "",
+    offerType: filters.offerType || "all",
+    status: filters.status || "all"
+  });
+  return params.toString();
+}
+
+function offerRedemptionReportToolbar() {
+  const filters = getAdminReportFilter("offerRedemptionReport");
+  return adminReportToolbar("offerRedemptionReport", "Search customer, offer, package, booking, phone", `
+    <select id="offerRedemptionReportOfferType" class="form-select form-select-sm" aria-label="Offer type">
+      ${[["all", "All offer types"], ["PACKAGE", "Packages"], ["DISCOUNT", "Discounts"], ["FREE_SERVICE", "Free service"], ["FIXED_PRICE", "Fixed price"], ["BUY_X_GET_Y", "Buy X get Y"], ["CREDIT", "Credit / referral"]].map(([value, label]) => `<option value="${value}" ${filters.offerType === value ? "selected" : ""}>${label}</option>`).join("")}
+    </select>
+    <select id="offerRedemptionReportStatus" class="form-select form-select-sm" aria-label="Redemption status">
+      ${[["all", "All redemption status"], ["CONSUMED", "Consumed"], ["RESERVED", "Reserved"], ["RELEASED", "Released"], ["REVERSED", "Reversed"]].map(([value, label]) => `<option value="${value}" ${filters.status === value ? "selected" : ""}>${label}</option>`).join("")}
+    </select>`);
+}
+
+function offerRedemptionReportRows(items = []) {
+  return items.map((row) => {
+    const promoBurnPaise = Number(row.benefitAmountPaise || 0) + Number(row.referralRewardPaise || 0);
+    const recognizedRevenuePaise = Number(row.paidAmountPaise || 0) + Number(row.allocatedPackageRevenuePaise || 0);
+    const bookingLabel = row.bookingReference || row.bookingId || "No booking";
+    return `<tr>
+      <td><b>${escapeHtml(row.offerTitle || row.offerInternalName || "Offer")}</b>${reportCellNote(row.offerCode || row.offerType || "-")}${reportCellNote(`${String(row.redemptionStatus || "").toUpperCase()} · ${formatDate(row.redeemedAt)}`)}</td>
+      <td><b>${escapeHtml(row.customerName || "Customer")}</b>${reportCellNote(row.customerCode || row.customerPhone || "-")}${reportCellNote(`${Number(row.customerOfferUseCount || 0)} use${Number(row.customerOfferUseCount || 0) === 1 ? "" : "s"} of this offer`)}</td>
+      <td><b>${escapeHtml(bookingLabel)}</b>${reportCellNote(row.bookingStatus || "-")}${reportCellNote(row.serviceName || row.serviceMasterName || row.categoryName || "-")}</td>
+      <td><b>${escapeHtml(formatDurationMinutes(row.durationMinutes))}</b>${reportCellNote(row.bookingType || "-")}${reportCellNote(row.scheduledAt || row.bookingStartAt ? formatDate(row.scheduledAt || row.bookingStartAt) : "")}</td>
+      <td><b>${escapeHtml(offerRedemptionReportMoney(row.bookingAmountPaise))}</b>${reportCellNote(`Base ${offerRedemptionReportMoney(row.basePricePaise)}`)}${reportCellNote(`Paid ${offerRedemptionReportMoney(row.paidAmountPaise)}`)}</td>
+      <td><b class="text-success">${escapeHtml(offerRedemptionReportMoney(row.benefitAmountPaise))}</b>${reportCellNote(`Promo burn${Number(row.referralRewardPaise || 0) ? ` + referral ${offerRedemptionReportMoney(row.referralRewardPaise)}` : ""}`)}${row.offerType === "PACKAGE" ? reportCellNote(`Package use ${Number(row.packageUseCount || 0)} / ${Number(row.packageTotalUnits || 0)}`) : ""}</td>
+      <td><b>${escapeHtml(offerRedemptionReportMoney(recognizedRevenuePaise))}</b>${reportCellNote(`Booking paid ${offerRedemptionReportMoney(row.paidAmountPaise)}`)}${Number(row.allocatedPackageRevenuePaise || 0) ? reportCellNote(`Package allocation ${offerRedemptionReportMoney(row.allocatedPackageRevenuePaise)}`) : ""}</td>
+    </tr>`;
+  }).join("");
+}
+
+function offerRedemptionReportSummaryHtml(summary = {}) {
+  const promoBurn = Number(summary.estimatedPromoBurnPaise || 0);
+  return `<div class="booking-info-grid offer-redemption-report-summary">
+    ${bookingInfoItem("Redemptions", `<b>${escapeHtml(Number(summary.redemptionCount || 0))}</b><br><small>${escapeHtml(Number(summary.customerCount || 0))} customers · ${escapeHtml(Number(summary.offerCount || 0))} offers</small>`)}
+    ${bookingInfoItem("Recognized revenue", `<b>${escapeHtml(offerRedemptionReportMoney(summary.recognizedRevenuePaise))}</b><br><small>Customer-paid bookings + package allocation</small>`)}
+    ${bookingInfoItem("Package revenue allocated", `<b>${escapeHtml(offerRedemptionReportMoney(summary.allocatedPackageRevenuePaise))}</b><br><small>Allocated per package use</small>`)}
+    ${bookingInfoItem("Estimated promo burn", `<b class="text-danger">${escapeHtml(offerRedemptionReportMoney(promoBurn))}</b><br><small>Offer benefit + referral reward</small>`)}
+    ${bookingInfoItem("Revenue after promotion", `<b class="text-success">${escapeHtml(offerRedemptionReportMoney(summary.recognizedRevenuePaise))}</b><br><small>Already net of offer discount; before operating costs</small>`)}
+  </div>`;
+}
+
+function offerRedemptionReportExportRow(row) {
+  const promoBurnPaise = Number(row.benefitAmountPaise || 0) + Number(row.referralRewardPaise || 0);
+  return [
+    row.redemptionId, formatDate(row.redeemedAt), row.redemptionStatus, row.customerName, row.customerCode, row.customerPhone, row.customerEmail,
+    row.customerOfferUseCount, row.customerId, row.offerId, row.offerTitle, row.offerCode, row.offerType, row.benefitType,
+    row.bookingId, row.bookingReference, row.bookingStatus, row.bookingType, row.serviceName || row.serviceMasterName, row.categoryName,
+    row.durationMinutes, formatDate(row.scheduledAt || row.bookingStartAt), offerRedemptionReportMoney(row.basePricePaise), offerRedemptionReportMoney(row.itemTotalPaise),
+    offerRedemptionReportMoney(row.addonTotalPaise), offerRedemptionReportMoney(row.totalDiscountPaise), offerRedemptionReportMoney(row.itemDiscountPaise),
+    offerRedemptionReportMoney(row.addonDiscountPaise), offerRedemptionReportMoney(row.deliveryDiscountPaise), offerRedemptionReportMoney(row.taxAmountPaise),
+    offerRedemptionReportMoney(row.bookingAmountPaise), offerRedemptionReportMoney(row.paidAmountPaise), offerRedemptionReportMoney(row.packagePurchasePricePaise),
+    row.packageTotalUnits, row.packageUseCount, row.packageRemainingUnits, offerRedemptionReportMoney(row.allocatedPackageRevenuePaise),
+    offerRedemptionReportMoney(row.referralRewardPaise), offerRedemptionReportMoney(promoBurn), offerRedemptionReportMoney(Number(row.paidAmountPaise || 0) + Number(row.allocatedPackageRevenuePaise || 0))
+  ];
+}
+
+const offerRedemptionReportHeaders = [
+  "Redemption ID", "Redeemed At", "Redemption Status", "Customer", "Customer Code", "Customer Mobile", "Customer Email", "Customer Offer Uses", "Customer ID",
+  "Offer ID", "Offer / Package", "Offer Code", "Offer Type", "Benefit Type", "Booking ID", "Booking Reference", "Booking Status", "Booking Type", "Service", "Category",
+  "Duration Minutes", "Scheduled At", "Base Amount", "Item Total", "Add-ons", "Total Discount", "Item Discount", "Add-on Discount", "Delivery Discount", "GST / Tax",
+  "Booking Amount", "Paid Amount", "Package Purchase Price", "Package Units", "Package Uses", "Package Remaining", "Allocated Package Revenue", "Referral Reward", "Estimated Promo Burn", "Recognized Revenue"
+];
+
+async function fetchAllOfferRedemptionReportRows() {
+  const rows = [];
+  let page = 1;
+  let totalPages = 1;
+  do {
+    const payload = await api(`/offers/reports/redemptions?${offerRedemptionReportQuery(page, 1000)}`);
+    const data = payload.data || {};
+    rows.push(...(data.rows || []));
+    totalPages = Math.max(1, Number(data.pagination?.totalPages || 1));
+    page += 1;
+  } while (page <= totalPages);
+  return rows;
+}
+
+async function loadOfferRedemptionReport() {
+  const filters = getAdminReportFilter("offerRedemptionReport");
+  const showAll = String(filters.pageSize).toLowerCase() === "all";
+  if (showAll) {
+    cache.offerRedemptionReport = await fetchAllOfferRedemptionReportRows();
+    cache.offerRedemptionReportPagination = { page: 1, pageSize: Math.max(1, cache.offerRedemptionReport.length), totalRecords: cache.offerRedemptionReport.length, totalPages: 1 };
+  } else {
+    const pageSize = Math.max(5, Math.min(1000, Number(filters.pageSize || 50)));
+    const payload = await api(`/offers/reports/redemptions?${offerRedemptionReportQuery(filters.page, pageSize)}`);
+    const data = payload.data || {};
+    cache.offerRedemptionReport = data.rows || [];
+    cache.offerRedemptionReportSummary = data.summary || {};
+    cache.offerRedemptionReportPagination = data.pagination || { page: 1, pageSize, totalRecords: 0, totalPages: 1 };
+  }
+  if (showAll) {
+    cache.offerRedemptionReportSummary = cache.offerRedemptionReport.reduce((summary, row) => {
+      summary.redemptionCount = Number(summary.redemptionCount || 0) + 1;
+      summary.customerCount = new Set(cache.offerRedemptionReport.map((item) => item.customerId).filter(Boolean)).size;
+      summary.offerCount = new Set(cache.offerRedemptionReport.map((item) => item.offerId).filter(Boolean)).size;
+      summary.paidAmountPaise = Number(summary.paidAmountPaise || 0) + Number(row.paidAmountPaise || 0);
+      summary.allocatedPackageRevenuePaise = Number(summary.allocatedPackageRevenuePaise || 0) + Number(row.allocatedPackageRevenuePaise || 0);
+      summary.estimatedPromoBurnPaise = Number(summary.estimatedPromoBurnPaise || 0) + Number(row.benefitAmountPaise || 0) + Number(row.referralRewardPaise || 0);
+      summary.recognizedRevenuePaise = Number(summary.recognizedRevenuePaise || 0) + Number(row.paidAmountPaise || 0) + Number(row.allocatedPackageRevenuePaise || 0);
+      return summary;
+    }, {});
+  }
+  renderOfferRedemptionReport();
+}
+
+function renderOfferRedemptionReport() {
+  const section = $("#offerRedemptionReportSection");
+  if (!section) return;
+  const pagination = cache.offerRedemptionReportPagination || { page: 1, pageSize: 50, totalRecords: 0, totalPages: 1 };
+  const normalized = { ...pagination, start: pagination.totalRecords ? (pagination.page - 1) * pagination.pageSize + 1 : 0, end: Math.min(pagination.totalRecords, pagination.page * pagination.pageSize) };
+  const resultsHtml = table(["Offer / Package", "Customer / Usage", "Booking / Service", "Duration", "Booking Amount", "Offer Benefit / Burn", "Net Revenue"], offerRedemptionReportRows(cache.offerRedemptionReport)) + adminReportPagination("offerRedemptionReport", normalized);
+  const existingResults = section.querySelector('[data-admin-report-results="offerRedemptionReport"]');
+  if (existingResults) {
+    existingResults.innerHTML = resultsHtml;
+    const summary = section.querySelector("[data-offer-redemption-summary]");
+    if (summary) summary.innerHTML = offerRedemptionReportSummaryHtml(cache.offerRedemptionReportSummary);
+    return;
+  }
+  section.innerHTML = pageTitleBlock("Offers & Package Redeem Report", "Customer usage, package consumption, revenue, promotional burn, and net contribution") +
+    `<div data-offer-redemption-summary>${offerRedemptionReportSummaryHtml(cache.offerRedemptionReportSummary)}</div>` +
+    `<div class="master-grid single-column">${panel("Offers & Package Redeem Report", "Saved redemption and billing values. Estimated promo burn is the offer benefit plus any linked referral reward; operating costs are not included.", offerRedemptionReportToolbar() + `<div data-admin-report-results="offerRedemptionReport">${resultsHtml}</div>`)}</div>`;
+}
+
 function reviewRatingValue(value) {
   const rating = Number(value || 0);
   return Number.isFinite(rating) ? rating.toFixed(1) : "0.0";
@@ -9055,6 +10203,15 @@ function adminReportDefinition(reportKey) {
       exportRow: (booking) => [booking.assistantName, booking.assistantPhone || booking.assistantCode, bookingReference(booking), booking.customerName || booking.customerPhone, booking.assignmentStatus || booking.assignmentStatusCode || booking.statusCode || booking.status, formatDate(booking.bookingStartAt || booking.promisedStartAt || booking.scheduledAt), formatDate(booking.bookingEndAt), formatDate(booking.actualTaskStartedAt || booking.assignmentActualStartedAt), Number(booking.assistantStartDelayMinutes ?? booking.assignmentStartDelayMinutes ?? booking.delayCreditMinutes ?? 0), Number(booking.earlyFinishMinutes ?? booking.assignmentEarlyFinishMinutes ?? booking.metadata?.earlyFinishMinutes ?? 0), formatDate(booking.bookingAvailableAt || booking.metadata?.bookingAvailableAt || booking.metadata?.expectedFreeAt)]
     };
   }
+  if (reportKey === "offerRedemptionReport") {
+    return {
+      rows: cache.offerRedemptionReport || [],
+      dateAccessor: (row) => row.redeemedAt,
+      render: renderOfferRedemptionReport,
+      headers: offerRedemptionReportHeaders,
+      exportRow: offerRedemptionReportExportRow
+    };
+  }
   if (reportKey === "reviewsReport") {
     return {
       rows: cache.reviewsReport || [],
@@ -9088,6 +10245,11 @@ async function applyAdminReportFilters(reportKey) {
   if (filters.startDate > filters.endDate) throw new Error("From date cannot be after To date.");
   if (reportKey === "bookingsReport") await loadBookingsReport();
   else if (reportKey === "assistantTaskReport") await loadAssistantTaskReport();
+  else if (reportKey === "offerRedemptionReport") {
+    filters.offerType = $("#offerRedemptionReportOfferType")?.value || "all";
+    filters.status = $("#offerRedemptionReportStatus")?.value || "all";
+    await loadOfferRedemptionReport();
+  }
   else if (reportKey === "reviewsReport") await loadReviewsReport();
   else if (reportKey === "unserviceableLocationsReport") await loadUnserviceableLocationsReport();
   else definition.render();
@@ -9104,6 +10266,11 @@ async function exportAdminReport(reportKey) {
   if (reportKey === "unserviceableLocationsReport") {
     const rows = await fetchAllUnserviceableLocationReportRows();
     downloadAdminReportCsv(reportKey, definition.headers, rows.map(definition.exportRow));
+    return;
+  }
+  if (reportKey === "offerRedemptionReport") {
+    const rows = await fetchAllOfferRedemptionReportRows();
+    downloadAdminReportCsv(reportKey, offerRedemptionReportHeaders, rows.map(offerRedemptionReportExportRow));
     return;
   }
   const filtered = adminReportFilteredRows(reportKey, definition.rows, definition.dateAccessor);
@@ -9621,6 +10788,12 @@ function handleBookingRealtimeEvent(event = {}) {
     return;
   }
   if (eventType.startsWith("support.")) {
+    const supportActor = String(event.payload?.actor || "").toLowerCase();
+    const supportRequester = event.payload?.requesterType === "assistant" || supportActor === "assistant" ? "assistant" : "customer";
+    const isInboundSupportMessage = ["support.ticket.created", "support.message.created"].includes(eventType)
+      && ["customer", "assistant"].includes(supportActor)
+      && event.payload?.autoReplied !== true;
+    if (isInboundSupportMessage) void refreshSupportNotificationIndicators({ ring: true });
     if (event.payload?.requesterType === "assistant") {
       const openAssistantTicketId = cache.assistantSupportDetail?.ticket?.id;
       const eventTicketId = String(event.payload?.ticketId || "");
@@ -9629,6 +10802,9 @@ function handleBookingRealtimeEvent(event = {}) {
       if (state.section === "supportTickets") void loadSupportTickets();
       const openTicketId = cache.supportTicketDetail?.ticket?.id;
       if (openTicketId && String(event.payload?.ticketId || "") === String(openTicketId)) void openAdminSupportTicket(openTicketId);
+    }
+    if (isInboundSupportMessage && supportRequester === "assistant" && state.section !== "assistantSupport") {
+      renderSupportNotificationIndicators({ ring: true });
     }
   }
   const isAssistantEvent = eventType.startsWith("assistant.");
@@ -9770,15 +10946,16 @@ async function startBookingRealtime(force = false) {
   updateBookingBell();
 }
 
-async function openAssignBookingModal(serviceRequestId, label) {
+async function openAssignBookingModal(serviceRequestId, label, options = {}) {
+  const forceCancelledRecovery = options.forceCancelledRecovery === true;
   await ensureAssistantMasterCache({ forceRefresh: true });
   if (!cache.assistants.length) cache.assistants = (await safeApi("/verification/assistants")).data || [];
   const form = $("#assignBookingForm");
   const booking = bookingRowsCache.find((item) => item.id === serviceRequestId) || {};
-  const eligibilityPayload = await safeApi(`/operations/bookings/${serviceRequestId}/assignable-assistants`);
+  const eligibilityPayload = await safeApi(`/operations/bookings/${serviceRequestId}/assignable-assistants${forceCancelledRecovery ? "?force=true" : ""}`);
   const eligibilityRows = eligibilityPayload.data?.assistants || [];
   const eligibilityByAssistant = new Map(eligibilityRows.map((item) => [item.assistantId, item]));
-  const pickerAssistants = bookingAssignableAssistants(booking)
+  const pickerAssistants = bookingAssignableAssistants(booking, { force: forceCancelledRecovery })
     .filter((assistant) => eligibilityByAssistant.has(assistant.id))
     .map((assistant) => ({ ...assistant, assignmentEligibility: eligibilityByAssistant.get(assistant.id) }))
     .sort((left, right) => {
@@ -9789,9 +10966,12 @@ async function openAssignBookingModal(serviceRequestId, label) {
   form.reset();
   form.elements.serviceRequestId.value = serviceRequestId;
   form.elements.assistantId.value = "";
-  form.elements.reason.value = "Manual assignment from bookings page";
+  form.elements.reason.value = forceCancelledRecovery
+    ? "Super Admin force reassignment from cancelled booking"
+    : "Manual assignment from bookings page";
   form.dataset.forceMultiTaskAssignment = "false";
-  $("#assignBookingAssistantList").innerHTML = bookingAssistantPickerHtml(pickerAssistants, booking);
+  form.dataset.forceCancelledRecovery = forceCancelledRecovery ? "true" : "false";
+  $("#assignBookingAssistantList").innerHTML = bookingAssistantPickerHtml(pickerAssistants, booking, { force: forceCancelledRecovery });
   $("#assignBookingModalAlert").classList.add("d-none");
   $("#assignBookingModalAlert").textContent = "";
   $("#assignBookingModal").classList.remove("d-none");
@@ -10021,16 +11201,40 @@ function bookingReportTaskStatusCell(booking = {}) {
   </div>`;
 }
 
+function bookingAdminTaskActionHtml(booking = {}, tab = "") {
+  if (!isSuperAdminUser() || !booking.assignmentId || !["assigned", "working"].includes(tab)) return "";
+  const bookingStatusValue = String(booking.statusCode || booking.status || "").toLowerCase();
+  if (["cancelled", "canceled", "completed", "success", "done", "failed", "rejected", "expired"].includes(bookingStatusValue)) return "";
+  const assignmentStatus = String(booking.assignmentStatus || "").toLowerCase();
+  if (["cancelled", "canceled", "completed", "success", "failed", "rejected", "released", "reassigned"].includes(assignmentStatus)) return "";
+  const assignmentMetadata = booking.assignmentMetadata || {};
+  const bookingMetadata = booking.metadata || {};
+  const jobStarted = Boolean(assignmentMetadata.jobStartedAt || bookingMetadata.assistantJobStartedAt);
+  const taskStarted = Boolean(
+    booking.actualTaskStartedAt
+    || booking.assignmentActualStartedAt
+    || ["in_progress", "working", "approval_pending"].includes(bookingStatusValue)
+    || ["in_progress", "working", "approval_pending"].includes(assignmentStatus)
+  );
+  if (!jobStarted) {
+    return `<button class="btn btn-outline-primary btn-xs" data-action="admin-start-booking-job" data-id="${escapeHtml(booking.id)}" type="button">Start Job</button>`;
+  }
+  return `<button class="btn btn-primary btn-xs" data-action="admin-enter-booking-pin" data-id="${escapeHtml(booking.id)}" data-status="${taskStarted ? "completed" : "in_progress"}" type="button">${taskStarted ? "End PIN" : "Start PIN"}</button>`;
+}
+
 function bookingReportActionsCell(booking = {}, tab = "pending_assign") {
   const reference = bookingReference(booking);
   const assignLabel = tab === "assigned" ? "Switch" : "Assign";
+  const recoveryLabel = isSuperAdminUser() ? "Force " : "";
   const showAssign = ["pending_assign", "assigned", "hold"].includes(tab);
   const showShare = tab === "assigned";
   return `<div class="booking-report-cell booking-action-cell">
     ${["pending_assign", "assigned", "working", "hold"].includes(tab) ? `<button class="btn btn-outline-danger btn-xs" data-action="booking-cancel-confirm" data-id="${escapeHtml(booking.id)}" data-label="${escapeHtml(reference)}" type="button">Cancel</button>` : ""}
     ${["pending_assign", "assigned"].includes(tab) ? `<button class="btn btn-soft btn-xs" data-action="booking-change-slot" data-id="${escapeHtml(booking.id)}" type="button">Change Slot</button>` : ""}
+    ${tab === "cancelled" ? `<button class="btn btn-soft btn-xs" data-action="booking-reschedule-cancelled" data-id="${escapeHtml(booking.id)}" type="button">${recoveryLabel}Reschedule</button><button class="btn btn-primary btn-xs" data-action="booking-reassign-cancelled" data-id="${escapeHtml(booking.id)}" data-label="${escapeHtml(booking.customerName || booking.customerCode || reference)}" type="button">${recoveryLabel}Reassign</button>` : ""}
     ${showAssign ? `<button class="btn btn-primary btn-xs" data-action="open-assign-booking" data-id="${escapeHtml(booking.id)}" data-label="${escapeHtml(booking.customerName || booking.customerCode || reference)}" type="button">${assignLabel}</button>` : ""}
     ${showShare ? `<button class="btn btn-soft btn-xs" data-action="booking-share-link" data-id="${escapeHtml(booking.id)}" type="button">Share</button>` : ""}
+    ${bookingAdminTaskActionHtml(booking, tab)}
   </div>`;
 }
 
@@ -10425,6 +11629,238 @@ function closeBookingInfoModal() {
   modal?.classList.remove("customer-report-modal-open");
 }
 
+function openBookingAdminStartJobModal(id) {
+  if (!isSuperAdminUser()) {
+    showAlert("Only Super Admin can start a booking on behalf of an assistant.", "danger");
+    return;
+  }
+  const booking = bookingById(id);
+  if (!booking?.assignmentId) {
+    showAlert("This booking does not have an active assistant assignment.", "warning");
+    return;
+  }
+  bookingInfoModal("Super Admin Override", `Start Job ${bookingReference(booking)}`, `<div class="booking-admin-task-override">
+    <p>This starts the assistant's job journey on the assistant's behalf for a technical issue. The normal assistant online and GPS requirement is bypassed, and this action is saved in the booking audit history.</p>
+    <div class="booking-info-grid one-column">
+      ${bookingInfoItem("Assistant", escapeHtml(booking.assistantName || booking.assistantCode || "Assigned assistant"))}
+      ${bookingInfoItem("Booking", escapeHtml(bookingReference(booking)))}
+    </div>
+    <div class="booking-confirm-actions">
+      <button class="btn btn-primary" data-action="execute-admin-start-booking-job" data-id="${escapeHtml(id)}" type="button">Start Job</button>
+      <button class="btn btn-soft" data-action="close-booking-info-modal" type="button">Cancel</button>
+    </div>
+  </div>`);
+}
+
+function openBookingAdminPinModal(id, taskStatus = "in_progress") {
+  if (!isSuperAdminUser()) {
+    showAlert("Only Super Admin can enter a task PIN on behalf of an assistant.", "danger");
+    return;
+  }
+  const booking = bookingById(id);
+  if (!booking?.assignmentId) {
+    showAlert("This booking does not have an active assistant assignment.", "warning");
+    return;
+  }
+  const completing = taskStatus === "completed";
+  const pinLabel = completing ? "End PIN" : "Start PIN";
+  bookingInfoModal("Super Admin Override", `${pinLabel} ${bookingReference(booking)}`, `<form id="bookingAdminTaskPinForm" class="booking-admin-task-override" data-status="${escapeHtml(taskStatus)}" data-assignment-id="${escapeHtml(booking.assignmentId)}">
+    <p>Enter the customer's 4-digit ${pinLabel}. The PIN remains required even when Super Admin is acting on behalf of the assistant.</p>
+    <label class="form-label">${pinLabel}
+      <input class="form-control booking-admin-pin-input" name="pin" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="4" pattern="[0-9]{4}" placeholder="Enter 4-digit PIN" required>
+    </label>
+    <p class="helper-text">This override is recorded with the Super Admin user, booking, assignment and task status.</p>
+    <div class="booking-confirm-actions">
+      <button class="btn btn-primary" data-action="execute-admin-booking-pin" data-id="${escapeHtml(id)}" type="button">Confirm ${pinLabel}</button>
+      <button class="btn btn-soft" data-action="close-booking-info-modal" type="button">Cancel</button>
+    </div>
+  </form>`);
+  $(".booking-admin-pin-input")?.focus();
+}
+
+async function executeBookingAdminStartJob(id) {
+  if (!isSuperAdminUser()) throw new Error("Only Super Admin can start a booking on behalf of an assistant.");
+  const booking = bookingById(id);
+  if (!booking?.assignmentId) throw new Error("This booking does not have an active assistant assignment.");
+  const button = $('[data-action="execute-admin-start-booking-job"]');
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Starting...";
+  }
+  try {
+    await api(`/operations/bookings/${encodeURIComponent(id)}/admin-start-job`, {
+      method: "POST",
+      body: JSON.stringify({ assignmentId: booking.assignmentId })
+    });
+    closeBookingInfoModal();
+    showAlert("Start Job recorded for the assistant.", "success");
+    await loadBookings(bookingActiveTab, { source: "admin-task-override" });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Start Job";
+    }
+  }
+}
+
+async function executeBookingAdminTaskPin(id) {
+  if (!isSuperAdminUser()) throw new Error("Only Super Admin can enter a task PIN on behalf of an assistant.");
+  const form = $("#bookingAdminTaskPinForm");
+  if (!form || form.dataset.busy === "true") return;
+  const pin = String(form.elements.pin?.value || "").trim();
+  if (!/^\d{4}$/.test(pin)) {
+    showAlert("Enter the customer's 4-digit PIN.", "warning");
+    form.elements.pin?.focus();
+    return;
+  }
+  const assignmentId = String(form.dataset.assignmentId || "");
+  const taskStatus = String(form.dataset.status || "");
+  const button = form.querySelector('[data-action="execute-admin-booking-pin"]');
+  form.dataset.busy = "true";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Confirming...";
+  }
+  try {
+    await api(`/operations/bookings/${encodeURIComponent(id)}/admin-task-status`, {
+      method: "PATCH",
+      body: JSON.stringify({ assignmentId, status: taskStatus, pin })
+    });
+    closeBookingInfoModal();
+    showAlert(taskStatus === "completed" ? "End PIN verified. Booking completed." : "Start PIN verified. Booking is now working.", "success");
+    await loadBookings(taskStatus === "completed" ? "success" : "working", { source: "admin-task-override" });
+  } finally {
+    form.dataset.busy = "false";
+    if (button) {
+      button.disabled = false;
+      button.textContent = taskStatus === "completed" ? "Confirm End PIN" : "Confirm Start PIN";
+    }
+  }
+}
+
+function bookingLocalDateInputValue(dateValue) {
+  const date = dateValue instanceof Date ? new Date(dateValue) : new Date(dateValue || Date.now());
+  if (Number.isNaN(date.getTime())) return todayInputDate();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function bookingLocalTimeInputValue(dateValue) {
+  const date = dateValue instanceof Date ? new Date(dateValue) : new Date(dateValue || Date.now());
+  if (Number.isNaN(date.getTime())) return "09:00";
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function bookingChangeSlotDateValue(booking = {}) {
+  const value = String(booking.scheduledDate || booking.metadata?.scheduledDate || "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : bookingLocalDateInputValue(bookingReportStartDate(booking));
+}
+
+function bookingChangeSlotTimeValue(booking = {}) {
+  const value = String(booking.scheduledTime || booking.metadata?.scheduledTime || "").trim();
+  if (/^\d{1,2}:\d{2}$/.test(value)) {
+    const [hours, minutes] = value.split(":").map(Number);
+    if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+      return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+    }
+  }
+  return bookingLocalTimeInputValue(bookingReportStartDate(booking));
+}
+
+function openBookingChangeSlotModal(id, options = {}) {
+  const booking = bookingById(id);
+  if (!booking) return;
+  const reopenCancelled = options.reopenCancelled === true;
+  const reassignAfter = options.reassignAfter === true;
+  const forceRecovery = options.forceRecovery === true;
+  const currentSlot = bookingStartAtText(booking);
+  const dateValue = bookingChangeSlotDateValue(booking);
+  const timeValue = bookingChangeSlotTimeValue(booking);
+  const title = reopenCancelled ? (reassignAfter ? "Reschedule & Reassign Booking" : "Reschedule Cancelled Booking") : "Change Booking Slot";
+  const action = reassignAfter ? "execute-booking-reassign-cancelled" : reopenCancelled ? "execute-booking-reschedule" : "execute-booking-change-slot";
+  const submitLabel = reassignAfter ? "Continue to Reassign" : reopenCancelled ? "Reschedule Booking" : "Save Slot";
+  const helperText = reopenCancelled
+    ? `${forceRecovery ? "Super Admin force recovery is enabled. " : ""}The cancelled booking will be reopened in the pending-assignment queue. Its cancellation history will remain available for audit.`
+    : "The assistant assignment and capacity will be checked again before the slot is saved.";
+  bookingInfoModal(title, `${reopenCancelled ? "Update" : "Change"} ${bookingReference(booking)}`, `<form id="bookingChangeSlotForm" class="booking-change-slot-form" data-reopen-cancelled="${reopenCancelled ? "true" : "false"}" data-reassign-after="${reassignAfter ? "true" : "false"}" data-force-recovery="${forceRecovery ? "true" : "false"}">
+    <div class="booking-slot-summary">
+      <strong>Current slot</strong>
+      <span>${escapeHtml(currentSlot)}</span>
+    </div>
+    <div class="booking-change-slot-fields">
+      <label class="form-label">New date
+        <input class="form-control" type="date" name="scheduledDate" value="${escapeHtml(dateValue)}" min="${escapeHtml(todayInputDate())}" required>
+      </label>
+      <label class="form-label">New time
+        <input class="form-control" type="time" name="scheduledTime" value="${escapeHtml(timeValue)}" step="1800" required>
+      </label>
+    </div>
+    <p class="helper-text">${escapeHtml(helperText)}</p>
+    <label class="form-label">Reason (optional)
+      <textarea class="form-control" name="reason" rows="3" maxlength="1000" placeholder="Why is the customer slot being changed?"></textarea>
+    </label>
+    <div class="booking-confirm-actions">
+      <button class="btn btn-primary" data-action="${action}" data-id="${escapeHtml(id)}" type="button">${submitLabel}</button>
+      <button class="btn btn-soft" data-action="close-booking-info-modal" type="button">Cancel</button>
+    </div>
+  </form>`);
+}
+
+async function executeBookingChangeSlot(id) {
+  const form = $("#bookingChangeSlotForm");
+  if (!form || form.dataset.slotChangeBusy === "true") return;
+  const data = formObject(form);
+  const reopenCancelled = form.dataset.reopenCancelled === "true";
+  const reassignAfter = form.dataset.reassignAfter === "true";
+  const forceRecovery = form.dataset.forceRecovery === "true";
+  if (!data.scheduledDate || !data.scheduledTime) {
+    showAlert("Choose a new date and time.", "warning");
+    return;
+  }
+  const button = form.querySelector('[data-action^="execute-booking-"]');
+  form.dataset.slotChangeBusy = "true";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Saving...";
+  }
+  try {
+    await api(`/operations/bookings/${id}/change-slot`, {
+      method: "POST",
+      body: JSON.stringify({
+        scheduledDate: data.scheduledDate,
+        scheduledTime: data.scheduledTime,
+        reason: String(data.reason || "").trim(),
+        reopenCancelled,
+        forceCancelledRecovery: forceRecovery
+      })
+    });
+    closeBookingInfoModal();
+    if (reopenCancelled) {
+      await loadBookings("pending_assign");
+      if (reassignAfter) {
+        showAlert("Booking rescheduled. Select an assistant to complete reassignment.", "success");
+        const booking = bookingById(id);
+        await openAssignBookingModal(id, booking?.customerName || booking?.customerCode || id, { forceCancelledRecovery: forceRecovery });
+      } else {
+        showAlert("Cancelled booking rescheduled and moved to pending assignment.", "success");
+      }
+    } else {
+      showAlert("Booking slot changed successfully.", "success");
+      await loadBookings(bookingActiveTab);
+    }
+  } catch (error) {
+    showAlert(error.message || "Unable to change booking slot.", "danger");
+  } finally {
+    form.dataset.slotChangeBusy = "false";
+    if (button) {
+      button.disabled = false;
+      button.textContent = reassignAfter ? "Continue to Reassign" : reopenCancelled ? "Reschedule Booking" : "Save Slot";
+    }
+  }
+}
+
 function bookingById(id) {
   return bookingRowsCache.find((booking) => booking.id === id)
     || (cache.bookingsReport || []).find((booking) => booking.id === id)
@@ -10797,7 +12233,8 @@ function bookingInfoItem(label, value) {
   return `<div class="booking-info-item"><label>${escapeHtml(label)}</label><div>${value}</div></div>`;
 }
 
-function bookingAssignableAssistants(booking = {}) {
+function bookingAssignableAssistants(booking = {}, options = {}) {
+  const force = options.force === true;
   const clusterId = booking.clusterId || "";
   return (cache.assistantMasters || [])
     .filter((assistant) => {
@@ -10805,18 +12242,20 @@ function bookingAssignableAssistants(booking = {}) {
         assistant.currentClusterId,
         ...(assistant.clusters || []).filter((cluster) => cluster.isActive !== false).map((cluster) => cluster.id || cluster.clusterId)
       ].filter(Boolean);
-      const clusterMatches = !clusterId || assistantClusters.includes(clusterId);
+      const clusterMatches = force || !clusterId || assistantClusters.includes(clusterId);
       const lifecycle = assistantProfileLifecycle(assistant);
-      return clusterMatches && lifecycle.isActive !== false && assistantIsLoggedIn(assistant) && (assistantIsOnline(assistant) || assistantIsWorking(assistant));
+      const availabilityAllowed = force || (assistantIsLoggedIn(assistant) && (assistantIsOnline(assistant) || assistantIsWorking(assistant)));
+      return clusterMatches && lifecycle.isActive !== false && availabilityAllowed;
     })
     .sort((left, right) => bookingAssistantPickerRank(left, booking) - bookingAssistantPickerRank(right, booking) || bookingAssistantSortName(left).localeCompare(bookingAssistantSortName(right)));
 }
 
-function bookingAssistantPickerHtml(assistants = [], booking = {}) {
+function bookingAssistantPickerHtml(assistants = [], booking = {}, options = {}) {
+  const force = options.force === true;
   if (!assistants.length) {
-    return `<div class="alert alert-warning">No eligible online or working assistant has a free booking window for ${escapeHtml(booking.clusterName || "selected cluster")}.</div>`;
+    return `<div class="alert alert-warning">No ${force ? "active" : "eligible online or working"} assistant has a free booking window for ${escapeHtml(booking.clusterName || "selected cluster")}.</div>`;
   }
-  return `<div class="booking-assistant-picker-title">Online / Working Assistants at ${escapeHtml(booking.clusterName || "selected cluster")}</div>
+  return `<div class="booking-assistant-picker-title">${force ? "Active assistants available for Super Admin recovery" : "Online / Working Assistants"} at ${escapeHtml(booking.clusterName || "selected cluster")}</div>
     ${assistants.map((assistant) => {
       const name = assistant.displayName || assistant.assistantCode || "Assistant";
       const clusterText = [assistant.currentClusterName, assistant.currentZoneName, assistant.currentCityName].filter(Boolean).join(" / ");
@@ -10839,7 +12278,7 @@ function bookingAssistantPickerHtml(assistants = [], booking = {}) {
           ${assistantStatusLabel(assistant)}
           <small>${escapeHtml(assistantTodayOnlineLabel(assistant))}</small>
           <small class="booking-next-available">${escapeHtml(taskStartText)}</small>
-          <div class="booking-assistant-picker-actions"><button class="btn btn-primary btn-xs" data-action="assign-booking-assistant-card" data-id="${escapeHtml(assistant.id)}" data-mode="offer" type="button">Assign</button><button class="btn btn-outline-primary btn-xs" data-action="assign-booking-assistant-card" data-id="${escapeHtml(assistant.id)}" data-mode="confirm" type="button">Confirm</button></div>
+           <div class="booking-assistant-picker-actions"><button class="btn btn-primary btn-xs" data-action="assign-booking-assistant-card" data-id="${escapeHtml(assistant.id)}" data-mode="offer" type="button">${force ? "Force Assign" : "Assign"}</button><button class="btn btn-outline-primary btn-xs" data-action="assign-booking-assistant-card" data-id="${escapeHtml(assistant.id)}" data-mode="confirm" type="button">${force ? "Force Confirm" : "Confirm"}</button></div>
         </div>
         <div class="booking-assistant-task-metrics" aria-label="Today task counts">
           <span><small>Today Assigned</small><b>${escapeHtml(todayStats.assigned)}</b></span>
@@ -11300,7 +12739,7 @@ function priceBreakdownHtml(data = {}) {
 }
 
 function moneyFromRupees(value) {
-  return `₹${moneyNumber(value).toFixed(2)}`;
+  return `${INR_SYMBOL}${moneyNumber(value).toFixed(2)}`;
 }
 
 async function searchBookingCustomers() {
@@ -17084,6 +18523,7 @@ async function loadCategories() {
         <input type="hidden" name="id">
         <select class="form-select" name="serviceMasterId"><option value="">Select Service Master</option>${serviceMasterOptions}</select>
         <input class="form-control" name="name" placeholder="Category name" required>
+        <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="showSubCategoryName" checked> Show Sub-category Name in app</label>
         <input class="form-control" name="code" placeholder="Code auto generated if blank">
         <div class="category-master-priority-row">
           <input class="form-control" name="priority" type="number" min="0" value="0" placeholder="Priority">
@@ -17094,10 +18534,23 @@ async function loadCategories() {
           ${priceMasterFloatingField("Expand Description", `<textarea class="form-control" name="expandDescription" rows="2" maxlength="500" placeholder=" "></textarea>`)}
         </div>
         <textarea class="form-control" name="description" rows="2" placeholder="Description"></textarea>
+        <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="showSubCategoryDescription" checked> Show Sub-category Description in app</label>
         <textarea class="form-control" name="note" rows="3" placeholder="Note"></textarea>
-        <label class="form-label">Category Pictures ${uploadControl("categoryMasterImage")}</label>
+        <label class="form-label">Category Media (Images / Videos) ${uploadControl("categoryMasterImage")}</label>
         <input id="categoryMasterImageUrls" type="hidden" name="imageUrls" value="[]">
         <div id="categoryMasterImageGallery" class="store-image-gallery"></div>
+        <div class="category-master-video-thumbnail-control d-none" data-category-master-video-thumbnail-control>
+          <label class="form-label">Video-only bottom-sheet tab thumbnail</label>
+          <p class="helper-text">Required when this sub-category contains only videos. If an image is present after a video, the first image is used automatically.</p>
+          <input type="hidden" name="categoryMediaThumbnailUrl" value="">
+          <div class="upload-box compact-upload" data-upload-box="categoryMasterVideoThumbnail" data-upload-kind="image">
+            <input id="categoryMasterVideoThumbnailUploadInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-category-master-video-thumbnail-upload>
+            <div class="upload-icon">UP</div>
+            <div class="upload-title">Upload thumbnail image</div>
+            <button class="btn btn-primary btn-sm" type="button" data-action="browse-image" data-target="categoryMasterVideoThumbnailUploadInput">Browse</button>
+            <div class="upload-preview" data-category-master-video-thumbnail-preview><span class="helper-text">No thumbnail image uploaded</span></div>
+          </div>
+        </div>
         <div class="service-location-settings">
           <label class="form-check module-switch"><input class="form-check-input" type="radio" name="locationMode" value="current" checked> Apply Current Location</label>
           <label class="form-check module-switch"><input class="form-check-input" type="radio" name="locationMode" value="multi"> Multiple Locations</label>
@@ -17111,12 +18564,50 @@ async function loadCategories() {
           <label class="form-check module-switch"><input class="form-check-input" type="radio" name="homeDisplayMode" value="category" checked> Show category</label>
           <label class="form-check module-switch"><input class="form-check-input" type="radio" name="homeDisplayMode" value="categoryPrice"> Category price</label>
           <div class="category-master-priority-row" data-category-image-size-mode-controls>
-            <label class="form-check module-switch"><input class="form-check-input" type="radio" name="categoryImageSizeMode" value="default" checked> Default</label>
-            <label class="form-check module-switch"><input class="form-check-input" type="radio" name="categoryImageSizeMode" value="custom"> Custom</label>
+            <label class="form-check module-switch"><input class="form-check-input" type="radio" name="categoryImageSizeMode" value="default"> Default</label>
+            <label class="form-check module-switch"><input class="form-check-input" type="radio" name="categoryImageSizeMode" value="custom" checked> Custom</label>
           </div>
           <div class="category-master-priority-row d-none" data-category-image-size-controls>
-            ${priceMasterFloatingField("Category Image Height", `<input class="form-control" name="categoryImageHeight" type="number" min="40" max="600" step="1" value="0" placeholder=" " disabled>`)}
-            ${priceMasterFloatingField("Category Image Width", `<input class="form-control" name="categoryImageWidth" type="number" min="40" max="600" step="1" value="0" placeholder=" " disabled>`)}
+            ${priceMasterFloatingField("Sub-category Height (H = W)", `<input class="form-control" name="categoryImageHeight" type="number" min="40" max="600" step="1" value="600" placeholder=" ">`)}
+            ${priceMasterFloatingField("Sub-category Width (W = H)", `<input class="form-control" name="categoryImageWidth" type="number" min="40" max="600" step="1" value="600" placeholder=" ">`)}
+          </div>
+          <div class="category-price-duration-card category-subcategory-style-controls">
+            <div class="control-title"><div><p>Sub-category card</p><h3>Size, name, and overlay</h3></div></div>
+            <div class="category-master-priority-row">
+              ${priceMasterFloatingField("Image / Video Fit Type", `<select class="form-select" name="categoryMediaFit"><option value="cover" selected>Cover</option><option value="contain">Contain</option><option value="fill">Fill</option><option value="none">Original size</option><option value="scale-down">Scale down</option></select>`)}
+            ${priceMasterFloatingField("Card Width (columns)", `<select class="form-select" name="categoryCardGridWidth"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>`)}
+            ${priceMasterFloatingField("Card Height (rows)", `<select class="form-select" name="categoryCardGridHeight"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>`)}
+              ${priceMasterFloatingField("Media Transition", `<select class="form-select" name="categoryMediaTransition"><option value="none">None</option><option value="fade" selected>Fade</option><option value="slide">Slide</option><option value="zoom">Zoom</option></select>`)}
+              ${priceMasterFloatingField("Slide Transition Time (ms)", `<input class="form-control" name="categoryMediaTransitionDuration" type="number" min="0" max="3000" step="50" value="500" placeholder=" ">`)}
+              ${priceMasterFloatingField("Image Display Time (ms)", `<input class="form-control" name="categoryMediaDisplayDuration" type="number" min="500" max="60000" step="100" value="3000" placeholder=" ">`)}
+            </div>
+            <div class="category-master-priority-row">
+              ${priceMasterFloatingField("Card Slider Mode", `<select class="form-select" name="categoryMediaSliderMode"><option value="queue" selected>Queue with other cards</option><option value="standalone">Standalone card</option></select>`)}
+              ${priceMasterFloatingField("Standalone Repeat", `<select class="form-select" name="categoryMediaRepeat"><option value="auto" selected>Auto repeat</option><option value="2">Repeat 2 times</option><option value="3">Repeat 3 times</option><option value="4">Repeat 4 times</option></select>`)}
+            </div>
+            <div class="category-master-priority-row">
+              ${priceMasterFloatingField("Sub-category Name Position", `<select class="form-select" name="categoryNamePosition"><option value="inside" selected>Inside card</option><option value="outside">Outside card</option></select>`)}
+              ${priceMasterFloatingField("Name Color", `<input class="form-control" name="categoryNameColor" type="color" value="#ffffff">`)}
+              ${priceMasterFloatingField("Sub-category Font Size (px)", `<input class="form-control" name="categoryNameFontSize" type="number" min="8" max="80" step="1" value="20" placeholder=" ">`)}
+              ${priceMasterFloatingField("Font Weight", `<select class="form-select" name="categoryNameFontWeight"><option value="400">Regular</option><option value="500">Medium</option><option value="600">Semi-bold</option><option value="700" selected>Bold</option><option value="800">Extra-bold</option></select>`)}
+            </div>
+            <div class="category-master-priority-row">
+              ${priceMasterFloatingField("Font Family", `<select class="form-select" name="categoryNameFontFamily"><option value="Inter" selected>Inter</option><option value="Arial">Arial</option><option value="Roboto">Roboto</option><option value="Poppins">Poppins</option><option value="Georgia">Georgia</option><option value="Verdana">Verdana</option><option value="system-ui">System UI</option></select>`)}
+              ${priceMasterFloatingField("Horizontal Align", `<select class="form-select" name="categoryNameAlign"><option value="left" selected>Left</option><option value="center">Center</option><option value="right">Right</option></select>`)}
+              ${priceMasterFloatingField("Vertical Align", `<select class="form-select" name="categoryNameVerticalAlign"><option value="top">Top</option><option value="center">Center</option><option value="bottom" selected>Bottom</option></select>`)}
+            </div>
+            <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="categoryOverlayEnabled" checked> Show overlay layer</label>
+            <div class="category-master-priority-row">
+              ${priceMasterFloatingField("Layer Opacity (%)", `<input class="form-control" name="categoryOverlayOpacity" type="number" min="0" step="1" value="45">`)}
+              ${priceMasterFloatingField("Layer Color", `<input class="form-control" name="categoryOverlayColor" type="color" value="#111936">`)}
+              ${priceMasterFloatingField("Layer Width", `<input class="form-control" name="categoryOverlayWidth" type="number" min="10" max="100" step="1" value="100">`)}
+            </div>
+            <div class="category-master-priority-row">
+              ${priceMasterFloatingField("Layer Fit / Height", `<select class="form-select" name="categoryOverlayFit"><option value="category">Fit to sub-category</option><option value="10">10%</option><option value="20">20%</option><option value="30">30%</option><option value="40">40%</option><option value="50" selected>50%</option><option value="60">60%</option></select>`)}
+              ${priceMasterFloatingField("Layer Position", `<select class="form-select" name="categoryOverlayPosition"><option value="auto" selected>Auto</option><option value="left">Left</option><option value="right">Right</option></select>`)}
+              ${priceMasterFloatingField("Gradient Opacity (%)", `<input class="form-control" name="categoryOverlayGradientOpacity" type="number" min="0" step="1" value="35">`)}
+            </div>
+            <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="categoryOverlayGradientEnabled" checked> Use gradient overlay</label>
           </div>
           <div data-category-price-display-controls class="d-none">
             <label class="form-check module-switch"><input class="form-check-input" type="radio" name="priceDisplayMode" value="row" checked> Show in row</label>
@@ -17144,6 +18635,7 @@ async function loadCategories() {
       </form>` + categoryMasterGroupedReport(categoryMasterRowsOnly))}
     </div>`;
   toggleCategoryMasterLocationLimit();
+  syncCategoryMasterCardDimensions();
   toggleCategoryMasterHomeDisplayControls();
   renderCategoryMasterGuidance();
 }
@@ -17157,12 +18649,14 @@ async function loadCategoryServices() {
       ${panel("Service Master", "Add, edit, enable, and order service blocks under Category Master", `<form class="master-form stack" data-form="category-service-master" id="categoryServiceMasterForm">
         <input type="hidden" name="id">
         ${priceMasterFloatingField("Service Title", `<input class="form-control" name="serviceTitle" maxlength="160" placeholder=" ">`)}
+        <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="showCategoryName" checked> Show Category Name in app</label>
         <div class="category-master-priority-row">
           ${priceMasterFloatingField("Title Font Size", `<input class="form-control" name="serviceTitleFontSize" type="number" min="8" max="80" step="1" value="18" placeholder=" ">`)}
           ${priceMasterFloatingField("Title Font Weight", `<select class="form-select" name="serviceTitleFontWeight">${serviceMasterFontWeightOptions(400)}</select>`)}
           ${priceMasterFloatingField("Title Color", `<input class="form-control" name="serviceTitleColor" type="color" value="#000000" placeholder=" ">`)}
         </div>
         ${priceMasterFloatingField("Service Sub-title", `<input class="form-control" name="serviceSubtitle" maxlength="300" placeholder=" ">`)}
+        <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="showCategoryDescription" checked> Show Category Description in app</label>
         <div class="category-master-priority-row">
           ${priceMasterFloatingField("Sub-title Font Size", `<input class="form-control" name="serviceSubtitleFontSize" type="number" min="8" max="80" step="1" value="13" placeholder=" ">`)}
           ${priceMasterFloatingField("Sub-title Font Weight", `<select class="form-select" name="serviceSubtitleFontWeight">${serviceMasterFontWeightOptions(400)}</select>`)}
@@ -17174,15 +18668,20 @@ async function loadCategoryServices() {
         </div>
         <div class="master-form compact mb-0">
           ${priceMasterFloatingField("Booking Type", `<select class="form-select" name="bookingType"><option value="both" selected>Both</option><option value="instant">Instant</option><option value="schedule">Schedule</option></select>`)}
-          ${priceMasterFloatingField("Service Categories Grid size", `<select class="form-select" name="serviceCategoryGridSize"><option value="1x1">1x1</option><option value="2x2">2x2</option><option value="3x3" selected>3x3</option><option value="4x4">4x4</option><option value="5x5">5x5</option></select>`)}
+          ${priceMasterFloatingField("Custom Sub-category Grid Size", `<select class="form-select" name="serviceCategoryGridSize"><option value="1x1">1x1 - full-width cards</option><option value="2x2">2x2 - wider cards</option><option value="3x3" selected>3x3 - default</option><option value="4x4">4x4 - compact cards</option><option value="5x5">5x5 - extra compact cards</option></select>`)}
+          ${priceMasterFloatingField("Slider Item Count (0 = off)", `<input class="form-control" name="serviceCategorySliderItemCount" type="number" min="0" max="50" step="1" value="0" placeholder=" ">`)}
+          ${priceMasterFloatingField("Slider Visible Cards", `<input class="form-control" name="serviceCategorySliderVisibleItems" type="number" min="1" max="5" step="0.1" value="2" placeholder=" ">`)}
+          ${priceMasterFloatingField("Auto Slider Interval (ms)", `<input class="form-control" name="serviceCategorySliderInterval" type="number" min="1500" max="30000" step="250" value="4000" placeholder=" ">`)}
           ${priceMasterFloatingField("Service Position", `<input class="form-control" name="servicePosition" type="number" min="0" step="1" value="0" placeholder=" ">`)}
+          <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="serviceCategorySliderShowRange" checked> Show slider range</label>
+          <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="serviceCategorySliderAutoPlay"> Auto smooth slider</label>
           <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="showEta"> Show ETA</label>
           <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="isEnabled" checked> Enable</label>
           <label class="form-check module-switch"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
         </div>
         <div class="form-actions"><button class="btn btn-primary" id="categoryServiceMasterSubmitButton">Create Service Master</button><button class="btn btn-outline-secondary d-none" id="cancelCategoryServiceMasterEditButton" type="button">Cancel</button></div>
       </form>`)}
-      ${panel("Reports", "Filter, edit, or delete Category Master service blocks", table(["Service Title", "Sub-title", "Booking Type", "ETA", "Icons", "Grid size", "Position", "Enabled", "Status", ""], categoryServiceMasterRows(cache.categoryServices)))}
+    ${panel("Reports", "Filter, edit, or delete Category Master service blocks", table(["Service Title", "Sub-title", "Booking Type", "ETA", "Icons", "Custom Grid", "Slider", "Auto", "Position", "Enabled", "Status", ""], categoryServiceMasterRows(cache.categoryServices)))}
     </div>`;
   renderCategoryServiceMasterIconRows();
 }
@@ -17699,6 +19198,9 @@ async function loadBookingEngine() {
         ${priceMasterFloatingField("Start Time", `<input class="form-control" name="autoStartTime" type="time" step="60">`)}
         ${priceMasterFloatingField("End Time", `<input class="form-control" name="autoEndTime" type="time" step="60">`)}
       </div>
+      ${priceMasterFloatingField("Block today's slots from now", `<select class="form-select" name="blockTodayMinutes"><option value="0">No temporary block</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="90">1.5 hours</option><option value="120">2 hours</option><option value="150">2.5 hours</option><option value="180">3 hours</option><option value="210">3.5 hours</option><option value="240">4 hours</option></select><small class="form-text text-muted">Affected schedule slots will show Sold Out for today only. Saving No temporary block clears the active block.</small>`)}
+      <label class="form-label mb-0">Customer booking-closed popup message</label>
+      <textarea class="form-control" name="bookingRestrictionMessage" rows="2" maxlength="1000" placeholder="Example: We are closed for today. Please book for tomorrow."></textarea>
     </div>
     <div class="booking-engine-rule-grid">
       <div class="category-price-duration-card">
@@ -17724,7 +19226,7 @@ async function loadBookingEngine() {
     <div class="master-form compact mb-0">
       ${priceMasterFloatingField("Assistant Assignment", `<select class="form-select" name="assistantAssignmentMode"><option value="manual">Manual - booking confirmed & admin assigns assistant</option><option value="auto">Auto - assign as per availability</option></select>`)}
     </div>
-    <textarea class="form-control" name="note" rows="3" placeholder="Note"></textarea>
+    <textarea class="form-control" name="note" rows="3" placeholder="Admin note"></textarea>
     ${uploadControl("bookingEngineImage")}
     <label class="form-check"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</label>
     <div class="form-actions"><button class="btn btn-primary" id="bookingEngineSubmitButton">Create Booking Engine Rule</button><button class="btn btn-outline-secondary d-none" id="cancelBookingEngineEditButton" type="button">Cancel</button></div>
@@ -18884,12 +20386,14 @@ const loaders = {
   bookings: loadBookings,
   payments: loadPayments,
   offerMaster: loadOfferMaster,
+  offerPackagesMaster: loadOfferPackagesMaster,
   assistantAvailable: loadAssistantAvailabilityBoard,
   assistantSupport: loadAssistantSupport,
   bookingsReport: loadBookingsReport,
   customerReport: loadCustomerReport,
   assistantReport: loadAssistantReport,
   assistantTaskReport: loadAssistantTaskReport,
+  offerRedemptionReport: loadOfferRedemptionReport,
   reviewsReport: loadReviewsReport,
   unserviceableLocationsReport: loadUnserviceableLocationsReport,
   customerDisputes: loadCustomerDisputes,
@@ -18942,12 +20446,14 @@ const titles = {
   bookings: "Bookings",
   payments: "Payments",
   offerMaster: "Offer Master",
+  offerPackagesMaster: "Offer & Packages Master",
   assistantAvailable: "Assistant Available",
   assistantSupport: "Assistant Support",
   bookingsReport: "Bookings Report",
   customerReport: "Customer Report",
   assistantReport: "Assistant Report",
   assistantTaskReport: "Assistant Task Report",
+  offerRedemptionReport: "Offers & Package Redeem Report",
   reviewsReport: "Reviews Report",
   unserviceableLocationsReport: "Not Serviceable Locations",
   customerDisputes: "Customer Disputes",
@@ -19160,6 +20666,8 @@ function resetCategoryMasterForm() {
   form.reset();
   form.elements.id.value = "";
   form.elements.imageUrl.value = "";
+  if (form.elements.imageUrls) form.elements.imageUrls.value = "[]";
+  if (form.elements.categoryMediaThumbnailUrl) form.elements.categoryMediaThumbnailUrl.value = "";
   form.elements.priority.value = "0";
   if (form.elements.expandPriority) form.elements.expandPriority.value = "0";
   if (form.elements.expandTitle) form.elements.expandTitle.value = "";
@@ -19167,10 +20675,35 @@ function resetCategoryMasterForm() {
   form.elements.locationMode.value = "current";
   form.elements.maxLocationsLimit.value = "1";
   form.elements.addWithOtherCategory.checked = false;
+  form.elements.showSubCategoryName.checked = true;
+  form.elements.showSubCategoryDescription.checked = true;
   form.elements.homeDisplayMode.value = "category";
-  if (form.elements.categoryImageSizeMode) form.elements.categoryImageSizeMode.value = "default";
-  form.elements.categoryImageHeight.value = "0";
-  form.elements.categoryImageWidth.value = "0";
+  if (form.elements.categoryImageSizeMode) form.elements.categoryImageSizeMode.value = "custom";
+  form.elements.categoryImageHeight.value = "600";
+  form.elements.categoryImageWidth.value = "600";
+  form.elements.categoryMediaFit.value = "cover";
+  form.elements.categoryCardGridWidth.value = "1";
+  form.elements.categoryCardGridHeight.value = "1";
+  form.elements.categoryMediaTransition.value = "fade";
+  form.elements.categoryMediaTransitionDuration.value = "500";
+  form.elements.categoryMediaDisplayDuration.value = "3000";
+  form.elements.categoryMediaSliderMode.value = "queue";
+  form.elements.categoryMediaRepeat.value = "auto";
+  form.elements.categoryNamePosition.value = "inside";
+  form.elements.categoryNameColor.value = "#ffffff";
+  form.elements.categoryNameFontSize.value = "20";
+  form.elements.categoryNameFontWeight.value = "700";
+  form.elements.categoryNameFontFamily.value = "Inter";
+  form.elements.categoryNameAlign.value = "left";
+  form.elements.categoryNameVerticalAlign.value = "bottom";
+  form.elements.categoryOverlayEnabled.checked = true;
+  form.elements.categoryOverlayOpacity.value = "45";
+  form.elements.categoryOverlayGradientEnabled.checked = true;
+  form.elements.categoryOverlayGradientOpacity.value = "35";
+  form.elements.categoryOverlayColor.value = "#111936";
+  form.elements.categoryOverlayFit.value = "50";
+  form.elements.categoryOverlayWidth.value = "100";
+  form.elements.categoryOverlayPosition.value = "auto";
   form.elements.priceDisplayMode.value = "row";
   form.elements.priceGridRows.value = "3";
   form.elements.priceGridColumns.value = "3";
@@ -19185,7 +20718,11 @@ function resetCategoryMasterForm() {
   if (preview) preview.innerHTML = "";
   const gallery = $("#categoryMasterImageGallery");
   if (gallery) gallery.innerHTML = "";
+  const thumbnailPreview = form.querySelector("[data-category-master-video-thumbnail-preview]");
+  if (thumbnailPreview) thumbnailPreview.innerHTML = categoryMasterVideoThumbnailPreview("");
   toggleCategoryMasterLocationLimit(form);
+  syncCategoryMasterVideoThumbnailControl(form);
+  syncCategoryMasterCardDimensions(form);
   toggleCategoryMasterHomeDisplayControls(form);
   renderCategoryMasterGuidance(form);
 }
@@ -19199,12 +20736,19 @@ function resetCategoryServiceMasterForm() {
   form.elements.serviceTitleFontSize.value = "18";
   form.elements.serviceTitleFontWeight.value = "400";
   form.elements.serviceTitleColor.value = "#000000";
+  form.elements.showCategoryName.checked = true;
   form.elements.serviceSubtitleFontSize.value = "13";
   form.elements.serviceSubtitleFontWeight.value = "400";
   form.elements.serviceSubtitleColor.value = "#000000";
+  form.elements.showCategoryDescription.checked = true;
   form.elements.bookingType.value = "both";
   form.elements.showEta.checked = false;
   form.elements.serviceCategoryGridSize.value = "3x3";
+  form.elements.serviceCategorySliderItemCount.value = "0";
+  form.elements.serviceCategorySliderVisibleItems.value = "2";
+  form.elements.serviceCategorySliderShowRange.checked = true;
+  form.elements.serviceCategorySliderAutoPlay.checked = false;
+  form.elements.serviceCategorySliderInterval.value = "4000";
   form.elements.servicePosition.value = "0";
   form.elements.isEnabled.checked = true;
   form.elements.isActive.checked = true;
@@ -19222,6 +20766,41 @@ function toggleCategoryMasterLocationLimit(form = $("#categoryMasterForm")) {
     form.elements.maxLocationsLimit.disabled = !isMulti;
     if (!isMulti) form.elements.maxLocationsLimit.value = "1";
   }
+}
+
+function categoryMasterMediaIsVideo(url = "") {
+  return /\.(?:mp4|m4v|webm|mov|ogv)(?:[?#].*)?$/i.test(String(url || ""));
+}
+
+function categoryMasterVideoOnlyMedia(form = $("#categoryMasterForm")) {
+  if (!form) return false;
+  const urls = categoryMasterImageUrlsFromItem({
+    imageUrl: form.elements.imageUrl?.value || "",
+    imageUrls: form.elements.imageUrls?.value || "[]"
+  });
+  return urls.length > 0 && urls.every(categoryMasterMediaIsVideo);
+}
+
+function syncCategoryMasterVideoThumbnailControl(form = $("#categoryMasterForm")) {
+  if (!form) return;
+  const control = form.querySelector("[data-category-master-video-thumbnail-control]");
+  const thumbnailInput = form.elements.categoryMediaThumbnailUrl;
+  const videoOnly = categoryMasterVideoOnlyMedia(form);
+  if (control) control.classList.toggle("d-none", !videoOnly);
+  if (thumbnailInput) thumbnailInput.setAttribute("aria-required", String(videoOnly));
+}
+
+function syncCategoryMasterCardDimensions(form = $("#categoryMasterForm"), sourceName = "") {
+  if (!form || form.elements.homeDisplayMode?.value === "categoryPrice") return;
+  const heightField = form.elements.categoryImageHeight;
+  const widthField = form.elements.categoryImageWidth;
+  if (!heightField || !widthField) return;
+  const source = sourceName === "categoryImageHeight" ? heightField : widthField;
+  const fallback = Number(widthField.value) || Number(heightField.value) || 600;
+  const raw = Number(source.value);
+  const size = Math.max(40, Math.min(600, Math.round(Number.isFinite(raw) && raw > 0 ? raw : fallback)));
+  heightField.value = String(size);
+  widthField.value = String(size);
 }
 
 function toggleCategoryMasterHomeDisplayControls(form = $("#categoryMasterForm")) {
@@ -19503,6 +21082,7 @@ function showAdmin(options = {}) {
   $("#loginView").classList.add("d-none");
   $("#adminView").classList.remove("d-none");
   renderSignedInProfile();
+  startSupportNotificationPolling();
   startBookingRealtime();
   if (options.announcePending !== false) announcePendingBookingsOnAdminEntry().catch(() => {});
 }
@@ -19523,6 +21103,35 @@ $("#loginForm").addEventListener("submit", async (event) => {
 
 document.addEventListener("submit", async (event) => {
   const form = event.target;
+  if (form instanceof HTMLFormElement && form.matches("[data-support-reply-template-form]")) {
+    event.preventDefault();
+    const data = formObject(form);
+    const channel = form.dataset.channel === "assistant" ? "assistant" : "customer";
+    const templateId = String(data.templateId || "").trim();
+    const endpointBase = channel === "assistant" ? "/support/assistant/reply-templates" : "/support/reply-templates";
+    const submit = form.querySelector("button[type='submit']");
+    if (submit) submit.disabled = true;
+    try {
+      await api(templateId ? `${endpointBase}/${encodeURIComponent(templateId)}` : endpointBase, {
+        method: templateId ? "PUT" : "POST",
+        body: JSON.stringify({
+          replyType: form.dataset.replyType === "auto" ? "auto" : "quick",
+          title: data.title,
+          description: data.description,
+          iconUrl: data.iconUrl || null,
+          isActive: data.isActive === "true"
+        })
+      });
+      await loadSupportReplyTemplates(channel);
+      supportReplyTemplateEditing = null;
+      renderSupportReplyTemplates(channel);
+      showAlert(`${form.dataset.replyType === "auto" ? "Auto" : "Quick"} reply saved.`, "success");
+    } catch (error) {
+      showAlert(error.message || "Unable to save reply template.");
+      if (submit) submit.disabled = false;
+    }
+    return;
+  }
   if (form instanceof HTMLFormElement && form.id === "customerReportEditForm") {
     event.preventDefault();
     await saveCustomerReportEditor(form);
@@ -19532,10 +21141,11 @@ document.addEventListener("submit", async (event) => {
     event.preventDefault();
     const ticketId = form.dataset.id || "";
     const data = formObject(form);
+    const attachments = parseSupportChatAttachments(data.attachments);
     const submit = form.querySelector("button[type='submit']");
     if (submit) submit.disabled = true;
     try {
-      const payload = await api(`/support/assistant/tickets/${encodeURIComponent(ticketId)}/messages`, { method: "POST", body: JSON.stringify({ message: data.message }) });
+      const payload = await api(`/support/assistant/tickets/${encodeURIComponent(ticketId)}/messages`, { method: "POST", body: JSON.stringify({ message: data.message || "", attachments, replyTemplateId: data.replyTemplateId || null }) });
       cache.assistantSupportDetail = payload.data || cache.assistantSupportDetail;
       await loadAssistantSupport({ ticketId });
     } catch (error) {
@@ -19548,10 +21158,11 @@ document.addEventListener("submit", async (event) => {
     event.preventDefault();
     const ticketId = form.dataset.id || "";
     const data = formObject(form);
+    const attachments = parseSupportChatAttachments(data.attachments);
     const submit = form.querySelector("button[type='submit']");
     if (submit) submit.disabled = true;
     try {
-      await api(`/support/tickets/${ticketId}/messages`, { method: "POST", body: JSON.stringify({ message: data.message }) });
+      await api(`/support/tickets/${ticketId}/messages`, { method: "POST", body: JSON.stringify({ message: data.message || "", attachments, replyTemplateId: data.replyTemplateId || null }) });
       await openAdminSupportTicket(ticketId);
       await loadSupportTickets();
     } catch (error) {
@@ -19599,7 +21210,8 @@ document.addEventListener("submit", async (event) => {
         body: JSON.stringify({
           assistantId: data.assistantId,
           reason: data.reason,
-          mode: form.dataset.assignmentMode || 'offer'
+          mode: form.dataset.assignmentMode || 'offer',
+          forceCancelledRecovery: form.dataset.forceCancelledRecovery === "true"
         })
       });
       schedulePendingAssignmentCountRefresh(0);
@@ -20007,8 +21619,12 @@ document.addEventListener("submit", async (event) => {
       const method = editingCategoryMasterId ? "PUT" : "POST";
       const path = editingCategoryMasterId ? `/masters/categories/${editingCategoryMasterId}` : "/masters/categories";
       const imageUrls = categoryMasterImageUrlsFromItem({ imageUrl: data.imageUrl, imageUrls: data.imageUrls });
+      const categoryMediaThumbnailUrl = String(data.categoryMediaThumbnailUrl || "").trim();
       const useCustomImageSize = data.homeDisplayMode !== "categoryPrice" && data.categoryImageSizeMode === "custom";
       const supplyUnavailableAction = data.homeDisplayMode === "categoryPrice" ? String(data.supplyUnavailableAction || "") : "";
+      if (imageUrls.length > 0 && imageUrls.every(categoryMasterMediaIsVideo) && !categoryMediaThumbnailUrl) {
+        throw new Error("Upload a thumbnail image when this sub-category contains only videos.");
+      }
       if (supplyUnavailableAction === "show_popup" && !String(data.supplyUnavailableMessage || "").trim()) {
         throw new Error("Popup message is required when Show Popup is selected.");
       }
@@ -20021,9 +21637,12 @@ document.addEventListener("submit", async (event) => {
           serviceMasterId: data.serviceMasterId || null,
           parentCategoryId: null,
           description: data.description || null,
+          showSubCategoryName: Boolean(data.showSubCategoryName),
+          showSubCategoryDescription: Boolean(data.showSubCategoryDescription),
           note: data.note || null,
           imageUrl: imageUrls[0] || null,
           imageUrls,
+          categoryMediaThumbnailUrl: categoryMediaThumbnailUrl || null,
           priority: Number(data.priority || 0),
           sortOrder: Number(data.priority || 0),
           expandPriority: Number(data.expandPriority || 0),
@@ -20036,6 +21655,30 @@ document.addEventListener("submit", async (event) => {
           homeDisplayMode: data.homeDisplayMode === "categoryPrice" ? "categoryPrice" : "category",
           categoryImageHeight: useCustomImageSize ? Math.max(0, Number(data.categoryImageHeight || 0)) : 0,
           categoryImageWidth: useCustomImageSize ? Math.max(0, Number(data.categoryImageWidth || 0)) : 0,
+          categoryCardSpaceUtilize: Math.max(1, Math.min(5, Math.round(Number(data.categoryCardGridWidth || 1)))),
+          categoryCardGridWidth: Math.max(1, Math.min(5, Math.round(Number(data.categoryCardGridWidth || 1)))),
+          categoryCardGridHeight: Math.max(1, Math.min(5, Math.round(Number(data.categoryCardGridHeight || 1)))),
+          categoryMediaFit: data.categoryMediaFit || "cover",
+          categoryMediaTransition: data.categoryMediaTransition || "fade",
+          categoryMediaTransitionDuration: Math.max(0, Math.min(3000, Number(data.categoryMediaTransitionDuration ?? 500))),
+          categoryMediaDisplayDuration: Math.max(500, Math.min(60000, Number(data.categoryMediaDisplayDuration ?? 3000))),
+          categoryMediaSliderMode: data.categoryMediaSliderMode === "standalone" ? "standalone" : "queue",
+          categoryMediaRepeat: ["auto", "2", "3", "4"].includes(String(data.categoryMediaRepeat || "")) ? data.categoryMediaRepeat : "auto",
+          categoryNamePosition: data.categoryNamePosition === "outside" ? "outside" : "inside",
+          categoryNameColor: data.categoryNameColor || "#ffffff",
+          categoryNameFontSize: Math.max(8, Math.min(80, Number(data.categoryNameFontSize || 20))),
+          categoryNameFontWeight: Number(data.categoryNameFontWeight || 700),
+          categoryNameFontFamily: data.categoryNameFontFamily || "Inter",
+          categoryNameAlign: data.categoryNameAlign || "left",
+          categoryNameVerticalAlign: data.categoryNameVerticalAlign || "bottom",
+          categoryOverlayEnabled: Boolean(data.categoryOverlayEnabled),
+          categoryOverlayOpacity: Math.max(0, Number(data.categoryOverlayOpacity ?? 45)),
+          categoryOverlayGradientEnabled: Boolean(data.categoryOverlayGradientEnabled),
+          categoryOverlayGradientOpacity: Math.max(0, Number(data.categoryOverlayGradientOpacity ?? 35)),
+          categoryOverlayColor: data.categoryOverlayColor || "#111936",
+          categoryOverlayFit: data.categoryOverlayFit || "50",
+          categoryOverlayWidth: Math.max(10, Math.min(100, Number(data.categoryOverlayWidth || 100))),
+          categoryOverlayPosition: data.categoryOverlayPosition || "auto",
           priceDisplayMode: data.priceDisplayMode === "grid" ? "grid" : "row",
           priceGridRows: Math.max(1, Number(data.priceGridRows || 3)),
           priceGridColumns: Math.max(1, Number(data.priceGridColumns || 3)),
@@ -20058,6 +21701,8 @@ document.addEventListener("submit", async (event) => {
         body: JSON.stringify({
           serviceTitle: data.serviceTitle || "",
           serviceSubtitle: data.serviceSubtitle || null,
+          showCategoryName: Boolean(data.showCategoryName),
+          showCategoryDescription: Boolean(data.showCategoryDescription),
           serviceTitleFontSize: Number(data.serviceTitleFontSize || 18),
           serviceTitleFontWeight: Number(data.serviceTitleFontWeight || 400),
           serviceTitleColor: data.serviceTitleColor || "",
@@ -20068,6 +21713,11 @@ document.addEventListener("submit", async (event) => {
           showEta: Boolean(data.showEta),
           icons: collectCategoryServiceMasterIcons(form),
           serviceCategoryGridSize: data.serviceCategoryGridSize || "3x3",
+          serviceCategorySliderItemCount: Math.max(0, Math.min(50, Number(data.serviceCategorySliderItemCount || 0))),
+          serviceCategorySliderVisibleItems: Math.round(Math.max(1, Math.min(5, Number(data.serviceCategorySliderVisibleItems || 2))) * 10) / 10,
+          serviceCategorySliderShowRange: Boolean(data.serviceCategorySliderShowRange),
+          serviceCategorySliderAutoPlay: Boolean(data.serviceCategorySliderAutoPlay),
+          serviceCategorySliderInterval: Math.max(1500, Math.min(30000, Number(data.serviceCategorySliderInterval || 4000))),
           servicePosition: Number(data.servicePosition || 0),
           isEnabled: Boolean(data.isEnabled),
           isActive: Boolean(data.isActive)
@@ -20252,6 +21902,7 @@ document.addEventListener("submit", async (event) => {
           autoEndAt: null,
           autoStartTime: serviceControlMode === "auto" ? data.autoStartTime || null : null,
           autoEndTime: serviceControlMode === "auto" ? data.autoEndTime || null : null,
+           blockTodayMinutes: Number(data.blockTodayMinutes || 0),
           instantEtaMinutes: Number(data.instantEtaMinutes || 0),
           instantInitiateMinutes: Number(data.instantInitiateMinutes || 0),
           instantWrapUpMinutes: Number(data.instantWrapUpMinutes || 0),
@@ -20261,6 +21912,7 @@ document.addEventListener("submit", async (event) => {
           scheduleWrapUpMinutes: Number(data.scheduleWrapUpMinutes || 0),
           scheduleTravelMinutes: Number(data.scheduleTravelMinutes || 0),
           assistantAssignmentMode: data.assistantAssignmentMode || "manual",
+          bookingRestrictionMessage: data.bookingRestrictionMessage || null,
           note: data.note || null,
           imageUrl: data.imageUrl || null,
           isActive: Boolean(data.isActive)
@@ -20947,6 +22599,10 @@ document.addEventListener("visibilitychange", assistantAvailabilityBoardVisibili
 
 document.addEventListener("input", (event) => {
   const input = event.target;
+  if (input instanceof HTMLTextAreaElement && input.matches("[data-support-message-input]")) {
+    renderSupportSlashSuggestions(input);
+    return;
+  }
   const assistantMasterSlabSection = input.closest?.("[data-assistant-master-slab-section]");
   if (assistantMasterSlabSection) {
     updateAssistantMasterSlabPreview(assistantMasterSlabSection.dataset.assistantMasterSlabSection);
@@ -21000,6 +22656,7 @@ document.addEventListener("input", (event) => {
         filters.page = 1;
         if (reportKey === "reviewsReport") loadReviewsReport().catch((error) => showAlert(error.message));
         else if (reportKey === "unserviceableLocationsReport") loadUnserviceableLocationsReport().catch((error) => showAlert(error.message));
+        else if (reportKey === "offerRedemptionReport") loadOfferRedemptionReport().catch((error) => showAlert(error.message));
         else definition.render();
       }
       return;
@@ -21010,6 +22667,7 @@ document.addEventListener("input", (event) => {
     adminReportSearchTimers[reportKey] = setTimeout(() => {
       if (reportKey === "reviewsReport") loadReviewsReport().catch((error) => showAlert(error.message));
       else if (reportKey === "unserviceableLocationsReport") loadUnserviceableLocationsReport().catch((error) => showAlert(error.message));
+      else if (reportKey === "offerRedemptionReport") loadOfferRedemptionReport().catch((error) => showAlert(error.message));
       else definition.render();
     }, 250);
     return;
@@ -21018,6 +22676,59 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   const input = event.target;
+  if (input.closest?.("#categoryMasterForm") && ["categoryImageHeight", "categoryImageWidth"].includes(input.name)) {
+    syncCategoryMasterCardDimensions(input.closest("#categoryMasterForm"), input.name);
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.closest?.("#categoryMasterForm") && input.name === "categoryGuidanceShowImage") {
+    const form = input.closest("#categoryMasterForm");
+    renderCategoryMasterGuidance(form, collectCategoryMasterGuidance(form));
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.matches("[data-category-master-video-thumbnail-upload]")) {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      await uploadCategoryMasterVideoThumbnailFile(file);
+      showAlert("Video-only tab thumbnail uploaded.", "success");
+    } catch (error) {
+      showAlert(error.message || "Unable to upload video thumbnail.");
+    } finally {
+      input.value = "";
+    }
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.matches("[data-support-chat-file-upload]")) {
+    const form = input.closest("form");
+    const files = [...(input.files || [])];
+    if (!form || !files.length) return;
+    const current = parseSupportChatAttachments(form.elements.attachments?.value);
+    input.disabled = true;
+    try {
+      for (const file of files) {
+        if (current.length >= 10) break;
+        current.push(await uploadSupportChatFile(file));
+      }
+      setSupportChatAttachments(form, current);
+      showAlert(`${Math.min(files.length, 10)} attachment${files.length === 1 ? "" : "s"} ready to send.`, "success");
+    } catch (error) {
+      showAlert(error.message || "Unable to upload attachment.");
+    } finally {
+      input.disabled = false;
+      input.value = "";
+    }
+    return;
+  }
+  if (input instanceof HTMLSelectElement && input.matches("[data-support-quick-reply-select]")) {
+    const template = supportReplyTemplateById(input.dataset.channel === "assistant" ? "assistant" : "customer", input.value);
+    const form = input.dataset.targetForm ? document.getElementById(input.dataset.targetForm) : null;
+    if (form?.elements.replyTemplateId) form.elements.replyTemplateId.value = template?.id || "";
+    if (template && form?.elements.message) {
+      form.elements.message.value = template.description || "";
+      form.elements.message.focus();
+    }
+    return;
+  }
   if (input instanceof HTMLInputElement && input.matches("[data-booking-extension-policy-toggle]")) {
     syncBookingEngineExtensionPolicyControl(input.closest("form"));
     return;
@@ -21069,7 +22780,34 @@ document.addEventListener("change", async (event) => {
     }
     await loadAssistantAvailabilityBoard();
     return;
-  }  if (input instanceof HTMLInputElement && input.matches("[data-offer-image-upload]")) {
+  }
+  if (input instanceof HTMLInputElement && input.matches("[data-category-guidance-row-image-upload]")) {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      await uploadCategoryGuidanceRowImage(file, input.closest("[data-category-guidance-row-image-editor]"));
+      showAlert("Guidance row image uploaded.", "success");
+    } catch (error) {
+      showAlert(error.message || "Unable to upload guidance row image.");
+    } finally {
+      input.value = "";
+    }
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.matches("[data-category-guidance-icon-upload]")) {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      await uploadCategoryGuidanceIconImage(file, input.closest("[data-category-guidance-icon-editor]"));
+      showAlert("Guidance icon uploaded.", "success");
+    } catch (error) {
+      showAlert(error.message || "Unable to upload guidance icon.");
+    } finally {
+      input.value = "";
+    }
+    return;
+  }
+  if (input instanceof HTMLInputElement && input.matches("[data-offer-image-upload]")) {
     const file = input.files?.[0];
     if (!file) return;
     try {
@@ -21082,8 +22820,25 @@ document.addEventListener("change", async (event) => {
     }
     return;
   }
+  if (input instanceof HTMLInputElement && input.matches("[data-support-reply-image-upload]")) {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      await uploadSupportReplyIconImage(file, input.closest("[data-support-reply-upload-box]"));
+      showAlert("Reply image uploaded.", "success");
+    } catch (error) {
+      showAlert(error.message || "Unable to upload reply image.");
+    } finally {
+      input.value = "";
+    }
+    return;
+  }
   if (input.closest?.("#offerMasterForm") && (input instanceof HTMLInputElement || input instanceof HTMLSelectElement)) {
     const form = input.closest("#offerMasterForm");
+    if (input.name === "offerKind") {
+      syncOfferPackageConfig(form);
+      return;
+    }
     if (["scopeType", "stateId", "cityId", "zoneId", "clusterId"].includes(input.name || "")) {
       refreshOfferUserPickers(form);
       return;
@@ -21535,23 +23290,8 @@ document.addEventListener("change", async (event) => {
     }
     if (input.dataset.imageUpload === "categoryMasterImage") {
       const files = [...(input.files || [])];
-      const form = $("#categoryMasterForm");
-      const hidden = $("#categoryMasterImageUrls");
-      const urls = categoryMasterImageUrlsFromItem({
-        imageUrl: form?.elements.imageUrl?.value || "",
-        imageUrls: hidden?.value || "[]"
-      });
-      for (const selectedFile of files) {
-        const uploaded = await uploadImageFile(selectedFile, input.dataset.imageUpload);
-        if (uploaded.imageUrl && !urls.includes(uploaded.imageUrl)) urls.push(uploaded.imageUrl);
-      }
-      if (hidden) hidden.value = JSON.stringify(urls);
-      if (form?.elements.imageUrl) form.elements.imageUrl.value = urls[0] || "";
-      const preview = form?.querySelector(".upload-preview");
-      if (preview) preview.innerHTML = urls[0] ? imageCell(urls[0]) : "";
-      const gallery = $("#categoryMasterImageGallery");
-      if (gallery) gallery.innerHTML = categoryMasterImageGallery(urls);
-      showAlert(`${files.length} image${files.length === 1 ? "" : "s"} uploaded.`, "success");
+      await uploadCategoryMasterMediaFiles(files);
+      showAlert(`${files.length} media file${files.length === 1 ? "" : "s"} uploaded.`, "success");
       return;
     }
     if (input.dataset.imageUpload === "customerReportProfilePicture") {
@@ -21676,6 +23416,16 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("dragstart", (event) => {
+  const timeSlotRow = bookingTypeTimeSlotDropTarget(event.target);
+  if (timeSlotRow) {
+    bookingTypeTimeSlotDragRow = timeSlotRow;
+    timeSlotRow.classList.add("dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", timeSlotRow.dataset.time || "booking-type-time-slot");
+    }
+    return;
+  }
   const handle = event.target.closest?.("[data-category-guidance-drag-handle]");
   if (!handle) return;
   const row = handle.closest("[data-category-guidance-row]");
@@ -21689,10 +23439,24 @@ document.addEventListener("dragstart", (event) => {
 });
 
 document.addEventListener("dragend", () => {
+  clearBookingTypeTimeSlotDragState();
   clearCategoryGuidanceDragState();
 });
 
 document.addEventListener("dragover", (event) => {
+  if (bookingTypeTimeSlotDragRow) {
+    const row = bookingTypeTimeSlotDropTarget(event.target);
+    const grid = bookingTypeTimeSlotDragRow.parentElement;
+    if (!row || row === bookingTypeTimeSlotDragRow || row.parentElement !== grid) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    document.querySelectorAll(".booking-type-time-slot.drag-over").forEach((item) => item.classList.remove("drag-over"));
+    row.classList.add("drag-over");
+    const box = row.getBoundingClientRect();
+    const placeAfter = event.clientX > box.left + box.width / 2;
+    grid.insertBefore(bookingTypeTimeSlotDragRow, placeAfter ? row.nextSibling : row);
+    return;
+  }
   if (categoryGuidanceDragRow) {
     const row = categoryGuidanceDropTarget(event.target);
     if (!row || row === categoryGuidanceDragRow || row.parentElement !== categoryGuidanceDragRow.parentElement) return;
@@ -21717,6 +23481,17 @@ document.addEventListener("dragleave", (event) => {
 });
 
 document.addEventListener("drop", async (event) => {
+  if (bookingTypeTimeSlotDragRow) {
+    event.preventDefault();
+    const row = bookingTypeTimeSlotDragRow;
+    const form = row.closest("[data-time-slot-builder-form]");
+    const grid = row.parentElement;
+    const categoryId = row.dataset.id || form?.elements.activeTimeCategoryId?.value || "";
+    const orderedTimes = grid ? [...grid.querySelectorAll("[data-booking-type-time-slot-row]")].map((item) => item.dataset.time || "").filter(Boolean) : [];
+    clearBookingTypeTimeSlotDragState();
+    reorderBookingTypeTimeSlots(form, categoryId, orderedTimes);
+    return;
+  }
   if (categoryGuidanceDragRow) {
     event.preventDefault();
     clearCategoryGuidanceDragState();
@@ -21734,6 +23509,27 @@ document.addEventListener("drop", async (event) => {
       const files = [...(event.dataTransfer?.files || [])];
       await uploadServiceCategoryMediaFiles(files);
       showAlert(`${files.length} file${files.length === 1 ? "" : "s"} uploaded.`, "success");
+      return;
+    }
+    if (box.dataset.uploadBox === "categoryMasterVideoThumbnail") {
+      await uploadCategoryMasterVideoThumbnailFile(file);
+      showAlert("Video-only tab thumbnail uploaded.", "success");
+      return;
+    }
+    if (box.dataset.uploadBox === "categoryMasterImage") {
+      const files = [...(event.dataTransfer?.files || [])];
+      await uploadCategoryMasterMediaFiles(files);
+      showAlert(`${files.length} media file${files.length === 1 ? "" : "s"} uploaded.`, "success");
+      return;
+    }
+    if (box.dataset.uploadBox?.startsWith("categoryGuidance") && box.querySelector("[data-category-guidance-row-image-upload]")) {
+      await uploadCategoryGuidanceRowImage(file, box);
+      showAlert("Guidance row image uploaded.", "success");
+      return;
+    }
+    if (box.dataset.uploadBox?.startsWith("categoryGuidance") && box.querySelector("[data-category-guidance-icon-upload]")) {
+      await uploadCategoryGuidanceIconImage(file, box);
+      showAlert("Guidance icon uploaded.", "success");
       return;
     }
     if (box.dataset.uploadKind === "document") {
@@ -21769,6 +23565,62 @@ document.addEventListener("drop", async (event) => {
 
 document.addEventListener("click", async (event) => {
   if (event.target.closest?.('a[href^="https://wa.me/"]')) return;
+  const clearCategoryGuidanceIcon = event.target.closest?.('[data-action="clear-category-guidance-icon"]');
+  if (clearCategoryGuidanceIcon) {
+    event.preventDefault();
+    const editor = clearCategoryGuidanceIcon.closest("[data-category-guidance-icon-editor]");
+    const valueInput = editor?.querySelector("[data-category-guidance-icon-value]");
+    const preview = editor?.querySelector("[data-category-guidance-icon-preview]");
+    if (valueInput) valueInput.value = "";
+    if (preview) preview.innerHTML = "";
+    return;
+  }
+  const clearCategoryGuidanceRowImage = event.target.closest?.('[data-action="clear-category-guidance-row-image"]');
+  if (clearCategoryGuidanceRowImage) {
+    event.preventDefault();
+    const editor = clearCategoryGuidanceRowImage.closest("[data-category-guidance-row-image-editor]");
+    const valueInput = categoryGuidanceRowImageValueInput(editor);
+    const preview = editor?.querySelector("[data-category-guidance-row-image-preview]");
+    if (valueInput) valueInput.value = "";
+    if (preview) preview.innerHTML = categoryGuidanceRowImagePreview("");
+    return;
+  }
+  const removeSupportAttachment = event.target.closest?.('[data-action="remove-support-chat-attachment"]');
+  if (removeSupportAttachment) {
+    event.preventDefault();
+    const form = removeSupportAttachment.closest("form");
+    const index = Number(removeSupportAttachment.dataset.index);
+    const attachments = parseSupportChatAttachments(form?.elements.attachments?.value);
+    if (form && Number.isInteger(index)) {
+      attachments.splice(index, 1);
+      setSupportChatAttachments(form, attachments);
+    }
+    return;
+  }
+  const shareSupportLocation = event.target.closest?.('[data-action="share-support-location"]');
+  if (shareSupportLocation) {
+    event.preventDefault();
+    const form = shareSupportLocation.closest("form");
+    if (!form || !navigator.geolocation) {
+      showAlert("Location sharing is not available in this browser.");
+      return;
+    }
+    shareSupportLocation.disabled = true;
+    try {
+      const position = await new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }));
+      const latitude = Number(position.coords.latitude.toFixed(6));
+      const longitude = Number(position.coords.longitude.toFixed(6));
+      const attachments = parseSupportChatAttachments(form.elements.attachments?.value);
+      attachments.push({ url: `https://www.google.com/maps?q=${latitude},${longitude}`, name: "Shared location", type: "location", latitude, longitude });
+      setSupportChatAttachments(form, attachments);
+      showAlert("Location ready to send.", "success");
+    } catch (error) {
+      showAlert(error?.message || "Unable to read your current location.");
+    } finally {
+      shareSupportLocation.disabled = false;
+    }
+    return;
+  }
   const addAssistantMasterOfferSlab = event.target.closest?.('[data-action="add-assistant-master-offer-slab"]');
   if (addAssistantMasterOfferSlab) {
     event.preventDefault();
@@ -22247,6 +24099,7 @@ document.addEventListener("click", async (event) => {
     getAdminReportFilter(reportKey).page = Math.max(1, Number(button.dataset.page || 1));
     if (reportKey === "reviewsReport") await loadReviewsReport();
     else if (reportKey === "unserviceableLocationsReport") await loadUnserviceableLocationsReport();
+    else if (reportKey === "offerRedemptionReport") await loadOfferRedemptionReport();
     else definition.render();
     return;
   }
@@ -22264,6 +24117,75 @@ document.addEventListener("click", async (event) => {
   if (action === "customer-dispute-page") {
     customerDisputeFilters.page = Math.max(1, Number(button.dataset.page || 1));
     await loadCustomerDisputes();
+    return;
+  }
+  if (action === "new-support-reply-template") {
+    supportReplyTemplateEditing = { channel: button.dataset.channel === "assistant" ? "assistant" : "customer", replyType: button.dataset.replyType === "auto" ? "auto" : "quick", template: null };
+    renderSupportReplyTemplates(supportReplyTemplateEditing.channel);
+    return;
+  }
+  if (action === "edit-support-reply-template") {
+    const channel = button.dataset.channel === "assistant" ? "assistant" : "customer";
+    const template = supportReplyTemplateById(channel, id);
+    if (!template) return;
+    supportReplyTemplateEditing = { channel, replyType: button.dataset.replyType === "auto" ? "auto" : "quick", template };
+    renderSupportReplyTemplates(channel);
+    return;
+  }
+  if (action === "support-reply-template-cancel") {
+    const form = button.closest("[data-support-reply-template-form]");
+    supportReplyTemplateEditing = null;
+    if (form?.dataset.channel) renderSupportReplyTemplates(form.dataset.channel);
+    return;
+  }
+  if (action === "toggle-support-reply-template") {
+    const channel = button.dataset.channel === "assistant" ? "assistant" : "customer";
+    const template = supportReplyTemplateById(channel, id);
+    if (!template) return;
+    const endpointBase = channel === "assistant" ? "/support/assistant/reply-templates" : "/support/reply-templates";
+    await api(`${endpointBase}/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ replyType: template.replyType, title: template.title, description: template.description, iconUrl: template.iconUrl || null, isActive: button.dataset.active !== "true" })
+    });
+    await loadSupportReplyTemplates(channel);
+    renderSupportReplyTemplates(channel);
+    showAlert(`Reply ${button.dataset.active === "true" ? "deactivated" : "activated"}.`, "success");
+    return;
+  }
+  if (action === "delete-support-reply-template") {
+    const channel = button.dataset.channel === "assistant" ? "assistant" : "customer";
+    if (!window.confirm("Delete this reply template?")) return;
+    const endpointBase = channel === "assistant" ? "/support/assistant/reply-templates" : "/support/reply-templates";
+    await api(`${endpointBase}/${encodeURIComponent(id)}`, { method: "DELETE" });
+    supportReplyTemplateEditing = null;
+    await loadSupportReplyTemplates(channel);
+    renderSupportReplyTemplates(channel);
+    showAlert("Reply template deleted.", "success");
+    return;
+  }
+  if (action === "use-support-reply-template") {
+    const channel = button.dataset.channel === "assistant" ? "assistant" : "customer";
+    const template = supportReplyTemplateById(channel, id);
+    if (!template) return;
+    const form = document.querySelector(channel === "assistant" ? "[data-admin-assistant-support-message-form]" : "[data-admin-support-message-form]");
+    if (form?.elements.replyTemplateId) form.elements.replyTemplateId.value = template.id || "";
+    if (form?.elements.message) {
+      form.elements.message.value = template.description || "";
+      form.elements.message.focus();
+    }
+    return;
+  }
+  if (action === "use-support-reply-suggestion") {
+    const channel = button.dataset.channel === "assistant" ? "assistant" : "customer";
+    const template = supportReplyTemplateById(channel, id);
+    const form = button.dataset.targetForm ? document.getElementById(button.dataset.targetForm) : null;
+    if (template && form?.elements.replyTemplateId) form.elements.replyTemplateId.value = template.id || "";
+    if (template && form?.elements.message) {
+      form.elements.message.value = template.description || "";
+      form.elements.message.focus();
+      const suggestions = button.closest("[data-support-quick-reply-suggestions]");
+      if (suggestions) { suggestions.classList.remove("is-visible"); suggestions.innerHTML = ""; }
+    }
     return;
   }
   if (action === "assistant-support-apply") {
@@ -22316,6 +24238,7 @@ document.addEventListener("click", async (event) => {
   if (action === "close-support-ticket") {
     $("#supportTicketModal")?.remove();
     cache.supportTicketDetail = null;
+    renderCustomerSupportWorkspace();
     return;
   }
   if (action === "update-support-ticket") {
@@ -22384,7 +24307,9 @@ document.addEventListener("click", async (event) => {
     const type = button.dataset.type || "";
     const list = button.closest(".category-guidance-block")?.querySelector(`[data-category-guidance-list="${type}"]`);
     if (!list) return;
-    list.insertAdjacentHTML("beforeend", categoryMasterGuidanceRows(type, [""]));
+    const form = button.closest("#categoryMasterForm");
+    const showImage = form?.elements.categoryGuidanceShowImage?.checked === true;
+    list.insertAdjacentHTML("beforeend", categoryMasterGuidanceRows(type, [{ text: "", imageUrl: "" }], showImage));
     const input = list.lastElementChild?.querySelector("input");
     input?.focus();
     return;
@@ -22397,7 +24322,9 @@ document.addEventListener("click", async (event) => {
     if (!row || !list) return;
     row.remove();
     if (!list.querySelector("[data-category-guidance-row]")) {
-      list.insertAdjacentHTML("beforeend", categoryMasterGuidanceRows(button.dataset.type || "", [""]));
+      const form = button.closest("#categoryMasterForm");
+      const showImage = form?.elements.categoryGuidanceShowImage?.checked === true;
+      list.insertAdjacentHTML("beforeend", categoryMasterGuidanceRows(button.dataset.type || "", [{ text: "", imageUrl: "" }], showImage));
     }
     return;
   }
@@ -22650,6 +24577,10 @@ document.addEventListener("click", async (event) => {
     }
     if (action === "add-booking-type-time") {
       addBookingTypeTimeSlot(button.closest("[data-time-slot-builder-form]"));
+      return;
+    }
+    if (action === "toggle-booking-type-time") {
+      toggleBookingTypeTimeSlot(button.closest("[data-time-slot-builder-form]"), id || button.dataset.id || "", button.dataset.time || "");
       return;
     }
     if (action === "add-booking-type-time-category") {
@@ -22994,12 +24925,14 @@ document.addEventListener("click", async (event) => {
         imageUrl: form?.elements.imageUrl?.value || "",
         imageUrls: hidden?.value || "[]"
       }).filter((url) => url !== button.dataset.url);
-      if (hidden) hidden.value = JSON.stringify(urls);
-      if (form?.elements.imageUrl) form.elements.imageUrl.value = urls[0] || "";
-      const preview = form?.querySelector(".upload-preview");
-      if (preview) preview.innerHTML = urls[0] ? imageCell(urls[0]) : "";
-      const gallery = $("#categoryMasterImageGallery");
-      if (gallery) gallery.innerHTML = categoryMasterImageGallery(urls);
+      setCategoryMasterMediaUrls(urls);
+      return;
+    }
+    if (action === "clear-category-master-video-thumbnail") {
+      const form = $("#categoryMasterForm");
+      if (form?.elements.categoryMediaThumbnailUrl) form.elements.categoryMediaThumbnailUrl.value = "";
+      const preview = form?.querySelector("[data-category-master-video-thumbnail-preview]");
+      if (preview) preview.innerHTML = categoryMasterVideoThumbnailPreview("");
       return;
     }
     if (action === "remove-damage-proof-url") {
@@ -23419,8 +25352,44 @@ document.addEventListener("click", async (event) => {
       await executeAdminPaymentConfirmation(id);
       return;
     }
+    if (action === "admin-start-booking-job") {
+      openBookingAdminStartJobModal(id);
+      return;
+    }
+    if (action === "execute-admin-start-booking-job") {
+      try {
+        await executeBookingAdminStartJob(id);
+      } catch (error) {
+        showAlert(error.message || "Unable to start the booking on behalf of the assistant.", "danger");
+      }
+      return;
+    }
+    if (action === "admin-enter-booking-pin") {
+      openBookingAdminPinModal(id, button.dataset.status || "in_progress");
+      return;
+    }
+    if (action === "execute-admin-booking-pin") {
+      try {
+        await executeBookingAdminTaskPin(id);
+      } catch (error) {
+        showAlert(error.message || "Unable to verify the task PIN.", "danger");
+      }
+      return;
+    }
     if (action === "booking-change-slot") {
-      showAlert("Change Slot will use the Booking Master schedule selector. Open the booking detail and choose a new slot from Booking Master.", "warning");
+      openBookingChangeSlotModal(id);
+      return;
+    }
+    if (action === "booking-reschedule-cancelled") {
+      openBookingChangeSlotModal(id, { reopenCancelled: true, forceRecovery: isSuperAdminUser() });
+      return;
+    }
+    if (action === "booking-reassign-cancelled") {
+      openBookingChangeSlotModal(id, { reopenCancelled: true, reassignAfter: true, forceRecovery: isSuperAdminUser() });
+      return;
+    }
+    if (["execute-booking-change-slot", "execute-booking-reschedule", "execute-booking-reassign-cancelled"].includes(action)) {
+      await executeBookingChangeSlot(id);
       return;
     }
     if (action === "booking-share-link") {
@@ -23642,9 +25611,12 @@ document.addEventListener("click", async (event) => {
       form.elements.name.value = item.name || "";
       form.elements.code.value = item.code || "";
       form.elements.description.value = item.description || "";
+      form.elements.showSubCategoryName.checked = item.showSubCategoryName !== false;
+      form.elements.showSubCategoryDescription.checked = item.showSubCategoryDescription !== false;
       const imageUrls = categoryMasterImageUrlsFromItem(item);
       form.elements.imageUrl.value = imageUrls[0] || item.imageUrl || "";
       if (form.elements.imageUrls) form.elements.imageUrls.value = JSON.stringify(imageUrls);
+      if (form.elements.categoryMediaThumbnailUrl) form.elements.categoryMediaThumbnailUrl.value = item.categoryMediaThumbnailUrl || item.category_media_thumbnail_url || "";
       form.elements.priority.value = item.priority ?? 0;
       if (form.elements.expandPriority) form.elements.expandPriority.value = item.expandPriority ?? 0;
       if (form.elements.expandTitle) form.elements.expandTitle.value = item.expandTitle || "";
@@ -23658,6 +25630,30 @@ document.addEventListener("click", async (event) => {
       }
       form.elements.categoryImageHeight.value = item.categoryImageHeight || 0;
       form.elements.categoryImageWidth.value = item.categoryImageWidth || 0;
+      syncCategoryMasterCardDimensions(form);
+      form.elements.categoryMediaFit.value = item.categoryMediaFit || "cover";
+      form.elements.categoryCardGridWidth.value = item.categoryCardGridWidth ?? item.categoryCardSpaceUtilize ?? 1;
+      form.elements.categoryCardGridHeight.value = item.categoryCardGridHeight ?? 1;
+      form.elements.categoryMediaTransition.value = item.categoryMediaTransition || "fade";
+      form.elements.categoryMediaTransitionDuration.value = item.categoryMediaTransitionDuration ?? 500;
+      form.elements.categoryMediaDisplayDuration.value = item.categoryMediaDisplayDuration ?? 3000;
+      form.elements.categoryMediaSliderMode.value = item.categoryMediaSliderMode || "queue";
+      form.elements.categoryMediaRepeat.value = item.categoryMediaRepeat || "auto";
+      form.elements.categoryNamePosition.value = item.categoryNamePosition || "inside";
+      form.elements.categoryNameColor.value = item.categoryNameColor || "#ffffff";
+      form.elements.categoryNameFontSize.value = item.categoryNameFontSize || 20;
+      form.elements.categoryNameFontWeight.value = item.categoryNameFontWeight || 700;
+      form.elements.categoryNameFontFamily.value = item.categoryNameFontFamily || "Inter";
+      form.elements.categoryNameAlign.value = item.categoryNameAlign || "left";
+      form.elements.categoryNameVerticalAlign.value = item.categoryNameVerticalAlign || "bottom";
+      form.elements.categoryOverlayEnabled.checked = item.categoryOverlayEnabled !== false;
+      form.elements.categoryOverlayOpacity.value = Number(item.categoryOverlayOpacity ?? 0.45) <= 1 ? Math.round(Number(item.categoryOverlayOpacity ?? 0.45) * 100) : item.categoryOverlayOpacity;
+      form.elements.categoryOverlayGradientEnabled.checked = item.categoryOverlayGradientEnabled !== false;
+      form.elements.categoryOverlayGradientOpacity.value = Number(item.categoryOverlayGradientOpacity ?? 0.35) <= 1 ? Math.round(Number(item.categoryOverlayGradientOpacity ?? 0.35) * 100) : item.categoryOverlayGradientOpacity;
+      form.elements.categoryOverlayColor.value = item.categoryOverlayColor || "#111936";
+      form.elements.categoryOverlayFit.value = item.categoryOverlayFit || "50";
+      form.elements.categoryOverlayWidth.value = item.categoryOverlayWidth ?? 100;
+      form.elements.categoryOverlayPosition.value = item.categoryOverlayPosition || "auto";
       form.elements.priceDisplayMode.value = item.priceDisplayMode === "grid" ? "grid" : "row";
       form.elements.priceGridRows.value = item.priceGridRows || 3;
       form.elements.priceGridColumns.value = item.priceGridColumns || 3;
@@ -23674,9 +25670,12 @@ document.addEventListener("click", async (event) => {
       if (preview) preview.innerHTML = imageUrls[0] ? imageCell(imageUrls[0]) : "";
       const gallery = $("#categoryMasterImageGallery");
       if (gallery) gallery.innerHTML = categoryMasterImageGallery(imageUrls);
+      const thumbnailPreview = form.querySelector("[data-category-master-video-thumbnail-preview]");
+      if (thumbnailPreview) thumbnailPreview.innerHTML = categoryMasterVideoThumbnailPreview(form.elements.categoryMediaThumbnailUrl?.value || "");
       $("#categoryMasterSubmitButton").textContent = "Update Category";
       $("#cancelCategoryMasterEditButton").classList.remove("d-none");
       toggleCategoryMasterLocationLimit(form);
+      syncCategoryMasterVideoThumbnailControl(form);
       toggleCategoryMasterHomeDisplayControls(form);
       renderCategoryMasterGuidance(form, item);
       form.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -23690,6 +25689,8 @@ document.addEventListener("click", async (event) => {
       form.elements.id.value = item.id || "";
       form.elements.serviceTitle.value = item.serviceTitle || "";
       form.elements.serviceSubtitle.value = item.serviceSubtitle || "";
+      form.elements.showCategoryName.checked = item.showCategoryName !== false;
+      form.elements.showCategoryDescription.checked = item.showCategoryDescription !== false;
       form.elements.serviceTitleFontSize.value = item.serviceTitleFontSize || 18;
       form.elements.serviceTitleFontWeight.value = item.serviceTitleFontWeight || 400;
       form.elements.serviceTitleColor.value = item.serviceTitleColor || "#000000";
@@ -23699,6 +25700,11 @@ document.addEventListener("click", async (event) => {
       form.elements.bookingType.value = item.bookingType || "both";
       form.elements.showEta.checked = Boolean(item.showEta);
       form.elements.serviceCategoryGridSize.value = item.serviceCategoryGridSize || "3x3";
+      form.elements.serviceCategorySliderItemCount.value = item.serviceCategorySliderItemCount ?? 0;
+      form.elements.serviceCategorySliderVisibleItems.value = item.serviceCategorySliderVisibleItems ?? 2;
+      form.elements.serviceCategorySliderShowRange.checked = item.serviceCategorySliderShowRange !== false;
+      form.elements.serviceCategorySliderAutoPlay.checked = Boolean(item.serviceCategorySliderAutoPlay);
+      form.elements.serviceCategorySliderInterval.value = item.serviceCategorySliderInterval ?? 4000;
       form.elements.servicePosition.value = item.servicePosition ?? 0;
       form.elements.isEnabled.checked = item.isEnabled !== false;
       form.elements.isActive.checked = item.isActive !== false;
@@ -23884,6 +25890,11 @@ document.addEventListener("click", async (event) => {
       }
       form.elements.autoStartTime.value = bookingEngineTimeValue(item.autoStartTime) || bookingEngineDateTimeValue(item.autoStartAt).slice(11, 16);
       form.elements.autoEndTime.value = bookingEngineTimeValue(item.autoEndTime) || bookingEngineDateTimeValue(item.autoEndAt).slice(11, 16);
+       const savedBlockTodayMinutes = Number(item.metadata?.serviceCalendar?.blockTodayMinutes || 0);
+       const supportedBlockTodayMinutes = new Set([0, 30, 60, 90, 120, 150, 180, 210, 240]);
+       form.elements.blockTodayMinutes.value = supportedBlockTodayMinutes.has(savedBlockTodayMinutes)
+         ? String(savedBlockTodayMinutes)
+         : "0";
       form.elements.instantEtaMinutes.value = item.instantEtaMinutes ?? 0;
       if (form.elements.instantInitiateMinutes) form.elements.instantInitiateMinutes.value = item.instantInitiateMinutes ?? 0;
       form.elements.instantWrapUpMinutes.value = item.instantWrapUpMinutes ?? 0;
@@ -23893,6 +25904,7 @@ document.addEventListener("click", async (event) => {
       form.elements.scheduleWrapUpMinutes.value = item.scheduleWrapUpMinutes ?? 0;
       form.elements.scheduleTravelMinutes.value = item.scheduleTravelMinutes ?? 0;
       form.elements.assistantAssignmentMode.value = item.assistantAssignmentMode || "manual";
+      if (form.elements.bookingRestrictionMessage) form.elements.bookingRestrictionMessage.value = item.bookingRestrictionMessage || item.metadata?.serviceCalendar?.bookingRestrictionMessage || "";
       form.elements.note.value = item.note || "";
       form.elements.imageUrl.value = item.imageUrl || "";
       form.elements.isActive.checked = item.isActive !== false;

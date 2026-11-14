@@ -389,7 +389,7 @@ settingsRouter.put("/otp-providers", requirePermission("settings.edit"), async (
   }
 });
 
-settingsRouter.post("/media-images", requireAnyPermission(["customers.edit", "service_requests.view", "tasks.assign", "services.edit", "stores.edit", "verification.edit"]), async (req, res, next) => {
+settingsRouter.post("/media-images", requireAnyPermission(["customers.edit", "assistants.edit", "service_requests.view", "tasks.assign", "services.edit", "stores.edit", "verification.edit"]), async (req, res, next) => {
   try {
     res.status(201).json({
       data: await saveImageUpload({
@@ -402,7 +402,7 @@ settingsRouter.post("/media-images", requireAnyPermission(["customers.edit", "se
   }
 });
 
-settingsRouter.post("/media-documents", requireAnyPermission(["users.create", "service_requests.view", "tasks.assign", "services.edit", "stores.edit", "verification.edit"]), async (req, res, next) => {
+settingsRouter.post("/media-documents", requireAnyPermission(["users.create", "customers.edit", "assistants.edit", "service_requests.view", "tasks.assign", "services.edit", "stores.edit", "verification.edit"]), async (req, res, next) => {
   try {
     res.status(201).json({
       data: await saveDocumentUpload({

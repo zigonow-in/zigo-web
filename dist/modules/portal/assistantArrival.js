@@ -7,7 +7,14 @@ export function assistantStartEligibility(fix, stop, now = Date.now(), radiusMet
     const usableAccuracy = fix?.accuracy != null && Number.isFinite(Number(fix.accuracy)) && Number(fix.accuracy) >= 0 && Number(fix.accuracy) <= 500;
     const valid = (value) => value && Number.isFinite(value.latitude) && Number.isFinite(value.longitude) && Math.abs(value.latitude) <= 90 && Math.abs(value.longitude) <= 180;
     const distanceMeters = valid(fix) && valid(stop) ? distance(point([fix.longitude, fix.latitude]), point([stop.longitude, stop.latitude]), { units: 'meters' }) : null;
+    const distanceRemainingMeters = distanceMeters == null ? null : Math.max(0, Math.round(distanceMeters - arrivalRadiusMeters));
+    const distanceText = distanceRemainingMeters == null
+        ? null
+        : distanceRemainingMeters >= 1000
+            ? `${(distanceRemainingMeters / 1000).toFixed(1)} km`
+            : `${distanceRemainingMeters} m`;
     return { eligible: Boolean(fresh && usableAccuracy && distanceMeters != null && distanceMeters <= arrivalRadiusMeters), distanceMeters,
+        distanceRemainingMeters, distanceText,
         radiusMeters: arrivalRadiusMeters,
         capturedAt: Number.isFinite(capturedAt) ? new Date(capturedAt).toISOString() : null,
         reason: !stop ? 'First stop location unavailable' : !fresh ? 'Waiting for fresh GPS' : !usableAccuracy ? 'Waiting for valid GPS' : distanceMeters == null || distanceMeters > arrivalRadiusMeters ? `Reach within ${arrivalRadiusMeters} m of the first stop` : 'Reached first stop' };

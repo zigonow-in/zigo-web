@@ -24,6 +24,8 @@
     "test:service-master": "tsx scripts/test-personal-assistant-services-crud.ts",
     "test:task-masters": "tsx scripts/test-task-masters-crud.ts",
     "test:task-masters:api": "tsx scripts/test-task-masters-api.ts",
+    "test:customer-offers": "node scripts/test-customer-offer-flow.mjs",
+    "test:customer-navigation": "node scripts/test-customer-navigation-lifecycle.mjs",
     "seed:rbac-foundation": "node scripts/seed-rbac-foundation.mjs",
     "seed:access-master": "node scripts/seed-access-master.mjs",
     "seed:access-verify": "node scripts/verify-access-master.mjs",

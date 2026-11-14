@@ -2,7 +2,7 @@ import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
 import { z } from "zod";
 import { pool } from "../../db/pool.js";
-import { requirePermission } from "../../http/auth.js";
+import { isSuperAdmin, requirePermission, requireSuperAdmin } from "../../http/auth.js";
 import { HttpError } from "../../http/errors.js";
 import { getAssistantRealtimeSnapshot } from "../assistant-master/assistantMaster.repository.js";
 import { getBookingLiveSyncSetting } from "../settings/settings.repository.js";
@@ -21,6 +21,7 @@ import {
   assignBooking,
   addCustomerDisputeMessage,
   cancelBookingByAdmin,
+  changeBookingSlotByAdmin,
   confirmBookingPaymentByAdmin,
   createBookingByAdmin,
   forceCloseBooking,
@@ -43,6 +44,7 @@ import {
   searchCustomersForBooking,
   validateBookingLocation
 } from "./operations.repository.js";
+import { startAssistantPortalJob, updateAssistantPortalTaskStatus } from "../portal/portal.repository.js";
 
 export const operationsRouter = Router();
 export const reportsRouter = Router();
@@ -52,9 +54,26 @@ const assignmentBodySchema = z.object({
   assistantId: z.string().uuid(),
   reason: z.string().min(3).max(1000),
   forceMultiTaskAssignment: z.coerce.boolean().optional().default(false),
+  forceCancelledRecovery: z.coerce.boolean().optional().default(false),
   mode: z.enum(['confirm','offer']).default('confirm')
 });
 const reasonBodySchema = z.object({ reason: z.string().min(3).max(1000) });
+const adminTaskAssignmentBodySchema = z.object({ assignmentId: z.string().uuid() });
+const adminTaskStatusBodySchema = z.object({
+  assignmentId: z.string().uuid(),
+  status: z.enum(["in_progress", "completed"]),
+  pin: z.string().trim().regex(/^\d{4}$/).optional()
+});
+const changeBookingSlotBodySchema = z.object({
+  scheduledDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  scheduledTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  reason: z.string().trim().max(1000).optional().default(""),
+  reopenCancelled: z.coerce.boolean().optional().default(false),
+  forceCancelledRecovery: z.coerce.boolean().optional().default(false)
+});
+const assignableAssistantsQuerySchema = z.object({
+  force: z.coerce.boolean().optional().default(false)
+});
 const adminPaymentConfirmationBodySchema = z.object({
   response: z.enum(["yes", "no"]),
   referenceId: z.string().trim().max(160).optional().default(""),
@@ -613,7 +632,8 @@ operationsRouter.post("/dispatch/recalculate", requireBookingMasterAccess, async
 operationsRouter.get("/bookings/:id/assignable-assistants", requirePermission("tasks.assign"), async (req, res, next) => {
   try {
     const { id } = bookingParamsSchema.parse(req.params);
-    res.json({ data: await listAssignableAssistantsForBooking(id) });
+    const query = assignableAssistantsQuerySchema.parse(req.query);
+    res.json({ data: await listAssignableAssistantsForBooking(id, { force: isSuperAdmin(req) && query.force }) });
   } catch (error) {
     next(error);
   }
@@ -637,6 +657,7 @@ operationsRouter.post("/bookings/:id/assign", requirePermission("tasks.assign"),
       assistantId: body.assistantId,
       reason: body.reason,
       forceMultiTaskAssignment: body.forceMultiTaskAssignment,
+      forceCancelledRecovery: isSuperAdmin(req) && body.forceCancelledRecovery,
       mode: body.mode,
       actorUserId: req.auth!.sub
     });
@@ -689,6 +710,7 @@ operationsRouter.post("/bookings/:id/reassign", requirePermission("tasks.switch"
       assistantId: body.assistantId,
       reason: body.reason,
       forceMultiTaskAssignment: body.forceMultiTaskAssignment,
+      forceCancelledRecovery: isSuperAdmin(req) && body.forceCancelledRecovery,
       actorUserId: req.auth!.sub
     });
     try {
@@ -723,6 +745,46 @@ operationsRouter.post("/bookings/:id/reassign", requirePermission("tasks.switch"
     res.status(201).json({
       data: assignment
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.post("/bookings/:id/change-slot", requireBookingMasterAccess, async (req, res, next) => {
+  try {
+    const { id } = bookingParamsSchema.parse(req.params);
+    const body = changeBookingSlotBodySchema.parse(req.body);
+    const changed = await changeBookingSlotByAdmin(id, req.auth!.sub, {
+      ...body,
+      forceCancelledRecovery: isSuperAdmin(req) && body.forceCancelledRecovery
+    });
+    try {
+      const audience = await bookingRealtimeAudience(id);
+      await emitBookingRealtimeEvent({
+        type: "booking.updated",
+        bookingId: id,
+        assistantId: audience.assistantId ?? undefined,
+        clusterId: audience.clusterId ?? undefined,
+        tab: changed.reopenedFromCancelled ? "pending_assign" : undefined,
+        message: changed.reopenedFromCancelled ? "Cancelled booking rescheduled by admin" : "Booking slot changed by admin",
+        payload: {
+          bookingId: id,
+          customerUserId: audience.customerUserId,
+          assistantId: changed.assistantId,
+          bookingType: changed.bookingType,
+          scheduledDate: changed.scheduledDate,
+          scheduledTime: changed.scheduledTime,
+          bookingStartAt: changed.bookingStartAt,
+          bookingEndAt: changed.bookingEndAt,
+          bookingAvailableAt: changed.bookingAvailableAt
+        }
+      });
+      await emitBookingAssistantsAssignmentRealtimeChange(id);
+    } catch (emitError) {
+      console.error("Booking slot change realtime emit failed", emitError);
+    }
+    pokeBookingOrchestrationWorker("admin_booking_slot_changed");
+    res.json({ data: changed });
   } catch (error) {
     next(error);
   }
@@ -837,6 +899,66 @@ operationsRouter.post("/payments/:id/reconcile", requireBookingMasterAccess, asy
   try {
     const { id } = paymentParamsSchema.parse(req.params);
     res.json({ data: await reconcileRazorpayPayment(id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.post("/bookings/:id/admin-start-job", requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { id } = bookingParamsSchema.parse(req.params);
+    const body = adminTaskAssignmentBodySchema.parse(req.body);
+    const data = await startAssistantPortalJob(req.auth!.sub, body.assignmentId, {
+      adminOverride: true,
+      expectedBookingId: id
+    });
+    await emitBookingRealtimeEvent({
+      type: "booking.updated",
+      bookingId: data.bookingId,
+      assistantId: data.assistantId,
+      tab: "assigned",
+      message: "Super Admin started the job on behalf of the assistant.",
+      payload: {
+        ...data,
+        assignmentStatus: data.status,
+        jobStartedAt: data.jobStartedAt,
+        source: "admin_super_admin"
+      }
+    });
+    pokeBookingOrchestrationWorker("admin_force_start_job");
+    res.json({ data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+operationsRouter.patch("/bookings/:id/admin-task-status", requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { id } = bookingParamsSchema.parse(req.params);
+    const body = adminTaskStatusBodySchema.parse(req.body);
+    const data = await updateAssistantPortalTaskStatus(
+      req.auth!.sub,
+      { assignmentId: body.assignmentId, status: body.status, pin: body.pin },
+      { adminOverride: true, expectedBookingId: id }
+    );
+    const completed = body.status === "completed";
+    await emitBookingRealtimeEvent({
+      type: "booking.updated",
+      bookingId: data.bookingId,
+      assistantId: data.assistantId,
+      tab: completed ? "success" : "working",
+      message: completed
+        ? "Super Admin completed the task on behalf of the assistant."
+        : "Super Admin started the task on behalf of the assistant.",
+      payload: {
+        ...data,
+        assignmentStatus: data.status,
+        statusCode: completed ? "completed" : "in_progress",
+        source: "admin_super_admin"
+      }
+    });
+    pokeBookingOrchestrationWorker(completed ? "admin_force_complete_task" : "admin_force_start_task");
+    res.json({ data });
   } catch (error) {
     next(error);
   }

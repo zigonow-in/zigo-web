@@ -16,6 +16,15 @@ const offerQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(5).max(200).default(20)
 });
+const offerRedemptionReportQuerySchema = z.object({
+  search: z.string().trim().max(200).optional().default(""),
+  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  offerType: z.enum(["all", "PACKAGE", "DISCOUNT", "BUY_X_GET_Y", "FREE_SERVICE", "CREDIT", "FIXED_PRICE"]).default("all"),
+  status: z.enum(["all", "RESERVED", "CONSUMED", "RELEASED", "REVERSED"]).default("all"),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(5).max(1000).default(50)
+});
 
 const uuidArray = z.array(z.string().uuid()).default([]);
 const nullableUuid = z.string().uuid().nullable().optional();
@@ -102,6 +111,14 @@ offersRouter.use(requirePermission("services.view"));
 offersRouter.get("/", async (req, res, next) => {
   try {
     res.json(await offerMaster.list(offerQuerySchema.parse(req.query)));
+  } catch (error) {
+    next(error);
+  }
+});
+
+offersRouter.get("/reports/redemptions", async (req, res, next) => {
+  try {
+    res.json({ data: await offerReporting.redemptionReport(offerRedemptionReportQuerySchema.parse(req.query)) });
   } catch (error) {
     next(error);
   }

@@ -10,7 +10,7 @@ import { updateAssistantAvailability } from "../assistant-master/assistantMaster
 import { createAdminCustomerAddress, createAdminCustomerPreviousUsedLocation, deleteAdminCustomerAddress, listAdminCustomerAddresses, listAdminCustomerPreviousUsedLocations, saveAdminCustomerPreviousUsedLocationAsAddress, setAdminCustomerAddressDefault, updateAdminCustomerAddress } from "../customers/customers.repository.js";
 import { ensureCategoryServiceMasterSchema, getBookingCatalog, listBookingEngineQuickRepliesForBooking, listPaymentModeRules, listTaxMasterRules, resolveBookingEngineInstantEtaMinutes } from "../masters/masters.repository.js";
 import { ensureBookingEngineSchema, releaseCapacityReservations } from "../operations/bookingEngine.js";
-import { dispatchConfigFromEnv, goAssistantOffline, goAssistantOnline, recalculateAssistantAvailability, stopAssistantCalendarBlocksForBooking } from "../operations/assistantDispatchEngine.js";
+import { dispatchConfigFromEnv, goAssistantOffline, goAssistantOnline, recalculateAssistantAvailability, refreshAssistantAvailabilityCache, stopAssistantCalendarBlocksForBooking } from "../operations/assistantDispatchEngine.js";
 import { createBookingByAdmin, geocodeBookingLocation, getBookingAvailabilityDecision, listBookingLocationServiceBoundaries, reverseBookingLocation, searchBookingLocations, validateBookingLocation } from "../operations/operations.repository.js";
 import { olaBrowserConfig, requestOlaJson } from "../maps/olaMaps.service.js";
 import { createRazorpayPaymentOrder, findCustomerPaidRazorpayPaymentByReference, getCustomerRazorpayOrderStatus, linkRazorpayPaymentToBooking } from "../payments/payments.repository.js";
@@ -20,6 +20,7 @@ import { getCustomerWallet, getCustomerWalletTransaction, listCustomerWalletTran
 import { getUserById, sendEmailOtp, sendUserOtpChallenge, verifyUserOtpChallenge } from "../users/users.repository.js";
 import { enqueueCustomerBookingInvoice } from "./bookingInvoice.service.js";
 import { ensureAddOnChargeSchema, listActiveAddOnChargeMasters } from "../addons/addons.repository.js";
+import { ensureOfferMasterSchema, getOffer, listEligibleOffersForCustomer, validateCustomerReferralCode } from "../offers/offers.repository.js";
 import { parseWktPolygon, isPointInPolygon } from "../../utils/geofence.js";
 import { locationClustersCanInterserve } from "../masters/locationHierarchy.repository.js";
 function normalizeCustomerPaymentType(value) {
@@ -1126,11 +1127,16 @@ async function createCustomerPortalUser(client, input) {
     return { userId: user.rows[0].id, customerId: customer.rows[0].id, assistantId: null };
 }
 async function ensureCustomerPortalIdentity(client, input) {
+    // Serialize customer registration for the same phone so two OTP requests cannot create duplicate accounts.
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [`zigo:customer-portal-phone:${phoneDigits(input.phone)}`]);
     const existing = await findAnyUserByPhone(client, input.phone);
     if (!existing)
         return createCustomerPortalUser(client, input);
-    if (existing.deletedAt || isAccountAccessBlocked(existing.metadata, true))
-        throw new HttpError(403, "Customer account is deactive or deleted. Contact admin.");
+    // A deleted identity is no longer a login account. Let the customer register again with a fresh identity.
+    if (existing.deletedAt)
+        return createCustomerPortalUser(client, input);
+    if (isAccountAccessBlocked(existing.metadata, true))
+        throw new HttpError(403, "Customer account is deactive. Contact admin.");
     await assertNoCustomerPortalBlockedRole(client, existing.userId);
     const roleId = await roleIdByCode(client, "customer");
     if (!roleId)
@@ -1458,6 +1464,11 @@ export async function getPortalMe(input) {
         ? await getCustomerPortalFavorites(input.userId)
         : normalizePortalFavorites();
     const dispatchConfig = dispatchConfigFromEnv();
+    if (input.actor === "assistant" && identity.rows[0]?.assistantId) {
+        // Reconcile heartbeat/GPS freshness on every assistant resume so stale
+        // devices become unavailable without destroying the assistant's online intent.
+        await refreshAssistantAvailabilityCache(identity.rows[0].assistantId);
+    }
     const availability = input.actor === "assistant" && identity.rows[0]?.assistantId
         ? (await pool.query(`
         select status_code as "statusCode",
@@ -1468,10 +1479,19 @@ export async function getPortalMe(input) {
           heartbeat_at as "heartbeatAt",
           updated_at as "updatedAt",
           status_updated_at as "availabilityUpdatedAt",
+          (lower(coalesce(status_code, 'offline')) in ('available', 'online', 'active', 'working')) as "onlineIntent",
           (lower(coalesce(status_code, 'offline')) in ('available', 'online', 'active', 'working')
             and heartbeat_at >= now() - ($2::int * interval '1 second')) as "heartbeatFresh",
           (lower(coalesce(status_code, 'offline')) in ('available', 'online', 'active', 'working')
-            and gps_captured_at >= now() - ($3::int * interval '1 second')) as "gpsFresh"
+            and gps_captured_at >= now() - ($3::int * interval '1 second')) as "gpsFresh",
+          case
+            when lower(coalesce(status_code, 'offline')) in ('available', 'online', 'active', 'working')
+              and upper(coalesce(presence_status, 'OFFLINE')) = 'ONLINE'
+              and heartbeat_at >= now() - ($2::int * interval '1 second')
+              and gps_captured_at >= now() - ($3::int * interval '1 second')
+            then status_code
+            else 'offline'
+          end as "availabilityStatus"
         from zigo.assistant_availability
         where assistant_id = $1
         limit 1
@@ -1926,6 +1946,189 @@ async function customerPortalBookingCount(customerId) {
     const result = await pool.query("select count(*)::text as count from zigo.service_requests where customer_id = $1::uuid", [customerId]);
     return Math.max(0, Number(result.rows[0]?.count || 0));
 }
+function customerBookingOfferIsApplicable(offer) {
+    return ["DISCOUNT", "FREE_SERVICE", "FIXED_PRICE", "PACKAGE"].includes(String(offer.offerType || "").toUpperCase());
+}
+function customerOfferCodeFromMetadata(metadata) {
+    return String(metadata.offerCode || metadata.promoCode || metadata.couponCode || metadata.referralCode || "").trim();
+}
+async function resolveCustomerPortalOffer(input) {
+    const eligibleOffers = (await listEligibleOffersForCustomer(input.userId, input.filters)).filter(customerBookingOfferIsApplicable);
+    const requestedOfferId = String(input.metadata.offerId || "").trim();
+    const requestedCode = customerOfferCodeFromMetadata(input.metadata);
+    let selected = requestedOfferId
+        ? eligibleOffers.find((offer) => String(offer.id) === requestedOfferId)
+        : null;
+    let source = requestedOfferId ? "customer_selection" : "auto_apply";
+    if (requestedCode) {
+        selected = eligibleOffers.find((offer) => String(offer.publicCode || "").toUpperCase() === requestedCode.toUpperCase()) || null;
+        if (!selected) {
+            const referral = await validateCustomerReferralCode(input.userId, requestedCode);
+            selected = eligibleOffers.find((offer) => String(offer.id) === String(referral.offerId)) || null;
+        }
+        if (!selected)
+            throw new HttpError(404, "Offer code is not eligible for this booking.");
+        source = "customer_code";
+    }
+    const skipAutoApply = input.metadata.skipAutoApply === true;
+    if (!selected && !skipAutoApply)
+        selected = eligibleOffers.find((offer) => offer.autoApply && offer.offerType !== "PACKAGE") || null;
+    if (!selected && !skipAutoApply) {
+        selected = eligibleOffers.find((offer) => offer.offerType === "PACKAGE" && offer.hasActiveEntitlement) || null;
+        if (selected)
+            source = "package_entitlement";
+    }
+    if (!selected) {
+        if (requestedOfferId)
+            throw new HttpError(404, "Selected offer is not eligible for this booking.");
+        return { eligibleOffers, appliedOffer: null };
+    }
+    if (selected.offerType === "PACKAGE" && !selected.hasActiveEntitlement) {
+        throw new HttpError(409, "Purchase this package before using it on a booking.");
+    }
+    const sellingAmountPaise = Math.max(0, Math.round(input.sellingAmountPaise));
+    let discountAmountPaise = 0;
+    let benefitType = "booking_discount";
+    const discountType = String(selected.discountType || "none").toLowerCase();
+    const discountValue = Math.max(0, Number(selected.discountValue || 0));
+    if (selected.offerType === "PACKAGE" || selected.offerType === "FREE_SERVICE") {
+        const coveredMinutes = selected.offerType === "FREE_SERVICE"
+            ? Math.max(0, Math.round(Number(selected.freeQuantity || 0)))
+            : Math.max(0, Math.round(Number(selected.metadata?.packageProduct?.maximumUsageMinutesPerBooking || input.durationMinutes)));
+        const coverage = coveredMinutes > 0 && input.durationMinutes > coveredMinutes ? coveredMinutes / input.durationMinutes : 1;
+        discountAmountPaise = Math.round(sellingAmountPaise * coverage);
+        benefitType = selected.offerType === "PACKAGE" ? "package_entitlement" : "free_service";
+    }
+    else if (selected.offerType === "DISCOUNT") {
+        discountAmountPaise = discountType === "flat"
+            ? Math.round(discountValue * 100)
+            : Math.round(sellingAmountPaise * Math.min(100, discountValue) / 100);
+    }
+    else if (selected.offerType === "FIXED_PRICE") {
+        discountAmountPaise = Math.max(0, sellingAmountPaise - Math.max(0, Number(selected.fixedPricePaise || 0)));
+        benefitType = "fixed_price";
+    }
+    else {
+        return { eligibleOffers, appliedOffer: null };
+    }
+    if (selected.discountCapPaise)
+        discountAmountPaise = Math.min(discountAmountPaise, Math.max(0, Number(selected.discountCapPaise)));
+    discountAmountPaise = Math.min(sellingAmountPaise, Math.max(0, Math.round(discountAmountPaise)));
+    if (discountAmountPaise <= 0)
+        return { eligibleOffers, appliedOffer: null };
+    let offerSnapshot = selected;
+    if (input.snapshotOffer) {
+        try {
+            // Persist the complete master definition as it existed when this booking
+            // was priced. Future edits to the same offer ID must not rewrite history.
+            const completeOffer = await getOffer(String(selected.id));
+            // Keep the exact scalar values used for this calculation ahead of any
+            // concurrent master edit while retaining the complete related policy.
+            offerSnapshot = { ...completeOffer, ...selected };
+        }
+        catch (error) {
+            console.error("Unable to load complete offer snapshot for customer booking.", { offerId: selected.id, error });
+        }
+    }
+    const appliedOffer = {
+        id: selected.id,
+        title: selected.title,
+        publicCode: selected.publicCode || null,
+        offerType: selected.offerType,
+        discountType,
+        discountValue,
+        discountAmountPaise,
+        originalSellingAmountPaise: sellingAmountPaise,
+        finalSellingAmountPaise: Math.max(0, sellingAmountPaise - discountAmountPaise),
+        benefitType,
+        source,
+        entitlementId: selected.activeEntitlementId || null,
+        currentVersionId: selected.currentVersionId || null,
+        offer: offerSnapshot
+    };
+    return { eligibleOffers, appliedOffer };
+}
+export async function listCustomerPortalOffers(userId, filters = {}) {
+    return (await listEligibleOffersForCustomer(userId, filters)).filter(customerBookingOfferIsApplicable);
+}
+export async function validateCustomerPortalOffer(userId, code, filters = {}) {
+    const normalizedCode = String(code || "").trim();
+    if (!normalizedCode)
+        throw new HttpError(400, "Enter an offer code.");
+    const offers = (await listEligibleOffersForCustomer(userId, filters)).filter(customerBookingOfferIsApplicable);
+    const publicOffer = offers.find((offer) => String(offer.publicCode || "").toUpperCase() === normalizedCode.toUpperCase());
+    if (publicOffer)
+        return publicOffer;
+    const referral = await validateCustomerReferralCode(userId, normalizedCode);
+    const referralOffer = offers.find((offer) => String(offer.id) === String(referral.offerId));
+    if (!referralOffer)
+        throw new HttpError(404, "Offer code is not eligible for this booking.");
+    return { ...referralOffer, referralCode: normalizedCode };
+}
+export async function createCustomerPortalOfferPurchaseOrder(userId, offerId) {
+    await ensureOfferMasterSchema();
+    const offers = (await listEligibleOffersForCustomer(userId, {})).filter(customerBookingOfferIsApplicable);
+    const offer = offers.find((item) => String(item.id) === String(offerId));
+    if (!offer || offer.offerType !== "PACKAGE")
+        throw new HttpError(404, "Package is not available for this customer.");
+    const amountPaise = Math.max(0, Math.round(Number(offer.packagePricePaise || 0)));
+    if (amountPaise < 100)
+        throw new HttpError(400, "Package price must be at least Rs 1.");
+    const packageProduct = offer.metadata?.packageProduct && typeof offer.metadata.packageProduct === "object" ? offer.metadata.packageProduct : {};
+    const purchase = await pool.query(`insert into zigo.offer_purchase_orders (offer_id, offer_version_id, customer_id, amount_paise, status, metadata)
+     values ($1::uuid, nullif($2, '')::uuid, $3::uuid, $4, 'CREATED', $5::jsonb) returning id`, [offer.id, offer.currentVersionId || "", userId, amountPaise, JSON.stringify({ offer, packageProduct, source: "customer_portal" })]);
+    const purchaseOrderId = purchase.rows[0].id;
+    const order = await createRazorpayPaymentOrder({
+        amountPaise,
+        customerUserId: userId,
+        bookingReference: `OFFER-${purchaseOrderId.slice(0, 20)}`,
+        metadata: { offerPurchaseId: purchaseOrderId, offerId: offer.id, offerVersionId: offer.currentVersionId || null }
+    });
+    await pool.query(`update zigo.offer_purchase_orders set razorpay_order_id = $2, status = 'PENDING', updated_at = now() where id = $1::uuid`, [purchaseOrderId, order.orderId || order.order_id]);
+    return { ...order, purchaseOrderId, offerId: offer.id, offerTitle: offer.title, packageProduct };
+}
+export async function completeCustomerPortalOfferPurchase(userId, razorpayOrderId) {
+    await ensureOfferMasterSchema();
+    const payment = await pool.query(`select provider_payment_id as "paymentId", status_code as "statusCode", metadata from zigo.razorpay_payments where provider_order_id = $1 and customer_user_id = $2::uuid limit 1`, [razorpayOrderId, userId]);
+    const paymentRow = payment.rows[0];
+    if (!paymentRow || paymentRow.statusCode !== "paid")
+        return null;
+    const purchaseOrderId = String(paymentRow.metadata?.offerPurchaseId || "").trim();
+    if (!purchaseOrderId)
+        return null;
+    const client = await pool.connect();
+    try {
+        await client.query("begin");
+        const purchase = await client.query(`select po.*, o.current_version_id as "currentVersionId", o.metadata as "offerMetadata", o.title
+       from zigo.offer_purchase_orders po join zigo.offers o on o.id = po.offer_id
+       where po.id = $1::uuid and po.customer_id = $2::uuid for update`, [purchaseOrderId, userId]);
+        if (!purchase.rows[0])
+            throw new HttpError(404, "Package purchase was not found.");
+        const row = purchase.rows[0];
+        const existing = await client.query(`select * from zigo.user_offer_entitlements where purchase_order_id = $1::uuid limit 1`, [purchaseOrderId]);
+        if (existing.rows[0]) {
+            await client.query("commit");
+            return existing.rows[0];
+        }
+        const packageProduct = row.offerMetadata?.packageProduct && typeof row.offerMetadata.packageProduct === "object" ? row.offerMetadata.packageProduct : {};
+        const totalUnits = Math.max(1, Math.round(Number(packageProduct.quantity || 1)));
+        const validityDays = Math.max(1, Math.round(Number(packageProduct.validityDays || 30)));
+        const entitlement = await client.query(`insert into zigo.user_offer_entitlements
+        (offer_id, offer_version_id, purchase_order_id, customer_id, total_units, remaining_units, status, valid_from, valid_until, metadata)
+       values ($1::uuid, nullif($2, '')::uuid, $3::uuid, $4::uuid, $5, $5, 'ACTIVE', now(), now() + ($6 || ' days')::interval, $7::jsonb)
+       returning *`, [row.offer_id, row.currentVersionId || "", purchaseOrderId, userId, totalUnits, validityDays, JSON.stringify({ packageProduct, offerTitle: row.title, source: "customer_portal" })]);
+        await client.query(`update zigo.offer_purchase_orders set status = 'COMPLETED', razorpay_payment_id = $2, updated_at = now() where id = $1::uuid`, [purchaseOrderId, paymentRow.paymentId]);
+        await client.query("commit");
+        return entitlement.rows[0];
+    }
+    catch (error) {
+        await client.query("rollback");
+        throw error;
+    }
+    finally {
+        client.release();
+    }
+}
 async function resolveCustomerPortalTaxPricing(baseAmount, sellingAmount, deliveryAmount = 0, addonLines = []) {
     const rules = (await listTaxMasterRules()).filter((rule) => rule.isActive);
     const rawAddonLines = addonLines.map((line) => ({
@@ -2111,6 +2314,8 @@ async function resolveCustomerPortalCategoryPrice(input) {
         csm.service_title as "serviceMasterName",
         coalesce(c.config->'categorySettings'->>'homeDisplayMode', case when coalesce((c.config->'categorySettings'->>'showInHomePage')::boolean, true) then 'category' else 'categoryPrice' end) as "homeDisplayMode",
         coalesce((c.config->'categorySettings'->>'showInHomePage')::boolean, true) as "showInHomePage",
+        coalesce((c.config->'categorySettings'->>'showSubCategoryName')::boolean, true) as "showSubCategoryName",
+        coalesce((c.config->'categorySettings'->>'showSubCategoryDescription')::boolean, true) as "showSubCategoryDescription",
         coalesce(nullif(cpr.slab->>'label', ''), nullif(cpr.metadata->>'label', '')) as "label",
         cpr.time_duration_minutes as "timeDurationMinutes",
         cpr.base_price as "basePrice",
@@ -2458,8 +2663,14 @@ export async function listCustomerPortalBookings(userId, input = {}) {
           au.display_name as "assistantName",
           au.phone as "assistantPhone",
           coalesce(profile_doc.preview_url, au.metadata->>'profilePictureUrl') as "assistantProfilePictureUrl",
+          coalesce(assistant_kyc."isVerified", false) as "assistantVerified",
+          case when coalesce(assistant_kyc."isVerified", false)
+            then 'verified'
+            else max(coalesce(nullif(aa.metadata->>'verificationStatus', ''), nullif(au.metadata->>'verificationStatus', ''), 'verifying'))
+          end as "assistantVerificationStatus",
           assistant_rating_stats."ratingAvg" as "assistantRatingAvg",
           assistant_rating_stats."ratingCount" as "assistantRatingCount",
+           coalesce(assistant_rating_stats."bookingCount", 0)::int as "assistantBookingCount",
           review.data as "customerReview",
           s.name as "serviceName",
           c.name as "clusterName",
@@ -2548,9 +2759,70 @@ export async function listCustomerPortalBookings(userId, input = {}) {
           limit 1
         ) profile_doc on true
         left join lateral (
+          select (
+            exists (
+              select 1
+              from zigo.assistant_documents ad
+              join zigo.document_types dt on dt.id = ad.document_type_id
+              where ad.assistant_id = ta.assistant_id
+                and dt.code in ('aadhaar_front', 'aadhaar_card_front')
+                and lower(coalesce(ad.metadata->>'verificationStatus', '')) = 'verified'
+            )
+            and exists (
+              select 1
+              from zigo.assistant_documents ad
+              join zigo.document_types dt on dt.id = ad.document_type_id
+              where ad.assistant_id = ta.assistant_id
+                and dt.code in ('aadhaar_back', 'aadhaar_card_back')
+                and lower(coalesce(ad.metadata->>'verificationStatus', '')) = 'verified'
+            )
+            and exists (
+              select 1
+              from zigo.assistant_documents ad
+              join zigo.document_types dt on dt.id = ad.document_type_id
+              where ad.assistant_id = ta.assistant_id
+                and dt.code in ('pan_front', 'pan_card_front')
+                and lower(coalesce(ad.metadata->>'verificationStatus', '')) = 'verified'
+            )
+            and exists (
+              select 1
+              from zigo.assistant_documents ad
+              join zigo.document_types dt on dt.id = ad.document_type_id
+              where ad.assistant_id = ta.assistant_id
+                and dt.code in ('pan_back', 'pan_card_back')
+                and lower(coalesce(ad.metadata->>'verificationStatus', '')) = 'verified'
+            )
+            and exists (
+              select 1
+              from zigo.assistant_documents ad
+              join zigo.document_types dt on dt.id = ad.document_type_id
+              where ad.assistant_id = ta.assistant_id
+                and dt.code in ('driving_license_front', 'driving_licence_front')
+                and lower(coalesce(ad.metadata->>'verificationStatus', '')) = 'verified'
+            )
+            and exists (
+              select 1
+              from zigo.assistant_documents ad
+              join zigo.document_types dt on dt.id = ad.document_type_id
+              where ad.assistant_id = ta.assistant_id
+                and dt.code in ('driving_license_back', 'driving_licence_back')
+                and lower(coalesce(ad.metadata->>'verificationStatus', '')) = 'verified'
+            )
+          ) as "isVerified"
+        ) assistant_kyc on true
+        left join lateral (
           select
             round(avg(br.assistant_rating)::numeric, 1) as "ratingAvg",
-            count(*)::int as "ratingCount"
+             count(*)::int as "ratingCount",
+             (
+               select count(distinct assistant_bookings.id)::int
+               from zigo.task_assignments assistant_assignments
+               join zigo.service_requests assistant_bookings
+                 on assistant_bookings.id = assistant_assignments.service_request_id
+                 or assistant_bookings.id = assistant_assignments.request_id
+               where assistant_assignments.assistant_id = ta.assistant_id
+                 and assistant_assignments.status_code not in ('released', 'reassigned')
+             ) as "bookingCount"
           from zigo.booking_reviews br
           where br.assistant_id = ta.assistant_id
         ) assistant_rating_stats on ta.assistant_id is not null
@@ -2603,7 +2875,7 @@ export async function listCustomerPortalBookings(userId, input = {}) {
         where cu.user_id = $1
         and ($4::uuid is null or sr.id = $4::uuid)
         ${tabClause}
-        group by sr.id, bbs.id, billing_addon_lines.data, billing_addon_totals.addon_total_paise, billing_addon_totals.addon_discount_paise, billing_item_lines.data, add_on_payments.data, ta.status_code, ta.actual_started_at, ta.assistant_id, au.display_name, au.phone, au.metadata, profile_doc.preview_url, assistant_rating_stats."ratingAvg", assistant_rating_stats."ratingCount", review.data, s.name, c.name, sr.scheduled_at, sr.created_at
+        group by sr.id, bbs.id, billing_addon_lines.data, billing_addon_totals.addon_total_paise, billing_addon_totals.addon_discount_paise, billing_item_lines.data, add_on_payments.data, ta.status_code, ta.actual_started_at, ta.assistant_id, au.display_name, au.phone, au.metadata, profile_doc.preview_url, assistant_kyc."isVerified", assistant_rating_stats."ratingAvg", assistant_rating_stats."ratingCount", assistant_rating_stats."bookingCount", review.data, s.name, c.name, sr.scheduled_at, sr.created_at
       )
       select *, count(*) over()::int as "totalRecords"
       from bookings
@@ -3027,6 +3299,8 @@ export async function getCustomerPortalCatalog(filters = {}) {
           id,
           service_title as "serviceTitle",
           service_subtitle as "serviceSubtitle",
+          coalesce(show_category_name, true) as "showCategoryName",
+          coalesce(show_category_description, true) as "showCategoryDescription",
           coalesce(icons, '[]'::jsonb) as "icons",
           coalesce(service_title_font_size, 18) as "serviceTitleFontSize",
           coalesce(service_title_font_weight, 400) as "serviceTitleFontWeight",
@@ -3039,6 +3313,11 @@ export async function getCustomerPortalCatalog(filters = {}) {
           $1::int as "instantEtaMinutes",
           service_position as "servicePosition",
           coalesce(service_category_grid_size, '3x3') as "serviceCategoryGridSize",
+          coalesce(service_category_slider_item_count, 0) as "serviceCategorySliderItemCount",
+          coalesce(service_category_slider_visible_items, 2) as "serviceCategorySliderVisibleItems",
+          coalesce(service_category_slider_show_range, true) as "serviceCategorySliderShowRange",
+          coalesce(service_category_slider_auto_play, false) as "serviceCategorySliderAutoPlay",
+          coalesce(service_category_slider_interval, 4000) as "serviceCategorySliderInterval",
           is_enabled as "isEnabled",
           is_active as "isActive"
         from zigo.category_service_masters
@@ -3058,6 +3337,33 @@ export async function getCustomerPortalCatalog(filters = {}) {
           c.description,
           c.image_url as "imageUrl",
           coalesce(c.config->'categorySettings'->'imageUrls', '[]'::jsonb) as "imageUrls",
+          coalesce(c.config->'categorySettings'->>'categoryMediaThumbnailUrl', '') as "categoryMediaThumbnailUrl",
+          coalesce(c.config->'categorySettings'->>'categoryNamePosition', 'inside') as "categoryNamePosition",
+          coalesce(c.config->'categorySettings'->>'categoryNameColor', '#ffffff') as "categoryNameColor",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontSize', '')::int, 20) as "categoryNameFontSize",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontWeight', '')::int, 700) as "categoryNameFontWeight",
+          coalesce(c.config->'categorySettings'->>'categoryNameFontFamily', 'Inter') as "categoryNameFontFamily",
+          coalesce(c.config->'categorySettings'->>'categoryNameAlign', 'left') as "categoryNameAlign",
+          coalesce(c.config->'categorySettings'->>'categoryNameVerticalAlign', 'bottom') as "categoryNameVerticalAlign",
+          coalesce((c.config->'categorySettings'->>'categoryOverlayEnabled')::boolean, true) as "categoryOverlayEnabled",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayOpacity', '')::numeric, 0.45) as "categoryOverlayOpacity",
+          coalesce((c.config->'categorySettings'->>'categoryOverlayGradientEnabled')::boolean, true) as "categoryOverlayGradientEnabled",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayGradientOpacity', '')::numeric, 0.35) as "categoryOverlayGradientOpacity",
+          coalesce(c.config->'categorySettings'->>'categoryOverlayColor', '#111936') as "categoryOverlayColor",
+          coalesce(c.config->'categorySettings'->>'categoryOverlayFit', '50') as "categoryOverlayFit",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayWidth', '')::numeric, 100) as "categoryOverlayWidth",
+          coalesce(c.config->'categorySettings'->>'categoryOverlayPosition', 'auto') as "categoryOverlayPosition",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryImageHeight', '')::int, 0) as "categoryImageHeight",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryImageWidth', '')::int, 0) as "categoryImageWidth",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1) as "categoryCardSpaceUtilize",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridWidth', '')::int, coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1)) as "categoryCardGridWidth",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridHeight', '')::int, 1) as "categoryCardGridHeight",
+          coalesce(c.config->'categorySettings'->>'categoryMediaFit', 'cover') as "categoryMediaFit",
+          coalesce(c.config->'categorySettings'->>'categoryMediaTransition', 'fade') as "categoryMediaTransition",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryMediaTransitionDuration', '')::int, 500) as "categoryMediaTransitionDuration",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryMediaDisplayDuration', '')::int, 3000) as "categoryMediaDisplayDuration",
+          coalesce(c.config->'categorySettings'->>'categoryMediaSliderMode', 'queue') as "categoryMediaSliderMode",
+          coalesce(c.config->'categorySettings'->>'categoryMediaRepeat', 'auto') as "categoryMediaRepeat",
           coalesce((c.config->'pricing'->>'basePrice')::numeric, 0) as "basePrice",
           coalesce((c.config->'pricing'->>'sellingPrice')::numeric, 0) as "sellingPrice",
           coalesce(nullif(c.config->'allottedTime'->>'durationMinutes', '')::int, 30) as "durationMinutes",
@@ -3108,6 +3414,22 @@ export async function getCustomerPortalCatalog(filters = {}) {
           c.description,
           c.image_url as "imageUrl",
           coalesce(c.config->'categorySettings'->'imageUrls', '[]'::jsonb) as "imageUrls",
+          coalesce(c.config->'categorySettings'->>'categoryMediaThumbnailUrl', '') as "categoryMediaThumbnailUrl",
+          coalesce(c.config->'categorySettings'->>'categoryNamePosition', 'inside') as "categoryNamePosition",
+          coalesce(c.config->'categorySettings'->>'categoryNameColor', '#ffffff') as "categoryNameColor",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontSize', '')::int, 20) as "categoryNameFontSize",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryNameFontWeight', '')::int, 700) as "categoryNameFontWeight",
+          coalesce(c.config->'categorySettings'->>'categoryNameFontFamily', 'Inter') as "categoryNameFontFamily",
+          coalesce(c.config->'categorySettings'->>'categoryNameAlign', 'left') as "categoryNameAlign",
+          coalesce(c.config->'categorySettings'->>'categoryNameVerticalAlign', 'bottom') as "categoryNameVerticalAlign",
+          coalesce((c.config->'categorySettings'->>'categoryOverlayEnabled')::boolean, true) as "categoryOverlayEnabled",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayOpacity', '')::numeric, 0.45) as "categoryOverlayOpacity",
+          coalesce((c.config->'categorySettings'->>'categoryOverlayGradientEnabled')::boolean, true) as "categoryOverlayGradientEnabled",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayGradientOpacity', '')::numeric, 0.35) as "categoryOverlayGradientOpacity",
+          coalesce(c.config->'categorySettings'->>'categoryOverlayColor', '#111936') as "categoryOverlayColor",
+          coalesce(c.config->'categorySettings'->>'categoryOverlayFit', '50') as "categoryOverlayFit",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryOverlayWidth', '')::numeric, 100) as "categoryOverlayWidth",
+          coalesce(c.config->'categorySettings'->>'categoryOverlayPosition', 'auto') as "categoryOverlayPosition",
           c.priority,
           c.sort_order as "sortOrder",
           c.is_recommended as "isRecommended",
@@ -3115,9 +3437,20 @@ export async function getCustomerPortalCatalog(filters = {}) {
           coalesce(c.config->'categorySettings'->>'locationMode', 'current') as "locationMode",
           coalesce(nullif(c.config->'categorySettings'->>'maxLocationsLimit', '')::int, 1) as "maxLocationsLimit",
           coalesce((c.config->'categorySettings'->>'showInHomePage')::boolean, true) as "showInHomePage",
+          coalesce((c.config->'categorySettings'->>'showSubCategoryName')::boolean, true) as "showSubCategoryName",
+          coalesce((c.config->'categorySettings'->>'showSubCategoryDescription')::boolean, true) as "showSubCategoryDescription",
           coalesce(c.config->'categorySettings'->>'homeDisplayMode', case when coalesce((c.config->'categorySettings'->>'showInHomePage')::boolean, true) then 'category' else 'categoryPrice' end) as "homeDisplayMode",
           coalesce(nullif(c.config->'categorySettings'->>'categoryImageHeight', '')::int, 0) as "categoryImageHeight",
           coalesce(nullif(c.config->'categorySettings'->>'categoryImageWidth', '')::int, 0) as "categoryImageWidth",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1) as "categoryCardSpaceUtilize",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridWidth', '')::int, coalesce(nullif(c.config->'categorySettings'->>'categoryCardSpaceUtilize', '')::int, 1)) as "categoryCardGridWidth",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryCardGridHeight', '')::int, 1) as "categoryCardGridHeight",
+          coalesce(c.config->'categorySettings'->>'categoryMediaFit', 'cover') as "categoryMediaFit",
+          coalesce(c.config->'categorySettings'->>'categoryMediaTransition', 'fade') as "categoryMediaTransition",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryMediaTransitionDuration', '')::int, 500) as "categoryMediaTransitionDuration",
+          coalesce(nullif(c.config->'categorySettings'->>'categoryMediaDisplayDuration', '')::int, 3000) as "categoryMediaDisplayDuration",
+          coalesce(c.config->'categorySettings'->>'categoryMediaSliderMode', 'queue') as "categoryMediaSliderMode",
+          coalesce(c.config->'categorySettings'->>'categoryMediaRepeat', 'auto') as "categoryMediaRepeat",
           coalesce(c.config->'categorySettings'->>'priceDisplayMode', 'row') as "priceDisplayMode",
           coalesce(nullif(c.config->'categorySettings'->>'priceGridRows', '')::int, 3) as "priceGridRows",
           coalesce(nullif(c.config->'categorySettings'->>'priceGridColumns', '')::int, 3) as "priceGridColumns",
@@ -3130,10 +3463,37 @@ export async function getCustomerPortalCatalog(filters = {}) {
           c.config->'categorySettings'->>'expandDescription' as "expandDescription",
           coalesce(c.config->'categoryGuidance'->>'taskListTitle', 'Tasks related to category') as "taskListTitle",
           coalesce(c.config->'categoryGuidance'->'taskList', '[]'::jsonb) as "taskList",
+          coalesce(c.config->'categoryGuidance'->>'taskIcon', '&#9733;') as "taskIcon",
+          coalesce((c.config->'categoryGuidance'->>'showTaskList')::boolean, true) as "showTaskList",
           coalesce(c.config->'categoryGuidance'->>'canDoTitle', 'What Assistant can do') as "canDoTitle",
           coalesce(c.config->'categoryGuidance'->'canDoList', '[]'::jsonb) as "canDoList",
+          coalesce(c.config->'categoryGuidance'->>'canDoIcon', '&#10003;') as "canDoIcon",
+          coalesce((c.config->'categoryGuidance'->>'showCanDoList')::boolean, true) as "showCanDoList",
           coalesce(c.config->'categoryGuidance'->>'cantDoTitle', 'What Assistant can''t do') as "cantDoTitle",
           coalesce(c.config->'categoryGuidance'->'cantDoList', '[]'::jsonb) as "cantDoList",
+          coalesce(c.config->'categoryGuidance'->>'cantDoIcon', '&#10005;') as "cantDoIcon",
+          coalesce((c.config->'categoryGuidance'->>'showCantDoList')::boolean, true) as "showCantDoList",
+          coalesce(c.config->'categoryGuidance'->>'categoryGuidanceDisplayMode', 'list') as "categoryGuidanceDisplayMode",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceGridColumns', '')::int, 3) as "categoryGuidanceGridColumns",
+          coalesce((c.config->'categoryGuidance'->>'categoryGuidanceShowImage')::boolean, false) as "categoryGuidanceShowImage",
+          coalesce(c.config->'categoryGuidance'->>'categoryGuidanceFontFamily', 'Inter') as "categoryGuidanceFontFamily",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceFontSize', '')::int, 10) as "categoryGuidanceFontSize",
+          coalesce(c.config->'categoryGuidance'->>'categoryGuidanceTextColor', '#2b2f38') as "categoryGuidanceTextColor",
+          coalesce(c.config->'categoryGuidance'->>'categoryGuidanceTitleFontFamily', 'Inter') as "categoryGuidanceTitleFontFamily",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceTitleFontSize', '')::int, 12) as "categoryGuidanceTitleFontSize",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceTitleFontWeight', '')::int, 700) as "categoryGuidanceTitleFontWeight",
+          coalesce(c.config->'categoryGuidance'->>'categoryGuidanceTitleTextColor', '#2b2f38') as "categoryGuidanceTitleTextColor",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceTitleIconSize', '')::int, 24) as "categoryGuidanceTitleIconSize",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowImageSize', '')::int, 44) as "categoryGuidanceRowImageSize",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowRadius', '')::int, 8) as "categoryGuidanceRowRadius",
+          coalesce(c.config->'categoryGuidance'->>'categoryGuidanceRowTextPosition', 'outside') as "categoryGuidanceRowTextPosition",
+          coalesce(c.config->'categoryGuidance'->>'categoryGuidanceRowTextAlign', 'left') as "categoryGuidanceRowTextAlign",
+          coalesce((c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayEnabled')::boolean, true) as "categoryGuidanceRowOverlayEnabled",
+          coalesce(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayColor', '#111936') as "categoryGuidanceRowOverlayColor",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayHeight', '')::int, 100) as "categoryGuidanceRowOverlayHeight",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayOpacity', '')::numeric, 0.45) as "categoryGuidanceRowOverlayOpacity",
+          coalesce((c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayGradientEnabled')::boolean, true) as "categoryGuidanceRowOverlayGradientEnabled",
+          coalesce(nullif(c.config->'categoryGuidance'->>'categoryGuidanceRowOverlayGradientOpacity', '')::numeric, 0.35) as "categoryGuidanceRowOverlayGradientOpacity",
           c.is_active as "isActive",
           c.is_enabled as "isEnabled"
         from zigo.categories c
@@ -3847,6 +4207,32 @@ export async function createCustomerPortalBooking(userId, input) {
     const durationMinutes = resolvedCategoryPrice.durationMinutes;
     const selectedPrice = resolvedCategoryPrice.sellingPrice;
     const selectedBasePrice = resolvedCategoryPrice.basePrice;
+    const bookingType = String(metadata.bookingType || "instant") === "schedule" ? "schedule" : "instant";
+    const paymentModeCode = String(metadata.paymentModeCode || metadata.paymentType || "cash").trim().toLowerCase() || "cash";
+    const paymentModeIdValue = String(metadata.paymentModeId || "").trim();
+    const paymentModeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paymentModeIdValue)
+        ? paymentModeIdValue
+        : undefined;
+    const offerResolution = await resolveCustomerPortalOffer({
+        userId,
+        metadata,
+        filters: {
+            categoryId: selectedCategoryId,
+            durationId: resolvedCategoryPrice.id,
+            bookingType,
+            paymentModeId,
+            paymentModeCode,
+            serviceMasterId: resolvedCategoryPrice.serviceMasterId || undefined,
+            serviceId: selectedServiceId || undefined,
+            clusterId: input.clusterId
+        },
+        sellingAmountPaise: Math.max(0, Math.round(selectedPrice * 100)),
+        durationMinutes,
+        bookingCount: customerBookingCount,
+        snapshotOffer: !input.dryRun
+    });
+    const appliedOffer = offerResolution.appliedOffer;
+    const effectiveSelectedPrice = Math.max(0, selectedPrice - Number(appliedOffer?.discountAmountPaise || 0) / 100);
     const bookingLocationMetadata = portalBookingRecord(metadata.bookingLocations);
     const deliveryQuoteStops = Array.isArray(bookingLocationMetadata?.stops)
         ? bookingLocationMetadata.stops
@@ -3862,17 +4248,19 @@ export async function createCustomerPortalBooking(userId, input) {
     const addonLines = resolvePortalAddOnLines({
         addons: addonCharges,
         baseAmount: selectedBasePrice,
-        sellingAmount: selectedPrice,
+        sellingAmount: effectiveSelectedPrice,
         deliveryQuote,
         customerBookingCount,
         locationScope
     });
-    const resolvedTaxPricing = await resolveCustomerPortalTaxPricing(selectedBasePrice, selectedPrice, deliveryQuote.deliveryChargesPaise / 100, addonLines);
+    const resolvedTaxPricing = await resolveCustomerPortalTaxPricing(selectedBasePrice, effectiveSelectedPrice, deliveryQuote.deliveryChargesPaise / 100, addonLines);
     const requestedTipAmountPaise = Math.max(0, Math.min(100_000, Math.round(Number(metadata.tipAmountPaise
         || portalBookingRecord(metadata.pricingBreakdown)?.tipAmountPaise
         || 0))));
     const addonDiscountPaise = Math.max(0, Number(resolvedTaxPricing.addonDiscountPaise || 0));
-    const totalDiscountPaise = Math.max(0, Number(resolvedTaxPricing.discountAmountPaise || 0) + addonDiscountPaise + Number(deliveryQuote.deliveryDiscountPaise || 0));
+    // Delivery is represented as an add-on line, so its discount is already included
+    // in addonDiscountPaise. Do not add deliveryQuote.deliveryDiscountPaise again.
+    const totalDiscountPaise = Math.max(0, Number(resolvedTaxPricing.discountAmountPaise || 0) + addonDiscountPaise);
     const subtotalAfterDiscountPaise = Math.max(0, Number(resolvedTaxPricing.itemTotalPaise || 0)
         + Number(resolvedTaxPricing.addonTotalPaise || 0));
     const preRoundTotalPaise = Math.max(0, Number(resolvedTaxPricing.totalAmountPaise || 0)
@@ -3888,6 +4276,36 @@ export async function createCustomerPortalBooking(userId, input) {
             value: resolvedCategoryPrice.discountValue,
             amountPaise: resolvedTaxPricing.discountAmountPaise
         },
+        offer: appliedOffer ? {
+            ...appliedOffer.offer,
+            id: appliedOffer.id,
+            title: appliedOffer.title,
+            publicCode: appliedOffer.publicCode,
+            offerType: appliedOffer.offerType,
+            offerVersionId: appliedOffer.currentVersionId || appliedOffer.offer.currentVersionId || null,
+            benefitType: appliedOffer.benefitType,
+            discountType: appliedOffer.discountType,
+            discountValue: appliedOffer.discountValue,
+            discountAmountPaise: appliedOffer.discountAmountPaise,
+            originalSellingAmountPaise: appliedOffer.originalSellingAmountPaise,
+            finalSellingAmountPaise: appliedOffer.finalSellingAmountPaise,
+            source: appliedOffer.source,
+            appliedAt: new Date().toISOString(),
+            application: {
+                source: appliedOffer.source,
+                benefitType: appliedOffer.benefitType,
+                bookingType,
+                paymentModeCode,
+                categoryId: selectedCategoryId,
+                serviceId: selectedServiceId,
+                categoryPriceRuleId: resolvedCategoryPrice.id,
+                clusterId: input.clusterId,
+                durationMinutes,
+                originalSellingAmountPaise: appliedOffer.originalSellingAmountPaise,
+                discountAmountPaise: appliedOffer.discountAmountPaise,
+                finalSellingAmountPaise: appliedOffer.finalSellingAmountPaise
+            }
+        } : null,
         tipAmountPaise: requestedTipAmountPaise,
         tipDetails: {
             amountPaise: requestedTipAmountPaise,
@@ -3937,7 +4355,7 @@ export async function createCustomerPortalBooking(userId, input) {
         ? metadata.razorpayPayment
         : null;
     let paymentType = normalizeCustomerPaymentType(metadata.paymentType);
-    if (paymentType !== "razorpay" && !requestedRazorpayPayment) {
+    if (paymentAmountPaise > 0 && paymentType !== "razorpay" && !requestedRazorpayPayment) {
         const bookingReference = String(metadata.bookingReference || metadata.requestNumber || "").trim();
         const recoveredPayment = await findCustomerPaidRazorpayPaymentByReference({
             customerUserId: userId,
@@ -3952,6 +4370,12 @@ export async function createCustomerPortalBooking(userId, input) {
             metadata.paymentStatus = "paid";
             metadata.isPaid = true;
         }
+    }
+    if (paymentAmountPaise <= 0) {
+        paymentType = "cash";
+        metadata.paymentType = "cash";
+        metadata.paymentStatus = "paid";
+        metadata.isPaid = true;
     }
     if (!["cash", "razorpay"].includes(paymentType)) {
         throw new HttpError(400, "Selected payment method is not supported for booking confirmation.");
@@ -3994,16 +4418,15 @@ export async function createCustomerPortalBooking(userId, input) {
         serviceImageUrl: portalBookingText(selectedCartItem, "serviceImageUrl"),
         durationMinutes,
         basePrice: selectedBasePrice,
-        sellingPrice: selectedPrice,
-        price: selectedPrice,
-        saveAmount: Math.max(0, selectedBasePrice - selectedPrice),
+        sellingPrice: effectiveSelectedPrice,
+        price: effectiveSelectedPrice,
+        saveAmount: Math.max(0, selectedBasePrice - effectiveSelectedPrice),
         categoryPriceRuleId: resolvedCategoryPrice.id,
         durationLabel: resolvedCategoryPrice.label || portalBookingText(selectedCartItem, "durationLabel") || portalBookingText(selectedCartItem, "label"),
         allottedTime: portalBookingRecord(selectedCartItem?.allottedTime) || { enabled: true, durationMinutes },
         waitingCharge: resolvedCategoryPrice.waitingCharge
     } : selectedCartItem;
     const cleanCartItems = categoryBookingItem ? [categoryBookingItem] : [];
-    const bookingType = String(metadata.bookingType || "instant") === "schedule" ? "schedule" : "instant";
     const booking = await createBookingByAdmin({
         ...input,
         serviceId: selectedServiceId,
@@ -4014,8 +4437,8 @@ export async function createCustomerPortalBooking(userId, input) {
         metadata: {
             ...metadata,
             paymentType,
-            paymentStatus: paymentType === "razorpay" ? "paid" : String(metadata.paymentStatus || "due").toLowerCase(),
-            isPaid: paymentType === "razorpay",
+            paymentStatus: paymentAmountPaise <= 0 || paymentType === "razorpay" ? "paid" : String(metadata.paymentStatus || "due").toLowerCase(),
+            isPaid: paymentAmountPaise <= 0 || paymentType === "razorpay",
             cartItems: cleanCartItems,
             categoryBooking: categoryBookingItem,
             categoryId: selectedCategoryId,
@@ -4037,6 +4460,7 @@ export async function createCustomerPortalBooking(userId, input) {
             deliveryDistanceMeters: deliveryQuote.distanceMeters,
             deliveryDistanceKm: deliveryQuote.distanceKm,
             pricingBreakdown,
+            offerSnapshot: pricingBreakdown.offer || null,
             createdFrom: "customer_portal",
             cancelWindowMinutes: bookingType === "schedule" ? settings.customerCancelScheduleMinutes : settings.customerCancelInstantMinutes
         },
@@ -4065,6 +4489,25 @@ export async function createCustomerPortalBooking(userId, input) {
     const persistedBooking = booking?.id
         ? await getCustomerPortalBooking(userId, booking.id)
         : booking;
+    if (booking?.id && appliedOffer) {
+        await ensureOfferMasterSchema();
+        await pool.query(`insert into zigo.offer_redemption_ledger
+        (offer_id, offer_version_id, entitlement_id, booking_id, customer_id, status, benefit_type, benefit_amount_paise, idempotency_key, reason, metadata)
+       values ($1::uuid, nullif($2, '')::uuid, nullif($3, '')::uuid, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11::jsonb)
+       on conflict (idempotency_key) do nothing`, [
+            appliedOffer.id,
+            appliedOffer.currentVersionId || "",
+            appliedOffer.entitlementId || "",
+            booking.id,
+            userId,
+            paymentAmountPaise <= 0 || paymentType === "razorpay" ? "CONSUMED" : "RESERVED",
+            appliedOffer.benefitType,
+            appliedOffer.discountAmountPaise,
+            `booking:${booking.id}:offer:${appliedOffer.id}`,
+            `Applied to customer booking ${booking.id}`,
+            JSON.stringify({ offer: pricingBreakdown.offer, source: "customer_portal", entitlementId: appliedOffer.entitlementId || null })
+        ]);
+    }
     return { ...persistedBooking, invoiceEmail };
 }
 export async function quoteCustomerPortalBooking(userId, input) {
@@ -5073,6 +5516,7 @@ export async function setAssistantPortalOnline(userId, isOnline, location) {
         gpsFresh: dispatchState.gpsFresh,
         availabilityUpdatedAt: new Date().toISOString(),
         serverTime: new Date().toISOString(),
+        onlineIntent: isOnline,
         ...(point ? { latitude: point.latitude, longitude: point.longitude, gpsCapturedAt: location?.capturedAt || new Date().toISOString() } : {})
     };
 }
@@ -5224,7 +5668,8 @@ export async function confirmAssistantPortalArrival(userId, assignmentId, input)
     const reachedAt = row.reachedAt || (startEligibility.eligible ? await markAssistantReached(assignmentId, row.bookingId, startEligibility.capturedAt) : null);
     return { assignmentId, bookingId: row.bookingId, startEligibility, reachedAt };
 }
-export async function startAssistantPortalJob(userId, assignmentId) {
+export async function startAssistantPortalJob(userId, assignmentId, options = {}) {
+    const adminOverride = options.adminOverride === true;
     const settings = await getBookingEngineSetting();
     if (!settings.assistantPortal.isEnabled || !settings.assistantPortal.allowTaskExecution) {
         throw new HttpError(403, "Assistant task execution is disabled.");
@@ -5251,32 +5696,45 @@ export async function startAssistantPortalJob(userId, assignmentId) {
        join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
        left join zigo.customers cu on cu.id = sr.customer_id
        left join zigo.assistant_availability av on av.assistant_id = a.id
-       where ta.id = $1::uuid and a.user_id = $2::uuid
+       where ta.id = $1::uuid ${adminOverride ? "" : "and a.user_id = $2::uuid"}
        limit 1
-       for update of ta, sr`, [assignmentId, userId]);
+       for update of ta, sr`, adminOverride ? [assignmentId] : [assignmentId, userId]);
         const task = result.rows[0];
         if (!task)
             throw new HttpError(404, "Task not found.");
+        if (options.expectedBookingId && task.bookingId !== options.expectedBookingId) {
+            throw new HttpError(404, "Booking assignment not found.");
+        }
         if (task.acceptedAssignmentId !== assignmentId || isBookingFinalStatus(task.bookingStatus || "")) {
             throw new HttpError(409, "This task is no longer assigned to you.");
         }
         if (!["assigned", "accepted"].includes(String(task.assignmentStatus || "").toLowerCase())) {
             throw new HttpError(409, "This task is no longer waiting to start.");
         }
-        if (!["available", "online", "active", "working"].includes(String(task.availabilityStatus || "").toLowerCase())) {
-            throw new HttpError(409, "Go online with device location enabled before starting the job.");
-        }
-        const dispatchConfig = dispatchConfigFromEnv();
-        const heartbeatFresh = task.heartbeatAt
-            && Date.now() - task.heartbeatAt.getTime() <= dispatchConfig.heartbeatTimeoutSeconds * 1000;
-        const gpsFresh = task.gpsCapturedAt
-            && Date.now() - task.gpsCapturedAt.getTime() <= dispatchConfig.gpsFreshnessSeconds * 1000;
-        if (String(task.presenceStatus || "").toUpperCase() !== "ONLINE" || !heartbeatFresh || !gpsFresh) {
-            throw new HttpError(409, "Wait for live GPS sync before starting the job.");
+        if (!adminOverride) {
+            if (!["available", "online", "active", "working"].includes(String(task.availabilityStatus || "").toLowerCase())) {
+                throw new HttpError(409, "Go online with device location enabled before starting the job.");
+            }
+            const dispatchConfig = dispatchConfigFromEnv();
+            const heartbeatFresh = task.heartbeatAt
+                && Date.now() - task.heartbeatAt.getTime() <= dispatchConfig.heartbeatTimeoutSeconds * 1000;
+            const gpsFresh = task.gpsCapturedAt
+                && Date.now() - task.gpsCapturedAt.getTime() <= dispatchConfig.gpsFreshnessSeconds * 1000;
+            if (String(task.presenceStatus || "").toUpperCase() !== "ONLINE" || !heartbeatFresh || !gpsFresh) {
+                throw new HttpError(409, "Wait for live GPS sync before starting the job.");
+            }
         }
         const jobStartedAt = task.jobStartedAt || new Date().toISOString();
         if (!task.jobStartedAt) {
-            const metadata = JSON.stringify({ jobStartedAt, travelStartedAt: jobStartedAt });
+            const metadata = JSON.stringify({
+                jobStartedAt,
+                travelStartedAt: jobStartedAt,
+                ...(adminOverride ? {
+                    startSource: "admin_super_admin",
+                    startedByUserId: userId,
+                    adminOverride: true
+                } : {})
+            });
             await client.query(`update zigo.task_assignments
          set responded_at = coalesce(responded_at, now()),
              metadata = coalesce(metadata, '{}'::jsonb) || $2::jsonb
@@ -5287,7 +5745,14 @@ export async function startAssistantPortalJob(userId, assignmentId) {
          where id = $1::uuid`, [task.bookingId, jobStartedAt]);
             await client.query(`insert into zigo.booking_task_updates
           (service_request_id, task_assignment_id, actor_user_id, actor_type, update_type, message, media_urls, metadata)
-         values ($1::uuid, $2::uuid, $3::uuid, 'assistant', 'status', 'Assistant started travelling to the first stop.', '[]'::jsonb, $4::jsonb)`, [task.bookingId, assignmentId, userId, metadata]);
+         values ($1::uuid, $2::uuid, $3::uuid, $4, 'status', $5, '[]'::jsonb, $6::jsonb)`, [
+                task.bookingId,
+                assignmentId,
+                userId,
+                adminOverride ? "admin" : "assistant",
+                adminOverride ? "Super Admin started the job on behalf of the assistant." : "Assistant started travelling to the first stop.",
+                metadata
+            ]);
         }
         await client.query("commit");
         return {
@@ -5307,7 +5772,8 @@ export async function startAssistantPortalJob(userId, assignmentId) {
         client.release();
     }
 }
-export async function updateAssistantPortalTaskStatus(userId, input) {
+export async function updateAssistantPortalTaskStatus(userId, input, options = {}) {
+    const adminOverride = options.adminOverride === true;
     const [settings, assistantMasterSettings] = await Promise.all([getBookingEngineSetting(), getAssistantMasterSetting()]);
     if (!settings.assistantPortal.isEnabled || !settings.assistantPortal.allowTaskExecution)
         throw new HttpError(403, "Assistant task execution is disabled.");
@@ -5339,13 +5805,16 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
         join zigo.assistants a on a.id = ta.assistant_id
         join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
         left join zigo.customers cu on cu.id = sr.customer_id
-        where ta.id = $1 and a.user_id = $2
+        where ta.id = $1 ${adminOverride ? "" : "and a.user_id = $2"}
         limit 1
         for update of ta, sr
-      `, [input.assignmentId, userId]);
+      `, adminOverride ? [input.assignmentId] : [input.assignmentId, userId]);
         if (!assignment.rows[0])
             throw new HttpError(404, "Task not found.");
         const current = assignment.rows[0];
+        if (options.expectedBookingId && current.bookingId !== options.expectedBookingId) {
+            throw new HttpError(404, "Booking assignment not found.");
+        }
         if (current.assignmentStatus === 'offered')
             throw new HttpError(409, 'Respond to the booking offer before executing this task.');
         if (input.status === "rejected") {
@@ -5418,19 +5887,21 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
                 throw new HttpError(409, 'Task is no longer assigned to you.');
             if (!current.assignmentMetadata?.jobStartedAt)
                 throw new HttpError(409, 'Select Start Job before entering the Start PIN.');
-            await ensureAssistantLocationTrackingSchema(client);
-            const proximity = await client.query(`
-        select av.latitude, av.longitude, av.gps_captured_at as "capturedAt", p.accuracy_meters as accuracy,
-          first_stop.latitude as "stopLatitude", first_stop.longitude as "stopLongitude"
-        from zigo.assistant_availability av
-        left join lateral (select accuracy_meters from zigo.assistant_location_pings where assistant_id = av.assistant_id order by captured_at desc, created_at desc limit 1) p on true
-        left join lateral (select latitude, longitude from zigo.request_locations where service_request_id = $2 order by sequence limit 1) first_stop on true
-        where av.assistant_id = $1 and lower(av.status_code) in ('available','online','active','working')
-      `, [current.assistantId, current.bookingId]);
-            const fix = proximity.rows[0];
-            const eligibility = assistantStartEligibility(fix ? { ...portalLiveRouteCoordinate(fix), capturedAt: fix.capturedAt, accuracy: fix.accuracy == null ? null : Number(fix.accuracy) } : null, fix ? portalLiveRouteCoordinate({ latitude: fix.stopLatitude, longitude: fix.stopLongitude }) : null, Date.now(), assistantMasterSettings.autoArrivedRadiusMeters);
-            if (!eligibility.eligible)
-                throw new HttpError(409, eligibility.reason);
+            if (!adminOverride) {
+                await ensureAssistantLocationTrackingSchema(client);
+                const proximity = await client.query(`
+          select av.latitude, av.longitude, av.gps_captured_at as "capturedAt", p.accuracy_meters as accuracy,
+            first_stop.latitude as "stopLatitude", first_stop.longitude as "stopLongitude"
+          from zigo.assistant_availability av
+          left join lateral (select accuracy_meters from zigo.assistant_location_pings where assistant_id = av.assistant_id order by captured_at desc, created_at desc limit 1) p on true
+          left join lateral (select latitude, longitude from zigo.request_locations where service_request_id = $2 order by sequence limit 1) first_stop on true
+          where av.assistant_id = $1 and lower(av.status_code) in ('available','online','active','working')
+        `, [current.assistantId, current.bookingId]);
+                const fix = proximity.rows[0];
+                const eligibility = assistantStartEligibility(fix ? { ...portalLiveRouteCoordinate(fix), capturedAt: fix.capturedAt, accuracy: fix.accuracy == null ? null : Number(fix.accuracy) } : null, fix ? portalLiveRouteCoordinate({ latitude: fix.stopLatitude, longitude: fix.stopLongitude }) : null, Date.now(), assistantMasterSettings.autoArrivedRadiusMeters);
+                if (!eligibility.eligible)
+                    throw new HttpError(409, eligibility.reason);
+            }
             if (!['assigned', 'accepted'].includes(String(current.assignmentStatus).toLowerCase()) || current.actualTaskStartedAt || current.assignmentActualStartedAt)
                 throw new HttpError(409, 'Task has already started or is no longer available to start.');
             if (!/^\d{4}$/.test(suppliedPin))
@@ -5478,6 +5949,11 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
             const lateFinishMinutes = Math.max(0, Math.ceil((completedAt.getTime() - plannedTaskEndAt.getTime()) / 60_000));
             const finishMetadata = {
                 finishPinVerifiedAt: completedAt.toISOString(),
+                ...(adminOverride ? {
+                    finishSource: "admin_super_admin",
+                    finishedByUserId: userId,
+                    adminOverride: true
+                } : {}),
                 completedAt: completedAt.toISOString(),
                 plannedTaskEndAt: plannedTaskEndAt.toISOString(),
                 actualTaskEndAt: actualTaskEndAt.toISOString(),
@@ -5558,7 +6034,7 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
               risk_status = 'closed',
               supply_status = 'released',
               next_check_at = $3,
-              last_event_type = 'assistant.completed_task',
+              last_event_type = $4,
               metadata = coalesce(metadata, '{}'::jsonb) || $2::jsonb,
               updated_at = now()
           where service_request_id = $1
@@ -5570,13 +6046,22 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
                     actualTaskEndAt: actualTaskEndAt.toISOString(),
                     bookingAvailableAt: actualAvailableAt.toISOString(),
                     earlyFinishMinutes,
-                    lateFinishMinutes
-                }), actualAvailableAt]);
+                    lateFinishMinutes,
+                    executionSource: adminOverride ? "admin_super_admin" : "assistant_portal",
+                    executedByUserId: userId
+                }), actualAvailableAt, adminOverride ? "admin.completed_task" : "assistant.completed_task"]);
             await client.query(`
           insert into zigo.booking_task_updates
             (service_request_id, task_assignment_id, actor_user_id, actor_type, update_type, message, media_urls, metadata)
-          values ($1, $2, $3, 'assistant', 'status', 'Task completed.', '[]'::jsonb, $4::jsonb)
-        `, [current.bookingId, input.assignmentId, userId, JSON.stringify(finishMetadata)]);
+          values ($1, $2, $3, $4, 'status', $5, '[]'::jsonb, $6::jsonb)
+        `, [
+                current.bookingId,
+                input.assignmentId,
+                userId,
+                adminOverride ? "admin" : "assistant",
+                adminOverride ? "Task completed by Super Admin on behalf of the assistant." : "Task completed.",
+                JSON.stringify(finishMetadata)
+            ]);
             await setAssistantAvailabilityForPortalTask(client, current.assistantId, "completed");
             await client.query("commit");
             return {
@@ -5659,6 +6144,11 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
                 wrapUpMinutes: Math.max(0, Math.round(Number(current.wrapUpMinutes ?? current.bookingMetadata?.wrapUpMinutes ?? current.assignmentMetadata?.wrapUpMinutes ?? 0))),
                 travelBufferMinutes: Math.max(0, Math.round(Number(current.travelBufferMinutes ?? current.bookingMetadata?.travelBufferMinutes ?? current.assignmentMetadata?.travelBufferMinutes ?? 0))),
                 timerStatus: "running",
+                ...(adminOverride ? {
+                    executionSource: "admin_super_admin",
+                    executedByUserId: userId,
+                    adminOverride: true
+                } : {}),
                 taskPins: {
                     ...mergedPins,
                     finishPin: finishPinForStart,
@@ -5764,7 +6254,7 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
           set supply_status = 'working',
               risk_status = case when $2::int > 0 then 'delayed' else risk_status end,
               next_check_at = $3,
-              last_event_type = 'assistant.started_task',
+              last_event_type = $5,
               metadata = coalesce(metadata, '{}'::jsonb) || $4::jsonb,
               updated_at = now()
           where service_request_id = $1
@@ -5780,15 +6270,18 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
                     startDelayMinutes: delayMinutes,
                     delayCreditMinutes,
                     taskEndAt: extendedTaskEndAt.toISOString(),
-                    bookingAvailableAt: extendedAvailableAt.toISOString()
-                })
+                    bookingAvailableAt: extendedAvailableAt.toISOString(),
+                    executionSource: adminOverride ? "admin_super_admin" : "assistant_portal",
+                    executedByUserId: userId
+                }),
+                adminOverride ? "admin.started_task" : "assistant.started_task"
             ]);
             if (!wasAlreadyStarted) {
                 await client.query(`
             insert into zigo.assistant_delay_credits
               (service_request_id, task_assignment_id, assistant_id, planned_start_at, actual_started_at,
                delay_minutes, credited_minutes, source, metadata, created_by_user_id)
-            values ($1, $2, $3, $4, $5, $6, $7, 'assistant_start', $8::jsonb, $9)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
             on conflict (task_assignment_id) do nothing
           `, [
                     current.bookingId,
@@ -5798,22 +6291,28 @@ export async function updateAssistantPortalTaskStatus(userId, input) {
                     actualStartedAt,
                     delayMinutes,
                     delayCreditMinutes,
+                    adminOverride ? "admin_force_start" : "assistant_start",
                     JSON.stringify({
                         taskEndAt: extendedTaskEndAt.toISOString(),
                         bookingAvailableAt: extendedAvailableAt.toISOString(),
-                        expectedFreeAt: extendedAvailableAt.toISOString()
+                        expectedFreeAt: extendedAvailableAt.toISOString(),
+                        executionSource: adminOverride ? "admin_super_admin" : "assistant_portal",
+                        executedByUserId: userId
                     }),
                     userId
                 ]);
                 await client.query(`
             insert into zigo.booking_task_updates
               (service_request_id, task_assignment_id, actor_user_id, actor_type, update_type, message, media_urls, metadata)
-            values ($1, $2, $3, 'assistant', 'status', $4, '[]'::jsonb, $5::jsonb)
+            values ($1, $2, $3, $4, 'status', $5, '[]'::jsonb, $6::jsonb)
           `, [
                     current.bookingId,
                     input.assignmentId,
                     userId,
-                    delayMinutes > 0 ? `Task started with ${delayMinutes} minute delay.` : "Task started.",
+                    adminOverride ? "admin" : "assistant",
+                    adminOverride
+                        ? (delayMinutes > 0 ? `Task started by Super Admin with ${delayMinutes} minute delay.` : "Task started by Super Admin on behalf of the assistant.")
+                        : (delayMinutes > 0 ? `Task started with ${delayMinutes} minute delay.` : "Task started."),
                     JSON.stringify(statusMetadata)
                 ]);
             }
@@ -5951,7 +6450,10 @@ export async function createPortalTaskUpdate(input) {
     }
     const relation = input.actor === "customer"
         ? await pool.query(`
-        select cu.user_id as "customerUserId", a.id as "assistantId"
+        select cu.user_id as "customerUserId", a.id as "assistantId",
+          sr.status_code as "bookingStatus", ta.status_code as "assignmentStatus",
+          coalesce(sr.metadata, '{}'::jsonb) as "bookingMetadata",
+          coalesce(ta.metadata, '{}'::jsonb) as "assignmentMetadata"
         from zigo.customers cu
         join zigo.service_requests sr on sr.customer_id = cu.id
         left join zigo.task_assignments ta on ta.id = coalesce($3::uuid, sr.accepted_assignment_id)
@@ -5960,7 +6462,10 @@ export async function createPortalTaskUpdate(input) {
         limit 1
       `, [input.userId, input.bookingId, input.assignmentId ?? null])
         : await pool.query(`
-        select cu.user_id as "customerUserId", a.id as "assistantId"
+        select cu.user_id as "customerUserId", a.id as "assistantId",
+          sr.status_code as "bookingStatus", ta.status_code as "assignmentStatus",
+          coalesce(sr.metadata, '{}'::jsonb) as "bookingMetadata",
+          coalesce(ta.metadata, '{}'::jsonb) as "assignmentMetadata"
         from zigo.assistants a
         join zigo.task_assignments ta on ta.assistant_id = a.id
         join zigo.service_requests sr on sr.id = coalesce(ta.service_request_id, ta.request_id)
@@ -5971,6 +6476,24 @@ export async function createPortalTaskUpdate(input) {
       `, [input.userId, input.bookingId, input.assignmentId ?? null]);
     if (!relation.rows[0])
         throw new HttpError(403, "This booking is not linked with your account.");
+    const relationRow = relation.rows[0];
+    if (isBookingFinalStatus(relationRow.bookingStatus) || isBookingFinalStatus(relationRow.assignmentStatus)) {
+        throw new HttpError(409, "Chat is closed because this booking is no longer active.");
+    }
+    if (input.actor === "customer" && !relationRow.assistantId) {
+        throw new HttpError(409, "Chat will open after an assistant is assigned.");
+    }
+    if (input.actor === "assistant") {
+        const bookingMetadata = relationRow.bookingMetadata || {};
+        const assignmentMetadata = relationRow.assignmentMetadata || {};
+        const jobStarted = Boolean(assignmentMetadata.jobStartedAt
+            || assignmentMetadata.travelStartedAt
+            || bookingMetadata.assistantJobStartedAt
+            || ["in_progress", "working", "approval_pending"].includes(String(relationRow.assignmentStatus || "").toLowerCase())
+            || ["in_progress", "working", "approval_pending"].includes(String(relationRow.bookingStatus || "").toLowerCase()));
+        if (!jobStarted)
+            throw new HttpError(409, "Start Job before opening chat.");
+    }
     const result = await pool.query(`
       insert into zigo.booking_task_updates
         (service_request_id, task_assignment_id, actor_user_id, actor_type, update_type, message, media_urls, metadata)
